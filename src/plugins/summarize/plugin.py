@@ -1311,7 +1311,7 @@ def _merge_logs(
                 start,
                 1,
                 index,
-                f"[{_fmt_clock(start)}–{_fmt_clock(end)}] 板书：\n{text}",
+                f"[{_fmt_clock(start)} - {_fmt_clock(end)}] 板书：\n{text}",
             )
         )
     if not entries:
@@ -1343,7 +1343,7 @@ def _collect_material(streams: Any) -> str:
             end = float(end_value) if end_value is not None else (start or 0.0)
         except (TypeError, ValueError):
             end = start or 0.0
-        stamp = f"[{_fmt_clock(start or 0.0)}–{_fmt_clock(end)}]"
+        stamp = f"[{_fmt_clock(start or 0.0)} - {_fmt_clock(end)}]"
         entries.append((start or 0.0, offset + order, f"{stamp} 板书：\n{text}"))
 
     if not entries:

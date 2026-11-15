@@ -94,7 +94,7 @@ def test_build_tree_course_and_class_nodes() -> None:
     assert maths["expanded"] is False
     assert len(maths["children"]) == 1
     child = maths["children"][0]
-    assert child["label"] == "11-05 08:00–09:35"
+    assert child["label"] == "11-05 08:00-09:35"
     assert "2 节" in child["subtitle"]
     value = child["action"]["value"]
     assert value["kind"] == "recording"
@@ -249,3 +249,20 @@ def test_a_recorded_part_does_not_hide_the_remaining_live_part() -> None:
     assert len(live_children) == 1
     assert live_children[0]["action"]["value"]["live_id"] == "L10"
     assert live_children[0]["action"]["value"]["parts"] == 1
+
+
+def test_recording_overlap_preserves_both_parts() -> None:
+    recordings = [
+        _rec("a", "2026-11-05 08:00:00", "2026-11-05 08:50:00"),
+        _rec("b", "2026-11-05 08:49:00", "2026-11-05 09:40:00"),
+    ]
+    groups = merge_periods(recordings)
+    assert len(groups) == 1
+    assert groups[0]["parts"] == recordings
+    nodes = build_tree(COURSES, {"1": recordings, "2": []}, [])
+    value = nodes[0]["children"][0]["action"]["value"]
+    assert value["videos"] == ["a", "b"]
+    assert value["recording_parts"] == [
+        {key: part[key] for key in ("video_id", "begin", "end")}
+        for part in recordings
+    ]

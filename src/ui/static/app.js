@@ -49,7 +49,7 @@
     return m > 0 ? `${m}m ${s.toString().padStart(2, "0")}s` : `${s}s`;
   };
 
-  const shortId = (id) => (id ? String(id).slice(0, 18) : "—");
+  const shortId = (id) => (id ? String(id).slice(0, 18) : "-");
 
   function toast(message, kind = "") {
     if (!message) return;
@@ -379,7 +379,7 @@
         const status = el("div", {
           class: `form-status ${field.is_set ? "ok" : ""}`,
           text: field.is_set
-            ? `已配置 · ${field.secret_length || "?"} 字符；真实值不会回传前端`
+            ? `已配置，${field.secret_length || "?"} 字符；真实值不会回传前端`
             : "未配置",
         });
         const line = el("div", { class: "form-inline" }, [status]);
@@ -555,8 +555,8 @@
 
     const stateText = () => {
       if (finished) return "已结束";
-      if (block.queued) return live ? "直播 · 排队中" : "排队中";
-      if (live) return processing ? "直播 · 处理中" : "直播 · 已暂停处理";
+      if (block.queued) return live ? "直播，排队中" : "排队中";
+      if (live) return processing ? "直播，处理中" : "直播，已暂停处理";
       return processing ? "处理中" : "已暂停";
     };
     const stateEl = el("span", { class: "player-state", text: stateText() });
@@ -824,7 +824,7 @@
       const phase = node.querySelector(".qa-live-phase");
       if (phase && payload.phase) {
         const text = _QA_PHASES[payload.phase] || payload.phase;
-        phase.textContent = payload.elapsed ? `${text} · ${payload.elapsed}s` : text;
+        phase.textContent = payload.elapsed ? `${text}, ${payload.elapsed}s` : text;
       }
       if (Array.isArray(payload.tools)) renderQaTools(node, payload.tools);
       if (payload.reasoning_delta) {

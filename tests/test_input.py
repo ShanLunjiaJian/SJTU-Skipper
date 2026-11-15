@@ -17,6 +17,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
+from queue import Queue
 from typing import Any, Callable
 from unittest import mock
 
@@ -49,6 +50,12 @@ from plugins.input.tree import next_boundary
 from tests.support import FakeSettings
 
 _log = logging.getLogger(__name__)
+
+
+@pytest.fixture(autouse=True)
+def _disable_media_probe(monkeypatch):
+    # Unit tests use synthetic files and subprocesses, not decodable media.
+    monkeypatch.setattr("plugins.input.sources.probe_duration", lambda path: None)
 
 
 class FakeSource:
@@ -179,6 +186,45 @@ def _make_context(data_dir: Any = None) -> PluginContext:
     )
 
 
+def _start_recording_job(ctx, plugin, monkeypatch, *, videos=("v1", "v2")):
+    """Start a queued recording without external media processes."""
+    started = Queue()
+    monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+    monkeypatch.setattr(
+        plugin._catalog, "get_recording_streams",
+        lambda course_id, video_id: {"1": f"https://example.com/{video_id}.mp4"},
+    )
+
+    def start_source(spec):
+        meta = {**spec.meta, **spec.course, "kind": spec.kind}
+        if spec.continue_session:
+            ctx.streams.current.meta.update(meta)
+        else:
+            ctx.streams.start_session(meta=meta)
+        ctx.events.emit(
+            "input.status", status="playing",
+            session_id=ctx.streams.current.session_id,
+        )
+        started.put(spec)
+
+    monkeypatch.setattr(plugin, "_start_source", start_source)
+    opened = ctx.ui.dispatch_action("input.open_class", {
+        "id": "class:1:recording", "kind": "recording", "course": "1",
+        "name": "高等数学", "label": "11-05 08:00-09:35",
+        "videos": list(videos),
+    })
+    assert opened.ok
+    result = ctx.ui.dispatch_action("input.start_processing", {})
+    assert result.ok
+    first = started.get(timeout=5.0)
+    assert ctx.events.flush()
+    job = plugin._active_job
+    assert job is not None
+    assert job.state == "running"
+    assert job.session_id == ctx.streams.current.session_id
+    return job, ctx.streams.current, first, started
+
+
 def _fake_jpeg() -> bytes:
     """A minimal valid JPEG (1x1 gray)."""
     return (
@@ -260,7 +306,7 @@ class TestJPEGSplitter:
         assert split_jpeg_frames(b"") == []
 
     def test_soi_no_eoi(self):
-        """SOI present but no following EOI — no frame returned."""
+        """SOI present but no following EOI: no frame returned."""
         jpeg = _fake_jpeg()
         soi = jpeg[:10]  # contains SOI but not EOI
         frames = split_jpeg_frames(soi)
@@ -1298,7 +1344,7 @@ class TestClassPlayer:
             "kind": kind,
             "course": "1",
             "name": "高等数学",
-            "label": "11-05 08:00–09:35",
+            "label": "11-05 08:00-09:35",
             "videos": list(videos),
         }
         if kind == "live":
@@ -1468,35 +1514,50 @@ class TestClassPlayer:
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
-        self._open_class(ctx, plugin)
-        plugin._processing = True
-        resolved: list[bool] = []
-        monkeypatch.setattr(
-            plugin, "_resolve_class_streams", lambda: resolved.append(True)
-        )
+        try:
+            job, session, first, started = _start_recording_job(ctx, plugin, monkeypatch)
+            assert first.course["video_id"] == "v1"
+            assert first.final_part is False
+            assert first.next_source.url == "https://example.com/v2.mp4"
 
-        plugin._on_class_ended()
-        assert plugin._class_index == 1
-        assert plugin._want_processing is True
-
-        plugin.teardown()
+            plugin._on_class_ended()
+            second = started.get(timeout=5.0)
+            assert plugin._class_index == 1
+            assert plugin._want_processing is True
+            assert job.index == 1
+            assert plugin._active_job is job
+            assert second.course["video_id"] == "v2"
+            assert second.continue_session is True
+            assert second.final_part is True
+            assert ctx.streams.current is session
+            assert session.ended_at is None
+        finally:
+            plugin.teardown()
 
     def test_last_period_ends_the_session(self, monkeypatch):
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
-        self._open_class(ctx, plugin, videos=("v1",))
-        plugin._processing = True
-        monkeypatch.setattr(plugin._sources, "stop", lambda: None)
-        session = ctx.streams.start_session(meta={"course_name": "高等数学"})
+        try:
+            job, session, first, _started = _start_recording_job(
+                ctx, plugin, monkeypatch, videos=("v1",),
+            )
+            assert first.final_part is True
+            assert first.next_source is None
+            wait = mock.Mock(wraps=plugin._wait_for_consumers)
+            monkeypatch.setattr(plugin, "_wait_for_consumers", wait)
 
-        plugin._on_class_ended()
-        assert plugin._class_finished is True
-        assert plugin._processing is False
-        assert session.ended_at is not None
-        assert session.end_reason == "playback finished"
-
-        plugin.teardown()
+            plugin._on_class_ended()
+            assert plugin._class_finished is True
+            assert plugin._processing is False
+            assert session.ended_at is not None
+            assert session.end_reason == "playback finished"
+            assert job.state == "done"
+            assert job.session_id == session.session_id
+            assert plugin._active_job is None
+            wait.assert_called_once_with()
+        finally:
+            plugin.teardown()
 
     def test_input_ended_event_advances(self, monkeypatch):
         from types import SimpleNamespace
@@ -1556,7 +1617,7 @@ class TestClassPlayer:
         plugin.setup(ctx)
         self._open_class(ctx, plugin)
         advanced: list[bool] = []
-        monkeypatch.setattr(plugin, "_finish_class", lambda: advanced.append(True))
+        monkeypatch.setattr(plugin, "_end_fill_or_playback", lambda: advanced.append(True))
 
         plugin._on_class_ended()
         assert plugin._class_index == 0
@@ -1829,6 +1890,57 @@ class TestProcessingQueue:
         assert child["badge"] == "处理中"
         plugin.teardown()
 
+    def test_background_multipart_keeps_duration_and_selected_context(self, monkeypatch):
+        ctx, plugin, _unused = self._setup(monkeypatch)
+        try:
+            job, session, first, started = _start_recording_job(ctx, plugin, monkeypatch)
+            assert first.next_source.url == "https://example.com/v2.mp4"
+            self._open(ctx, plugin, "class:b", "线性代数")
+            plugin._class_streams = {"main": "https://example.com/b.mp4"}
+            plugin._streams_loading = False
+            assert ctx.ui.dispatch_action("input.start_processing", {}).ok
+            selected = plugin._jobs["class:b"]
+            assert selected.state == "queued"
+
+            for video_id, duration in (("v1", 3039.0), ("v2", 3287.0)):
+                ctx.events.emit(
+                    "input.prepared", video_id=video_id, duration=duration,
+                    session_id=session.session_id,
+                )
+            assert ctx.events.flush()
+            assert job.part_durations == {"v1": 3039.0, "v2": 3287.0}
+            assert job.total_seconds == 6326.0
+            assert selected.part_durations == {}
+            assert selected.total_seconds == plugin._total_seconds == 0.0
+            assert plugin._part_durations == {}
+
+            wait = mock.Mock(side_effect=AssertionError("drained between parts"))
+            monkeypatch.setattr(plugin, "_wait_for_consumers", wait)
+            plugin._on_class_ended()
+            second = started.get(timeout=5.0)
+            assert second.url == first.next_source.url
+            assert second.continue_session is True
+            assert job.index == 1
+            assert job.total_seconds == 6326.0
+            assert plugin._active_job is job
+            assert plugin._queue == [selected.id]
+            assert plugin._current_class["id"] == selected.id
+            assert plugin._class_index == selected.index == 0
+            assert plugin._class_streams == selected.streams == {
+                "main": "https://example.com/b.mp4",
+            }
+            assert ctx.streams.current is session
+            assert session.ended_at is None
+            assert not session.input_done
+            wait.assert_not_called()
+            context = ctx.ui.state()["context"]
+            assert context["title"] == "线性代数"
+            assert "后台处理 高等数学" in context["subtitle"]
+            assert context["selected"] is True
+            assert not [b for b in plugin._render_session() if b["type"] == "progress"]
+        finally:
+            plugin.teardown()
+
 
 @pytest.mark.parametrize("kind", ["recording", "live"])
 def test_manual_source_combines_audio_transport_and_video_consumer_gates(monkeypatch, kind) -> None:
@@ -2005,3 +2117,158 @@ def test_file_eof_completes_both_readers_without_reconnect() -> None:
     assert events.count("input.ended") == 1
     source._restart_audio_process.assert_not_called()
     source._restart_video_process.assert_not_called()
+
+
+def test_multipart_progress_uses_full_duration(tmp_path, monkeypatch) -> None:
+    ctx = _make_context(tmp_path)
+    plugin = InputPlugin()
+    plugin.setup(ctx)
+    try:
+        job, session, _first, _started = _start_recording_job(ctx, plugin, monkeypatch)
+        cursors = {"audio": 6326.0, "video": 6000.0}
+        for name, kind in (("stt", "audio"), ("vlm", "video")):
+            ctx.streams.register_consumer(
+                name, kind, cursor_fn=lambda kind=kind: cursors[kind],
+            )
+        ctx.events.emit(
+            "input.prepared", video_id="v1", duration=3039.0,
+            session_id=session.session_id,
+        )
+        assert ctx.events.flush()
+        assert job.part_durations == {"v1": 3039.0}
+        assert plugin._total_seconds == 0.0
+        assert job.total_seconds == 0.0
+        blocks = plugin._render_session()
+        progress = next(b for b in blocks if b["type"] == "progress")
+        assert progress["label"] == "正在处理 1:40:00 / …"
+        assert progress["value"] == 0.0
+
+        ctx.events.emit(
+            "input.prepared", video_id="v2", duration=3287.0,
+            session_id=session.session_id,
+        )
+        assert ctx.events.flush()
+        assert plugin._total_seconds == 6326.0
+        assert job.total_seconds == 6326.0
+        ctx.events.emit(
+            "input.download", status="progress", total=10, received=5,
+            session_id=session.session_id,
+        )
+        assert ctx.events.flush()
+        blocks = plugin._render_session()
+        progress = [b for b in blocks if b["type"] == "progress"]
+        assert len(progress) == 2, "prefetch must not hide analysis progress"
+        assert progress[1]["label"] == "正在处理 1:40:00 / 1:45:26"
+        assert progress[1]["value"] == pytest.approx(6000 / 6326)
+    finally:
+        plugin.teardown()
+
+
+def test_part_transition_does_not_drain_consumers(tmp_path, monkeypatch) -> None:
+    ctx = _make_context(tmp_path)
+    plugin = InputPlugin()
+    plugin.setup(ctx)
+    try:
+        job, session, first, started = _start_recording_job(ctx, plugin, monkeypatch)
+        assert first.next_source.url == "https://example.com/v2.mp4"
+        wait = mock.Mock(side_effect=AssertionError("drained between parts"))
+        monkeypatch.setattr(plugin, "_wait_for_consumers", wait)
+
+        plugin._on_class_ended()
+        second = started.get(timeout=5.0)
+        assert plugin._class_index == 1
+        assert plugin._class_streams == {"main": "https://example.com/v2.mp4"}
+        assert job.index == 1
+        assert plugin._active_job is job
+        assert second.url == first.next_source.url
+        assert second.continue_session is True
+        assert ctx.streams.current is session
+        assert session.ended_at is None
+        assert not session.input_done
+        wait.assert_not_called()
+    finally:
+        plugin.teardown()
+
+
+def test_prefetch_and_continuous_audio(tmp_path, monkeypatch) -> None:
+    import plugins.input.sources as sources
+    from plugins.input.download import DownloadResult
+    from plugins.stt.plugin import STTPlugin
+
+    download_started = threading.Event()
+    allow_download = threading.Event()
+    downloaded = []
+
+    class Downloader:
+        def download(self, url, dest, *, stop_event=None, on_progress=None):
+            downloaded.append(url)
+            if "part2" in url:
+                download_started.set()
+                assert allow_download.wait(2.0)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"media")
+            return DownloadResult(path=dest, total=5, ok=True)
+
+    monkeypatch.setattr(sources, "probe_duration", lambda path: 0.2)
+    monkeypatch.setattr(sources.subprocess, "Popen", lambda *a, **kw: mock.Mock())
+    monkeypatch.setattr(sources.FFmpegSource, "_read_audio", lambda self: None)
+    monkeypatch.setattr(sources.FFmpegSource, "_read_video", lambda self: None)
+    events = []
+    hub = StreamHub(emit=lambda name, **data: events.append(name))
+    session_start_count = events.count("session.started")
+    mgr = SourceManager(hub=hub, emit=lambda *a, **kw: None, media_root=tmp_path, downloader=Downloader())
+    second = SourceSpec(
+        kind="recording", url="https://example.com/part2/record.mp4", download=True,
+        realtime=False, continue_session=True, course={"video_id": "v2"},
+    )
+    first = SourceSpec(
+        kind="recording", url="https://example.com/part1/record.mp4", download=True,
+        realtime=False, final_part=False, next_source=second, course={"video_id": "v1"},
+    )
+    try:
+        mgr.start(first)
+        session = hub.current
+        source1 = mgr._current
+        assert download_started.wait(2.0)
+        assert source1.running and not source1.finished
+        session.audio.append(b"\x01\x02" * 3200)
+        session.audio_gate.release(0.1)
+        source1._mark_reader_done("audio")
+        source1._mark_reader_done("video")
+        assert not session.input_done
+        assert not STTPlugin._finished(session)
+        assert session.audio_gate.wait(0.2)
+
+        allow_download.set()
+        mgr.start(second)
+        assert hub.current is session
+        assert session.audio_gate.released == 0.1
+        source2 = mgr._current
+        assert source2._audio_offset == pytest.approx(0.2)
+        session.audio.append(b"\x03\x04" * 3200)
+        source2._mark_reader_done("audio")
+        source2._mark_reader_done("video")
+        assert session.input_done and STTPlugin._finished(session)
+        assert session.audio.read(0, 0.4) == b"\x01\x02" * 3200 + b"\x03\x04" * 3200
+        assert session.audio.buffered_ranges() == [(0.0, 0.4)]
+        assert [part["offset"] for part in session.meta["media_parts"]] == pytest.approx([0.0, 0.2])
+        assert len(set(part["path"] for part in session.meta["media_parts"])) == 2
+        assert downloaded.count(first.url) == downloaded.count(second.url) == 1
+        assert events.count("session.started") == session_start_count + 1
+        assert "session.stopped" not in events
+    finally:
+        allow_download.set()
+        mgr.stop()
+
+
+def test_canceled_prefetch_does_not_restart_download(monkeypatch) -> None:
+    from plugins.input.sources import FFmpegSource
+
+    source = FFmpegSource(SourceSpec(kind="recording", url="test"), hub=StreamHub(), emit=lambda *a, **kw: None)
+    source._prepare_done = threading.Event()
+    source._prepare_done.set()
+    source.prepare = mock.Mock(side_effect=AssertionError("download restarted after cancel"))
+    source.stop()
+    source.start()
+    assert not source.running
+    source.prepare.assert_not_called()

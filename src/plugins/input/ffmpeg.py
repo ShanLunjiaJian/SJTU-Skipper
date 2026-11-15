@@ -43,7 +43,7 @@ def split_jpeg_frames(data: bytes) -> list[bytes]:
         # Look for EOI after this SOI
         eoi_pos = data.find(_EOI, soi_pos + 2)
         if eoi_pos < 0:
-            # No EOI found — trailing incomplete frame, stop here
+            # No EOI found: stop at the incomplete tail.
             break
         # Valid frame: SOI .. EOI inclusive
         frames.append(data[soi_pos : eoi_pos + 2])
@@ -58,7 +58,7 @@ def iter_jpeg_frames(data: bytes) -> list[bytes]:
 
 
 def has_complete_frame(data: bytes) -> bool:
-    """Return True if *data* contains at least one SOI–EOI pair."""
+    """Return True if *data* contains at least one SOI-EOI pair."""
     soi = data.find(_SOI)
     if soi < 0:
         return False

@@ -329,6 +329,7 @@ video { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); }
 .status-item:last-child { border-right: 0; padding-right: 0; }
 .status-item > span:not(.dot) { color: var(--muted); }
 .status-item b { font-variant-numeric: tabular-nums; }
+.statusbar a:any-link { color: var(--accent); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
 .dot.ok { background: var(--ok); box-shadow: 0 0 8px rgba(63,185,80,.6); }
 .dot.err { background: var(--err); }

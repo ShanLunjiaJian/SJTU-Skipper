@@ -604,17 +604,17 @@ class STTPlugin(Plugin):
     def _render_page(self) -> list[dict[str, Any]]:
         status = self.status()
         blocks = [{"type": "keyvalue", "items": [
-            ["状态", status["state"]], ["服务", status["server_url"]], ["模型", status["model"] or "—"],
+            ["状态", status["state"]], ["服务", status["server_url"]], ["模型", status["model"] or "未提供"],
             ["会话", status["session_id"]], ["已发送", f"{status['sent_cursor']:.3f} s"],
             ["已接收", f"{status['received_cursor']:.3f} s"], ["连续完成", f"{status['cursor']:.3f} s"],
             ["未覆盖", f"{status['uncovered_seconds']:.3f} s"], ["失败范围", str(status["failed_ranges"])],
-            ["识别标记", str(status["anomalies"])], ["错误", status["error"] or "—"],
+            ["识别标记", str(status["anomalies"])], ["错误", status["error"] or "无"],
         ]}]
         if status["partial"] is not None:
             blocks.append({"type": "markdown", "text": "**临时文字**\n\n" + status["partial"]["text"]})
         items = [i for i in self._ctx.streams.current.transcript.items_since(0) if i.source == "stt"][-30:]
         for item in items:
-            blocks.append({"type": "markdown", "text": f"**{_fmt_time(item.start)}–{_fmt_time(item.end)}**\n\n{item.text}"})
+            blocks.append({"type": "markdown", "text": f"**{_fmt_time(item.start)} - {_fmt_time(item.end)}**\n\n{item.text}"})
         if not items and status["partial"] is None:
             blocks.append({"type": "text", "text": "暂无转写结果．开始音频输入后，定稿会显示在这里．"})
         blocks.append({"type": "buttons", "buttons": [{"label": "打开设置", "action": "ui.open_page", "value": {"page_id": "settings:main"}, "class": "btn btn-sm"}]})

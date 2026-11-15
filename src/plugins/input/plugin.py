@@ -22,7 +22,6 @@ from core.plugin import Plugin, PluginContext
 from core.settings_spec import SettingsSpec
 from integrations.sjtu_canvas import InputError
 from .catalog import Catalog
-from .ffmpeg import probe_duration
 from .sources import SourceManager, SourceSpec
 from .tree import build_tree, live_state, local_time, next_boundary, parse_time
 
@@ -81,6 +80,8 @@ class _Job:
     session_id: str = ""
     session_meta: dict[str, Any] = field(default_factory=dict)
     total_seconds: float = 0.0
+    part_durations: dict[str, float] = field(default_factory=dict)
+    recording_streams: dict[str, dict[str, str]] = field(default_factory=dict)
     started: float = 0.0
     finished_at: float = 0.0
     message: str = ""
@@ -247,6 +248,8 @@ class InputPlugin(Plugin):
         self._class_finished = False
         self._download: dict[str, Any] = {}
         self._total_seconds = 0.0
+        self._part_durations: dict[str, float] = {}
+        self._recording_streams: dict[str, dict[str, str]] = {}
         self._processing_started = 0.0
         self._class_sessions: dict[str, dict[str, Any]] = {}
         self._class_session_meta: dict[str, Any] = {}
@@ -312,6 +315,7 @@ class InputPlugin(Plugin):
         ctx.events.on("input.status", self._on_input_event, plugin_id=self.id)
         ctx.events.on("input.download", self._on_input_event, plugin_id=self.id)
         ctx.events.on("input.error", self._on_input_event, plugin_id=self.id)
+        ctx.events.on("input.prepared", self._on_input_event, plugin_id=self.id)
         ctx.events.on("input.ended", self._on_input_event, plugin_id=self.id)
         ctx.events.on("settings.changed", self._on_settings_changed, plugin_id=self.id)
 
@@ -365,6 +369,22 @@ class InputPlugin(Plugin):
                 pass
 
     def _on_input_event(self, event: Any) -> None:
+        session_id = str(event.get("session_id", "") or "")
+        if session_id and session_id != self._ctx.streams.current.session_id:
+            return
+        if session_id:
+            with self._class_lock:
+                job = self._active_job
+                if job is not None:
+                    job.session_id = session_id
+                    job.session_meta = dict(self._ctx.streams.current.meta)
+        if event.type == "input.prepared":
+            self._record_part_duration(
+                str(event.get("video_id", "") or ""),
+                float(event.get("duration", 0.0) or 0.0),
+            )
+            self._ctx.ui.refresh("input.prepared")
+            return
         if event.type == "input.download":
             status = str(event.get("status", ""))
             with self._class_lock:
@@ -380,7 +400,11 @@ class InputPlugin(Plugin):
             self._pending_message = ""
             self._last_error = str(event.get("message", "") or "输入源错误")
         elif event.type == "input.ended":
-            _log.info("input.ended received; draining consumers")
+            self._record_part_duration(
+                str(event.get("video_id", "") or ""),
+                float(event.get("duration", 0.0) or 0.0),
+            )
+            _log.info("input.ended received")
             threading.Thread(target=self._on_class_ended, daemon=True).start()
         elif event.type == "input.status":
             status = str(event.get("status", ""))
@@ -808,6 +832,7 @@ class InputPlugin(Plugin):
             download=not url.startswith(("file://", "/")),
             audio_gate_limit=self._audio_gate_limit(),
             video_gate_limit=self._gate_limit("video"),
+            final_part=not self._fill_queue,
             meta={
                 "fill_for": self._fill_target,
                 # The first part's wall-clock start maps the whole fill session
@@ -1297,7 +1322,7 @@ class InputPlugin(Plugin):
             }.get(job_state, job_state)
         elif finished:
             state_label = "已结束"
-        elif job is None and self._processing:
+        elif job is None and self._active_job is None and self._processing:
             state_label = "处理中"
         elif loading:
             state_label = "准备中"
@@ -1305,8 +1330,8 @@ class InputPlugin(Plugin):
             state_label = "未开始"
 
         items = [
-            ["课程", str(cls.get("name", "") or "—")],
-            ["节次", str(cls.get("label", "") or "—")],
+            ["课程", str(cls.get("name", "") or "未选择")],
+            ["节次", str(cls.get("label", "") or "未选择")],
             ["进度", f"第 {job_index + 1}/{parts} 节" if parts > 1 else "单节"],
             ["状态", state_label],
         ]
@@ -1528,14 +1553,14 @@ class InputPlugin(Plugin):
             cls = dict(self._current_class) if self._current_class else None
             job = self._selected_job_locked()
             active = (job is not None and self._active_job is job) or (
-                job is None and self._processing
+                job is None and self._active_job is None and self._processing
             )
             index = job.index if job is not None else self._class_index
             streams = dict(job.streams) if job is not None and job.streams else dict(self._class_streams)
             loading = (job.streams_loading if job is not None else self._streams_loading)
             error = (job.error if job is not None else self._streams_error)
             job_state = job.state if job is not None else ""
-            processing = (job is None and self._processing) or (
+            processing = (job is None and active and self._processing) or (
                 active and job_state in {_JOB_RUNNING, _JOB_PREPARING}
             )
             paused = active and job_state == _JOB_PAUSED
@@ -1563,9 +1588,9 @@ class InputPlugin(Plugin):
         live = cls.get("kind") == "live"
         title = str(cls.get("label", "") or cls.get("name", "") or "课堂")
         name = str(cls.get("name", "") or "")
-        heading = f"### {name} · {title}" if name else f"### {title}"
+        heading = f"### {name} {title}" if name else f"### {title}"
         if parts > 1:
-            heading += f" · 第 {index + 1}/{parts} 节"
+            heading += f" 第 {index + 1}/{parts} 节"
         heading += "  `直播`" if live else "  `录播`"
         blocks: list[dict[str, Any]] = [{"type": "markdown", "text": heading}]
 
@@ -1707,7 +1732,6 @@ class InputPlugin(Plugin):
                 }
             )
             blocks.append({"type": "text", "text": f"正在下载：{pct}"})
-            return blocks
         if status == "failed":
             blocks.append(
                 {
@@ -1723,8 +1747,7 @@ class InputPlugin(Plugin):
         )
         if show_progress:
             consumed = self._consumed_seconds()
-            denom = total_seconds if total_seconds > 0 else max(ingested, consumed, 1.0)
-            value = min(1.0, max(0.0, consumed / denom)) if denom else 0.0
+            value = max(0.0, consumed / total_seconds) if total_seconds > 0 else 0.0
             processed_label = (
                 f"{_fmt_clock(consumed)} / {_fmt_clock(total_seconds) if total_seconds else '…'}"
             )
@@ -1823,12 +1846,7 @@ class InputPlugin(Plugin):
         return blocks
 
     def _consumer_cursor(self, kind: str) -> float:
-        """How far the ``kind`` media consumers have committed.
-
-        ``"stt"``/``"vlm"`` are accepted for readability and mapped to their
-        stream (``audio``/``video``).  The hub answers, so this works even when
-        the consumer plugin is not loaded.
-        """
+        """Return the committed position of the registered media consumers."""
 
         ctx = self._ctx
         hub = ctx.streams if ctx is not None else None
@@ -1840,8 +1858,9 @@ class InputPlugin(Plugin):
             return 0.0
 
     def _consumed_seconds(self) -> float:
-        cursors = [self._consumer_cursor(kind) for kind in ("audio", "video")]
-        return max(cursors) if cursors else 0.0
+        kinds = {consumer["kind"] for consumer in self._ctx.streams.consumers()}
+        cursors = [self._consumer_cursor(kind) for kind in kinds]
+        return min(cursors) if cursors else 0.0
 
     # ------------------------------------------------------------------
     # Actions
@@ -1904,6 +1923,7 @@ class InputPlugin(Plugin):
                 "name": str(payload.get("name", "")),
                 "label": str(payload.get("label", "")),
                 "videos": videos,
+                "recording_parts": list(payload.get("recording_parts") or []),
                 "live_id": live_id,
             }
             job = self._jobs.get(class_id)
@@ -1923,8 +1943,11 @@ class InputPlugin(Plugin):
                 self._class_finished = record is not None
                 self._class_session_meta = dict(record["meta"]) if record else {}
                 self._class_session_id = record["session_id"] if record else ""
-            self._download = {}
-            self._total_seconds = 0.0
+            self._part_durations = dict(job.part_durations) if job else {}
+            self._recording_streams = dict(job.recording_streams) if job else {}
+            self._total_seconds = job.total_seconds if job else 0.0
+            if self._active_job is None:
+                self._download = {}
             should_resolve = record is None and (
                 job is None
                 or job.state in _JOB_TERMINAL
@@ -1955,23 +1978,26 @@ class InputPlugin(Plugin):
 
     def _fetch_streams(
         self, cls: dict[str, Any], index: int
-    ) -> tuple[dict[str, str], str]:
-        """Resolve one class part to ``{main, screen}`` URLs."""
+    ) -> tuple[dict[str, str], str, dict[str, dict[str, str]]]:
+        """Resolve the class URLs and select one part for playback."""
 
         streams: dict[str, str] = {}
         error = ""
+        resolved: dict[str, dict[str, str]] = {}
         try:
             if cls.get("kind") == "live":
                 devices = self._catalog.get_live_devices(str(cls.get("live_id", "")))
                 streams = _map_live_streams(devices)
             else:
                 videos = cls.get("videos") or []
+                for video_id in videos:
+                    views = self._catalog.get_recording_streams(
+                        str(cls.get("course", "")), str(video_id)
+                    )
+                    resolved[str(video_id)] = _map_view_streams(views)
                 if index >= len(videos):
                     raise InputError("没有更多小节")
-                views = self._catalog.get_recording_streams(
-                    str(cls.get("course", "")), str(videos[index])
-                )
-                streams = _map_view_streams(views)
+                streams = resolved[str(videos[index])]
             if not streams.get("main"):
                 raise InputError("没有找到可播放的视频流。")
         except InputError as exc:
@@ -1981,7 +2007,7 @@ class InputPlugin(Plugin):
                 "failed to resolve streams for %s: %s", cls.get("id", ""), exc
             )
             error = f"获取视频地址失败：{exc}"
-        return streams, error
+        return streams, error, resolved
 
     def _resolve_class_streams(self) -> None:
         """Resolve the selected class's stream URLs for the player/UI."""
@@ -1992,7 +2018,7 @@ class InputPlugin(Plugin):
         if cls is None:
             return
 
-        streams, error = self._fetch_streams(cls, index)
+        streams, error, resolved = self._fetch_streams(cls, index)
 
         with self._class_lock:
             if (
@@ -2001,8 +2027,13 @@ class InputPlugin(Plugin):
             ):
                 return
             self._class_streams = streams
+            if cls.get("kind") != "live" and not error:
+                self._recording_streams = resolved
             self._streams_error = error
             self._streams_loading = False
+            job = self._selected_job_locked()
+            if job is not None and not error:
+                job.recording_streams = dict(resolved)
 
         self._ctx.ui.refresh("input.class.streams")
 
@@ -2062,11 +2093,12 @@ class InputPlugin(Plugin):
 
     def _resolve_job_streams(self, job: _Job) -> None:
         cls = dict(job.cls)
-        streams, error = self._fetch_streams(cls, job.index)
+        streams, error, resolved = self._fetch_streams(cls, job.index)
         with self._class_lock:
             if self._active_job is not job:
                 return
             job.streams = streams
+            job.recording_streams = resolved
             job.error = error
             job.streams_loading = False
             if (
@@ -2076,6 +2108,7 @@ class InputPlugin(Plugin):
                 self._class_streams = dict(streams)
                 self._streams_error = error
                 self._streams_loading = False
+                self._recording_streams = dict(resolved)
             if error:
                 job.state = _JOB_FAILED
                 job.finished_at = time.time()
@@ -2104,10 +2137,11 @@ class InputPlugin(Plugin):
             index = job.index
             streams = dict(job.streams)
             current_session = self._ctx.streams.current.session_id
-            continue_session = bool(job.session_meta) and job.session_id == current_session
+            continue_session = (
+                job.session_id == current_session and bool(job.session_meta)
+            )
             job.state = _JOB_RUNNING
             self._download = {}
-            self._total_seconds = 0.0
             # A user-initiated play always wins over a pending gap-fill pass.
             self._fill_queue = []
             self._fill_target = ""
@@ -2137,6 +2171,41 @@ class InputPlugin(Plugin):
                 "live_id": str(cls.get("live_id", "")),
             },
         )
+        if not live:
+            recording_parts = {
+                str(part.get("video_id")): part
+                for part in cls.get("recording_parts") or []
+            }
+            part = recording_parts.get(str(spec.course.get("video_id")), {})
+            spec.final_part = index + 1 >= len(videos)
+            spec.meta.update(
+                recording_begin=part.get("begin", ""),
+                recording_end=part.get("end", ""),
+            )
+            tail = spec
+            for next_index in range(index + 1, len(videos)):
+                next_id = str(videos[next_index])
+                next_url = job.recording_streams.get(next_id, {}).get("main", "")
+                if not next_url:
+                    break
+                part = recording_parts.get(next_id, {})
+                tail.next_source = SourceSpec(
+                    kind="recording",
+                    url=next_url,
+                    title=spec.title,
+                    continue_session=True,
+                    realtime=False,
+                    download=not next_url.startswith(("file://", "/")),
+                    audio_gate_limit=spec.audio_gate_limit,
+                    video_gate_limit=spec.video_gate_limit,
+                    course={**spec.course, "video_id": next_id},
+                    meta={
+                        "recording_begin": part.get("begin", ""),
+                        "recording_end": part.get("end", ""),
+                    },
+                    final_part=next_index + 1 >= len(videos),
+                )
+                tail = tail.next_source
         self._pending_message = ""
         with self._class_lock:
             if self._active_job is not job:
@@ -2154,18 +2223,18 @@ class InputPlugin(Plugin):
             try:
                 self._start_source(spec)
                 session = self._ctx.streams.current
-                total = self._probe_total_seconds(spec, live)
                 with self._class_lock:
+                    if self._active_job is not job or job.index != index:
+                        return
                     job.session_id = session.session_id
                     job.session_meta = dict(session.meta)
-                    job.total_seconds = total
                     if (
                         self._current_class is not None
                         and self._current_class.get("id") == job.id
                     ):
                         self._class_session_id = session.session_id
                         self._class_session_meta = dict(session.meta)
-                        self._total_seconds = total
+                        self._total_seconds = job.total_seconds
             except Exception as exc:  # noqa: BLE001 - surface startup failures
                 self._ctx.events.emit(
                     "input.error",
@@ -2211,6 +2280,9 @@ class InputPlugin(Plugin):
             self._class_index = 0
             self._class_session_meta = {}
             self._class_session_id = ""
+            self._session_started = False
+            self._part_durations = {}
+            self._total_seconds = 0.0
             # The streams already resolved may belong to a later part (they are
             # kept when a finished class is reopened); reusing them would
             # re-download part N while the UI says "第 1 节".
@@ -2265,6 +2337,9 @@ class InputPlugin(Plugin):
                     streams=dict(self._class_streams),
                     streams_loading=bool(self._streams_loading),
                     error=str(self._streams_error),
+                    recording_streams=dict(self._recording_streams),
+                    part_durations=dict(self._part_durations),
+                    total_seconds=self._total_seconds,
                 )
                 self._class_finished = False
                 self._want_processing = True
@@ -2458,17 +2533,29 @@ class InputPlugin(Plugin):
         self._prune_media()
         self._ctx.ui.refresh("input.finished")
 
-    def _probe_total_seconds(self, spec: SourceSpec, live: bool) -> float:
-        if live:
-            return 0.0
-        session = self._ctx.streams.current
-        media_path = str(session.meta.get("media_path", "") or "")
-        if not media_path:
-            return 0.0
-        try:
-            return float(probe_duration(media_path) or 0.0)
-        except Exception:  # noqa: BLE001 - progress is best effort
-            return 0.0
+    def _record_part_duration(self, video_id: str, duration: float) -> None:
+        if not video_id or duration <= 0:
+            return
+        with self._class_lock:
+            job = self._active_job
+            cls = job.cls if job is not None else (self._current_class or {})
+            videos = [str(video) for video in cls.get("videos") or []]
+            if video_id not in videos:
+                return
+            durations = job.part_durations if job is not None else self._part_durations
+            durations[video_id] = duration
+            # A partial sum is not the duration of the class.
+            total = (
+                sum(durations[video] for video in videos)
+                if all(video in durations for video in videos)
+                else 0.0
+            )
+            if job is not None:
+                job.total_seconds = total
+            if job is None or (self._current_class or {}).get("id") == job.id:
+                self._part_durations = dict(durations)
+                self._total_seconds = total
+
 
     def _act_pause_processing(self, payload: dict[str, Any]) -> dict[str, Any]:
         cancel_active = False
@@ -2537,79 +2624,57 @@ class InputPlugin(Plugin):
 
         with self._class_lock:
             job = self._active_job
-            cls = dict(self._current_class) if self._current_class else None
-            index = self._class_index
             processing = self._processing
 
         if not processing:
             return
 
         if job is not None:
-            if job.kind != "live":
-                # full-speed ingest: wait until STT/VLM committed every window
-                # before moving on (summarize runs on session.stopped).
-                self._wait_for_consumers()
             videos = job.cls.get("videos") or []
             if job.index + 1 < len(videos):
                 with self._class_lock:
                     job.index += 1
-                    job.streams = {}
-                    job.streams_loading = True
-                    job.state = _JOB_PREPARING
+                    next_id = str(videos[job.index])
+                    job.streams = dict(job.recording_streams.get(next_id, {}))
+                    job.streams_loading = not bool(job.streams.get("main"))
+                    job.state = _JOB_PREPARING if job.streams_loading else _JOB_RUNNING
                     self._want_processing = True
                     if (
                         self._current_class is not None
                         and self._current_class.get("id") == job.id
                     ):
                         self._class_index = job.index
-                        self._class_streams = {}
-                        self._streams_loading = True
+                        self._class_streams = dict(job.streams)
+                        self._streams_loading = job.streams_loading
                         self._streams_error = ""
                 self._ctx.ui.refresh("input.class.next")
-                threading.Thread(
-                    target=self._resolve_job_streams,
-                    args=(job,),
-                    name="job-next-part",
-                    daemon=True,
-                ).start()
+                if job.streams.get("main"):
+                    self._begin_job(job)
+                else:
+                    threading.Thread(
+                        target=self._resolve_job_streams,
+                        args=(job,),
+                        name="job-next-part",
+                        daemon=True,
+                    ).start()
                 return
+            if job.kind != "live":
+                self._wait_for_consumers()
             self._finish_job(job, "playback finished")
             return
 
-        if cls is None:
-            # Manual URL playback or a gap-fill pass.
-            self._wait_for_consumers()
-            if self._fill_queue:
-                nxt = self._fill_queue.pop(0)
-                threading.Thread(
-                    target=self._continue_fill,
-                    args=(nxt,),
-                    name="fill-next-part",
-                    daemon=True,
-                ).start()
-                return
-            self._end_fill_or_playback()
-            return
-
-        if cls.get("kind") != "live":
-            # full-speed ingest: wait until STT/VLM committed every window
-            # before closing the session (summarize runs on session.stopped).
-            self._wait_for_consumers()
-
-        videos = cls.get("videos") or []
-        if index + 1 < len(videos):
-            with self._class_lock:
-                self._class_index = index + 1
-                self._class_streams = {}
-                self._streams_loading = True
-                self._streams_error = ""
-                self._want_processing = True
-            self._ctx.ui.refresh("input.class.next")
+        # Manual URL playback or a gap-fill pass.
+        if self._fill_queue:
+            nxt = self._fill_queue.pop(0)
             threading.Thread(
-                target=self._resolve_class_streams, daemon=True
+                target=self._continue_fill,
+                args=(nxt,),
+                name="fill-next-part",
+                daemon=True,
             ).start()
             return
-        self._finish_class()
+        self._wait_for_consumers()
+        self._end_fill_or_playback()
 
     def _wait_for_consumers(self, timeout: float = 3600.0) -> bool:
         """Block until every registered media consumer went idle."""
@@ -2670,21 +2735,6 @@ class InputPlugin(Plugin):
         self._jobs_changed("input.class.finished")
         self._dispatch_jobs()
 
-    def _finish_class(self) -> None:
-        with self._class_lock:
-            job = self._active_job
-        if job is not None:
-            self._finish_job(job, "playback finished")
-            return
-        with self._class_lock:
-            self._processing = False
-            self._want_processing = False
-            self._class_finished = True
-            self._session_started = False
-        self._sources.stop()
-        self._end_open_session("playback finished")
-        self._prune_media()
-        self._jobs_changed("input.class.finished")
 
     def _prune_media(self) -> None:
         """Keep only the most recent N recording folders."""

@@ -60,6 +60,8 @@ devShell 提供 Python、uv、ffmpeg 和动态库路径，不打包应用．在�
 
 直播与录播都连续发送最多 200 ms 的音频帧．直播显示 partial，只有 final 写入转写记录；录播使用 offline 模式全速传输，默认并发 1 路．STT 服务负责声学切分、上下文重叠及文本合并．`stt.context` 提供课程主题或术语，默认留空．VLM 并发保持独立设置．录播页显示下载和处理进度及「打开录像」链接，本地录像只保留最近 `input.keep_recordings`（默认 4）节．
 
+多节录播共用连续时间轴，进度按各节时长之和计算．处理本节时预下载下一节，节间不等待语音或板书分析清空．全部节次结束后才完成输入尾段．
+
 Canvas token 与 OpenAI 兼容 key 可以放在根 `.env`（git-ignored；OpenCode 套餐则走设置页授权）：
 
 ```dotenv

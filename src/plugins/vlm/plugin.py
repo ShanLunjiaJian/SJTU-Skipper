@@ -458,7 +458,7 @@ class VlmPlugin(Plugin):
                 }
             )
         if last:
-            stamp = f"{_fmt_time(last.get('start', 0))}–{_fmt_time(last.get('end', 0))}"
+            stamp = f"{_fmt_time(last.get('start', 0))} - {_fmt_time(last.get('end', 0))}"
             blocks.append(
                 {
                     "type": "text",
@@ -477,7 +477,7 @@ class VlmPlugin(Plugin):
             for item in visual_items:
                 ts = ""
                 if item.start is not None and item.end is not None:
-                    ts = f"**{_fmt_time(item.start)}–{_fmt_time(item.end)}**\n\n"
+                    ts = f"**{_fmt_time(item.start)} - {_fmt_time(item.end)}**\n\n"
                 blocks.append({"type": "markdown", "text": f"{ts}{item.text}"})
         elif not image_path:
             blocks.append({"type": "text", "text": "暂无板书识别结果"})
@@ -717,7 +717,7 @@ class VlmPlugin(Plugin):
         with self._lock:
             self._latest_image_path = str(image_path)
 
-        timestamp = f"{_fmt_time(start)}–{_fmt_time(end)}"
+        timestamp = f"{_fmt_time(start)} - {_fmt_time(end)}"
         try:
             text = self._ask_image(
                 image_path.read_bytes(), timestamp, history=self._snapshot_history()
