@@ -20,16 +20,11 @@ SJTU-Skipper 仓库包含两条相关但独立的能力：
 本项目使用仓库根目录的 `.venv`（Python 3.12）。旧 `.venv` 已删除并重建：
 
 ```bash
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -e ".[dev]"
+nix develop
+uv sync --locked --extra dev
 ```
 
-也可以使用普通 venv：
-
-```bash
-python3.12 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-```
+devShell 提供 Python、uv、ffmpeg 和动态库路径，不打包应用．在非 Nix 系统上，安装 Python 3.13、uv 和 ffmpeg 后执行同一条 `uv sync` 命令．
 
 ### 2. 真实运行
 
@@ -53,7 +48,7 @@ python3.12 -m venv .venv
 打开页面后：
 
 1. 首次启动会生成 `data/agent/auth.json`（用户名 `admin`，随机密码只打印一次在启动日志里），浏览器会先跳转到登录页；改成自己的密码后重启即可。登录态是签名 cookie，有效期由 `session_ttl_hours` 控制（默认 7 天）。
-2. 右侧「设置」填入 Canvas Token、LLM API Key / Base URL；模型在 Agent / VLM 分组中设置。语音转写在「STT」分组粘贴 Google 服务账号 JSON（或填写凭据文件路径），然后选择 v2 模型与区域。
+2. 右侧「设置」填入 Canvas Token、LLM API Key / Base URL．在「STT」分组填写兼容服务地址、语言和课程上下文．
 3. LLM 连接方式二选一：OpenAI 兼容接口（Base URL + API Key），或在设置里点「关联 OpenCode 套餐」完成设备授权。OpenCode 凭据独立保存在本应用，不依赖本机 OpenCode。
 4. 左侧课程树中展开课程（可点「刷新」重新拉取）。
 5. 选择录播或直播，开始一节课。
@@ -63,7 +58,7 @@ python3.12 -m venv .venv
 
 一节课开始处理后可以继续在左侧选别的课：处理在后台继续，切换选中不会中断它。再点「开始处理」会进入「处理队列」，按先后顺序自动开始；直播课优先排队。队列是串行的：当前媒体管线一次只处理一节课。
 
-录播与直播走两种模式：**直播**按 1:1 实时摄取、单路转写；**录播**先下载到本地，再全速解码并用 `stt.concurrency` / `vlm.concurrency`（默认各 4）并发识别，全部窗口提交后一次性生成讲义。录播页显示下载/处理进度和「打开录像」链接，本地录像只保留最近 `input.keep_recordings`（默认 4）节。
+直播与录播都连续发送最多 200 ms 的音频帧．直播显示 partial，只有 final 写入转写记录；录播使用 offline 模式全速传输，默认并发 1 路．STT 服务负责声学切分、上下文重叠及文本合并．`stt.context` 提供课程主题或术语，默认留空．VLM 并发保持独立设置．录播页显示下载和处理进度及「打开录像」链接，本地录像只保留最近 `input.keep_recordings`（默认 4）节．
 
 Canvas token 与 OpenAI 兼容 key 可以放在根 `.env`（git-ignored；OpenCode 套餐则走设置页授权）：
 
@@ -73,8 +68,8 @@ DEEPSEEK_API_KEY=...
 LLM_BASE_URL=http://127.0.0.1:3000/v1
 LLM_API_KEY=...
 LLM_MODEL=...
-# 语音转写（Google Cloud Speech-to-Text v2，OAuth；也可在设置页粘贴服务账号 JSON）
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+# STT service endpoint
+STT_SERVER_URL=http://127.0.0.1:8766
 ```
 
 设置会持久化到 `data/agent/settings.json`（权限 0600）。
@@ -115,7 +110,7 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 | settings | `settings` | 设置注册、持久化、设置页 |
 | llm | `llm` | Provider 注册、统一 LLM 调用 |
 | input | `input` | Canvas/SJTU 录播、直播、ffmpeg 源 |
-| stt | `stt` | Google Cloud Speech-to-Text **v2**（OAuth / chirp_3）音频流 -> 转写文字流 |
+| stt | `stt` | 兼容 HTTP/WebSocket STT 服务，支持流式临时文字、定稿及课程上下文 |
 | vlm | `vlm` | 视频流 -> 融合板书 -> 文字流 |
 | llm-agent | `llm-agent` | 多会话 REPL Agent；具名 agent profile + 工具参数声明；info/read/search/replace/append（+ 可选 write）；支持流式 |
 | summarize | `summarize` | 非即时：课后/手动一次性整理整堂课，写 note_*.md 结构完整讲义 |

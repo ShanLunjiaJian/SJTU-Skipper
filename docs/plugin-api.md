@@ -136,7 +136,7 @@ for event in ctx.llm.stream(profile="agent", messages=[...]):
 ```
 
 - 所有 LLM 请求必须走 `ctx.llm`；不要自己 `httpx.post`。
-- `stt` 例外地直连 Google Speech-to-Text v2 REST（独立云 API，非 LLM）；v2 不支持 API Key，使用 OAuth（service account / ADC）。
+- `stt` 使用独立 HTTP/WebSocket 服务协议．
 - 重试/超时/流式解析由 LLM 层负责。
 - 配置由 settings 插件持久化，profile 在每次请求时解析。
 

@@ -47,7 +47,7 @@
 3. **流前缀不可变**。任何消费者只能追加、读取，不能修改已有片段。
 4. **服务按名字发现**。插件之间不互相 import 实现，只通过 `services` 注册/调用。
 5. **UI 是声明式的**。插件返回 block 列表和 action id，前端只负责渲染与回传，不执行插件代码。
-6. **所有 LLM 请求走 LLM 层**。VLM/Agent/Summarize 不允许各自直连 LLM HTTP；STT 的 Google Speech-to-Text v2 是独立云 API（非 LLM），由 STT 插件用 OAuth 凭据直接调用。
+6. **所有 LLM 请求走 LLM 层**．STT 使用独立 HTTP/WebSocket 协议，不经过 LLM 服务．
 
 ## 2. 流数据平面
 
@@ -291,7 +291,7 @@ llm-agent
 summarize
 ```
 
-拓扑序由 `requires` 决定，不依赖注册顺序。`llm-agent` 依赖 `llm` + `settings`；`summarize` 与 `instant-summarize` 依赖 `llm-agent`；`vlm` 依赖 `llm` + `settings`；`stt` 依赖 `settings`（注册 `stt.*` 设置项），后端为 Google Cloud Speech-to-Text。
+拓扑序由 `requires` 决定，不依赖注册顺序．`llm-agent` 依赖 `llm` 和 `settings`；`summarize` 与 `instant-summarize` 依赖 `llm-agent`；`vlm` 依赖 `llm` 和 `settings`；`stt` 依赖 `settings`．
 
 ## 5. LLM 层
 
@@ -566,18 +566,17 @@ SettingsSpec(
 
 ### 7.4 stt（语音识别插件）
 
-- 服务名：`stt`；依赖 `settings`；实现 `enabled()` / `busy()` 供 input 插件做"处理完成"屏障。
-- 后端：Google Cloud Speech-to-Text **v2** REST 同步接口 `POST https://{location}-speech.googleapis.com/v2/projects/{project}/locations/{location}/recognizers/_:recognize`（`location=global` 时用 `speech.googleapis.com`）。
-- 认证：**OAuth**（v2 明确拒绝 API Key）。支持粘贴 service-account JSON、authorized-user JSON（gcloud ADC 形状）或凭据文件；都不配置时回退 `GOOGLE_APPLICATION_CREDENTIALS` / ADC。`google-auth` 负责签名与刷新 token，HTTP 走 `httpx`。
-- 设置项（分组「STT」）：`stt.enabled`（默认 true）、`stt.credentials_json`（secret）、`stt.credentials_file`（可用 `GOOGLE_APPLICATION_CREDENTIALS` 种子）、`stt.project_id`（留空取凭据中的 project）、`stt.location`（默认 `us`；chirp_3 支持 `us`/`eu`/`asia-northeast1`/`asia-southeast1`，**不支持 `global`**；若配成 `global` 会自动改用 `us` 重试）、`stt.model`（默认 `chirp_3`，另有 `chirp_2`/`long`/`short`/`telephony`/`telephony_short`）、`stt.language_code`（默认 `cmn-Hans-CN`）、`stt.chunk_seconds`（默认 20，限制 1–55 秒；v2 Recognize 硬上限 60 秒 / 10 MB）、`stt.enable_punctuation`、`stt.timeout`。
-- **不使用「模型自适应」**（Model adaptation）：不上传 phrase sets / custom classes 预制名词；只使用 `stt.model` 指定的模型。
-- 音频以 WAV 容器 + `autoDecodingConfig` 发送（chirp 模型首选），`results[*].resultEndOffset` 换算为片段起止时间，追加到 `transcript`（`source="stt"`，`meta` 含 model/confidence/languageCode）。
-- **录播（`session.meta["mode"] == "fast"`）**：`stt.concurrency`（默认 4）个窗口并发请求，`core.pipeline.OrderedWindowPool` 保证结果按窗口顺序提交；单片 429/5xx/网络超时自动重试 3 次（指数退避），仍失败则记一次窗口缺口并继续。
-- **直播**：单路顺序处理，保持低延迟。
-- 会话结束或进程退出时 flush 剩余音频（≥1 秒；录播由并发池负责，事件线程不再 flush）。
-- **持久化**：每提交一行就追加到 `sessions/<sid>/transcript.jsonl`（`start`/`end`/`text`），转写不再只活在内存里；summarize 直接读这个文件重建讲义材料。落盘失败只告警，不影响直播。
+- 服务名：`stt`；依赖 `settings`；公开 `status()`、`transcribe()`、`enabled()`、`busy()`、`flushing()`．
+- 协议：自动转写统一使用 WebSocket `/v1/stream`，录播选择 offline 模式，直播选择 live 模式．手动范围转写可使用 HTTP．服务端独占声学切分、上下文和文本合并．
+- 设置：`enabled=true`、`server_url=http://127.0.0.1:8766`、`language=Chinese`、`context=''`、`timeout=60`、`batch_seconds=120`、`concurrency=1`．地址可由 `STT_SERVER_URL` 初始化．
+- 直播持续发送最多 200 ms PCM，发送与接收独立运行．partial 替换临时文字，final 才写入永久转写．结束和 reset 完成不足 1 秒的尾音．
+- 录播连续发送 PCM．服务端有界并发识别并按时间顺序提交；应用负责传输背压、覆盖与持久化．
+- accepted 只释放传输背压；成功 final/progress 才更新覆盖并释放已处理音频．发送、接收和成功处理位置分别记录．
+- 覆盖空洞按精确区间补录．断线重传未提交范围，重试耗尽的范围保持未覆盖并报告错误．异常重复标记不终止整课．
+- 禁用 STT 时输入只推进逻辑音频时间，不保留 PCM 或插入静音．重新启用后从真实 PCM 范围恢复．
+- **持久化**：定稿追加到 `sessions/<sid>/transcript.jsonl`（`start`、`end`、`text`），summarize 读取该文件重建讲义材料．
 - **覆盖记录**：每次处理完一个区间就往 `sessions/<sid>/coverage.json` 记一段已处理音频；再次跑同一节课时这些区间会被跳过，直播结束后补跑录播也只会补缺口。
-- 事件：`stt.segment`、`stt.error`。
+- 事件：`stt.partial`、`stt.segment`、`stt.error`．
 - UI：仅调试 page（`stt:*`），不出现在侧边栏，只能从命令面板（调试 → 语音转写）打开；page 显示状态、模型、音频时长、已转写段数/字数与最近转写文本。
 
 ### 7.5 vlm（板书识别插件）
@@ -812,7 +811,7 @@ docs/
 3. **P2 行为基础**：settings / llm-core / llm-agent（含工具与会话）/ tests。
 4. **P3 总结**：summarize + scripted LLM 集成测试。
 5. **P4 输入**：SJTU catalog（VOD + live）/ ffmpeg source / UI pages / tests。
-6. **P5 STT/VLM**：STT 后端（Google Speech-to-Text v2，OAuth）、worker；VLM picture_parser 融合、prompt、tests。
+6. **P5 STT/VLM**：兼容 STT 服务接入与音频生命周期；VLM picture_parser 融合、prompt、tests．
 7. **P6 UI**：FastAPI + 静态前端 + WebSocket + 端到端演示。
 8. **P7 收尾**：README、架构文档、真实 Canvas 冒烟、代码审查。
 
@@ -831,4 +830,4 @@ docs/
 - `sjtu-skipper check` 输出正确的拓扑加载顺序。
 - `sjtu-skipper serve` 能加载真实 settings；输入插件能列出 Canvas 课程与 SJTU 录播/直播（有 token 时）。
 - 输入、STT、VLM 三个模块除流接口外没有互相 import；行为插件没有 import 输入/STT/VLM 实现。
-- 所有 LLM 请求（Agent、VLM、Summary）都经过 `LLMService`，无插件直连 LLM HTTP；STT 只直连 Google Speech-to-Text v2（非 LLM，OAuth）。
+- 所有 LLM 请求经过 `LLMService`；STT 只访问配置的兼容 HTTP/WebSocket 服务．

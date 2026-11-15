@@ -255,6 +255,50 @@ class AudioStream(_TimeIndexedStream):
         total, _ = self.snapshot()
         self._append(AudioChunk(start=total, end=total + dur, data=data), start=total, end=total + dur)
 
+    def discard(self, duration: float) -> None:
+        """Advance the timeline without retaining PCM or inserting silence."""
+        duration = float(duration)
+        if duration <= 0:
+            return
+        with self._cv:
+            old_total = self._total
+            self._total += duration
+            new_total = self._total
+            count = len(self._chunks)
+            self._cv.notify_all()
+        if self._notify is not None:
+            self._notify(
+                stream=self.stream_name,
+                session_id=self.session_id,
+                old_len=old_total,
+                new_len=new_total,
+                old_count=count,
+                new_count=count,
+                first_index=count,
+                chars=0,
+            )
+
+    @property
+    def earliest_time(self) -> float:
+        """Return the first retained PCM time, or the logical end when empty."""
+        with self._lock:
+            return self._chunks[0].start if self._chunks else self._total
+
+    def buffered_ranges(
+        self, start: float = 0.0, end: float | None = None
+    ) -> list[tuple[float, float]]:
+        """Return continuous intervals that contain retained PCM."""
+        with self._lock:
+            end = self._total if end is None else float(end)
+            ranges: list[tuple[float, float]] = []
+            for chunk in self._overlapping(start, end):
+                lo, hi = max(start, chunk.start), min(end, chunk.end)
+                if ranges and lo <= ranges[-1][1] + 1e-9:
+                    ranges[-1] = (ranges[-1][0], hi)
+                else:
+                    ranges.append((lo, hi))
+            return ranges
+
     def read(self, start: float, end: float) -> bytes:
         bps = self.bytes_per_second
         parts: list[bytes] = []
@@ -435,9 +479,8 @@ class BacklogGate:
     the (slower) STT/VLM consumers catch up.  Readers call :meth:`wait` before
     appending; consumers call :meth:`release` after committing a window.
 
-    ``limit <= 0`` disables the gate (live playback stays realtime anyway).
-    A stalled consumer trips ``stall_timeout`` and the gate disables itself
-    instead of blocking the session forever.
+    ``limit <= 0`` disables the gate. A stalled consumer disables the gate
+    unless ``fail_closed`` requires the producer to stop instead.
     """
 
     def __init__(
@@ -454,6 +497,7 @@ class BacklogGate:
         self._released = 0.0
         self._last_release = time.monotonic()
         self._closed = False
+        self._fail_closed = False
 
     @property
     def limit(self) -> float:
@@ -465,10 +509,13 @@ class BacklogGate:
         with self._lock:
             return self._released
 
-    def configure(self, limit: float) -> None:
+    def configure(
+        self, limit: float, *, released: float = 0.0, fail_closed: bool = False
+    ) -> None:
         with self._lock:
             self._limit = max(0.0, float(limit))
-            self._released = 0.0
+            self._released = max(0.0, float(released))
+            self._fail_closed = bool(fail_closed)
             self._last_release = time.monotonic()
             self._closed = False
             self._lock.notify_all()
@@ -487,7 +534,7 @@ class BacklogGate:
     def wait(self, media_end: float) -> bool:
         """Block until ``media_end - released <= limit``.
 
-        Returns False when the gate was closed (producer should stop).
+        Returns False when the gate closes or a fail-closed gate times out.
         """
 
         with self._lock:
@@ -500,6 +547,10 @@ class BacklogGate:
                     self._stall_timeout > 0
                     and time.monotonic() - self._last_release > self._stall_timeout
                 ):
+                    if self._fail_closed:
+                        _log.error("backlog gate %s stalled; stopping producer", self.name)
+                        self._closed = True
+                        return False
                     _log.warning(
                         "backlog gate %s stalled for %.0fs; disabling",
                         self.name,

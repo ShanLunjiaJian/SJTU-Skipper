@@ -170,3 +170,69 @@ class TestTrim:
         assert stream.duration == pytest.approx(5.0)
         assert stream.kept_seconds == pytest.approx(2.0)
         assert [f.start for f in stream.read_frames(3.0, 5.0)] == [3.0, 4.0]
+
+
+def test_discard_advances_timeline_without_pcm() -> None:
+    from core.streams import AudioStream
+
+    notifications = []
+    audio = AudioStream("s", notify=lambda **event: notifications.append(event))
+    audio.discard(2.0)
+    assert audio.wait_for(2.0, timeout=0)
+    assert audio.duration == 2.0
+    assert audio.chunk_count == 0
+    assert audio.read(0, 2) == b""
+    assert audio.earliest_time == 2.0
+    audio.append(b"\x01\x02" * 1600)
+    audio.discard(1.0)
+    audio.append(b"\x03\x04" * 1600)
+    assert audio.earliest_time == 2.0
+    assert audio.buffered_ranges() == [(2.0, 2.1), (3.1, 3.2)]
+    assert audio.read(0, 2) == b""
+    assert notifications[0]["new_count"] == 0
+    assert notifications[0]["new_len"] == 2.0
+    audio.trim(2.1)
+    assert audio.earliest_time == pytest.approx(3.1)
+
+
+def test_audio_discard_notifies_waiting_consumer() -> None:
+    audio = StreamHub().current.audio
+    ready = threading.Event()
+    result = []
+
+    def consume() -> None:
+        ready.set()
+        result.append(audio.wait_for(1.0, timeout=1.0))
+
+    consumer = threading.Thread(target=consume)
+    consumer.start()
+    ready.wait()
+    audio.discard(1.0)
+    consumer.join(timeout=2.0)
+    assert result == [True]
+    assert audio.chunk_count == 0
+
+
+def test_gate_continuation_preserves_release_and_audio_timeout_stops(monkeypatch) -> None:
+    from core.streams import BacklogGate
+
+    monkeypatch.setattr("core.streams.time.monotonic", lambda: 0.0)
+    gate = BacklogGate("audio", stall_timeout=1.0)
+    gate.configure(10.0, released=120.0, fail_closed=True)
+    assert gate.wait(130.0)
+    monkeypatch.setattr("core.streams.time.monotonic", lambda: 2.0)
+    assert not gate.wait(130.2)
+    assert gate.limit == 10.0
+    assert gate.released == 120.0
+
+
+def test_video_gate_keeps_default_timeout_behavior(monkeypatch) -> None:
+    from core.streams import BacklogGate
+
+    monkeypatch.setattr("core.streams.time.monotonic", lambda: 0.0)
+    gate = BacklogGate("video", stall_timeout=1.0)
+    gate.configure(10.0, released=120.0)
+    monkeypatch.setattr("core.streams.time.monotonic", lambda: 2.0)
+    assert gate.wait(131.0)
+    assert gate.limit == 0.0
+    assert gate.released == 120.0

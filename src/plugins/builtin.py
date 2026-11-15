@@ -24,7 +24,7 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
     from .llm_core.plugin import LLMPlugin
     from .reader.plugin import ReaderPlugin
     from .settings.plugin import SettingsPlugin
-    from .stt.plugin import STTPlugin
+    from .stt import STTPlugin
     from .summarize.plugin import SummarizePlugin
     from .vlm.plugin import VLMPlugin
 

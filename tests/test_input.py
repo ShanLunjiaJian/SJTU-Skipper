@@ -471,6 +471,7 @@ class TestSourceManager:
 
             def __init__(self, spec, **kwargs):
                 self.spec = spec
+                self.audio_enabled = kwargs.get("audio_enabled")
 
             def start(self):
                 pass
@@ -483,13 +484,24 @@ class TestSourceManager:
         hub = StreamHub(emit=lambda *a, **kw: None)
         hub.start_session(meta={"course_name": "高等数学"})
         sid = hub.current.session_id
-        mgr = SourceManager(hub=hub, emit=lambda *a, **kw: None)
 
-        mgr.start(SourceSpec(kind="recording", url="x", continue_session=True))
+        hub.current.audio_gate.release(90.0)
+        hub.current.video_gate.release(75.0)
+        enabled = lambda: False
+        mgr = SourceManager(hub=hub, emit=lambda *a, **kw: None, audio_enabled=enabled)
+        mgr.start(SourceSpec(
+            kind="recording", url="x", continue_session=True,
+            audio_gate_limit=362.0, video_gate_limit=120.0,
+        ))
+        assert hub.current.audio_gate.released == 90.0
+        assert hub.current.video_gate.released == 75.0
+        assert mgr._current.audio_enabled is enabled
         assert hub.current.session_id == sid, "next period must reuse the session"
 
         mgr.start(SourceSpec(kind="recording", url="y"))
         assert hub.current.session_id != sid, "a new class starts a new session"
+        assert hub.current.audio_gate.released == 0.0
+        assert hub.current.video_gate.released == 0.0
         mgr.stop()
 
 
@@ -1385,12 +1397,16 @@ class TestClassPlayer:
 
         plugin.teardown()
 
-    def test_start_processing_starts_ingest(self, monkeypatch):
+    @pytest.mark.parametrize("kind", ["recording", "live"])
+    def test_start_processing_starts_ingest(self, monkeypatch, kind):
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
         monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
-        self._open_class(ctx, plugin)
+        self._open_class(ctx, plugin, kind=kind)
+        ctx.require("settings").set("stt.batch_seconds", 120.0)
+        ctx.require("settings").set("stt.concurrency", 2)
+        ctx.streams.register_consumer("vlm", "video", gate_limit_fn=lambda: 75.0)
         plugin._class_streams = {"main": "https://example.com/main.m3u8"}
         plugin._streams_loading = False
         started: list[SourceSpec] = []
@@ -1403,10 +1419,12 @@ class TestClassPlayer:
         while not started and time.monotonic() < deadline:
             time.sleep(0.01)
         assert started and started[0].url == "https://example.com/main.m3u8"
-        assert started[0].kind == "recording"
+        assert started[0].kind == kind
         assert started[0].continue_session is False
-        assert started[0].realtime is False, "recordings are ingested at full speed"
-        assert started[0].download is True
+        assert started[0].realtime is (kind == "live")
+        assert started[0].download is (kind == "recording")
+        assert started[0].audio_gate_limit == (10.0 if kind == "live" else 362.0)
+        assert started[0].video_gate_limit == (0.0 if kind == "live" else 75.0)
 
         plugin.teardown()
 
@@ -1810,3 +1828,180 @@ class TestProcessingQueue:
         child = plugin._tree["nodes"][0]["children"][0]
         assert child["badge"] == "处理中"
         plugin.teardown()
+
+
+@pytest.mark.parametrize("kind", ["recording", "live"])
+def test_manual_source_combines_audio_transport_and_video_consumer_gates(monkeypatch, kind) -> None:
+    ctx = _make_context()
+    plugin = InputPlugin()
+    plugin.setup(ctx)
+    ctx.require("settings").set("stt.batch_seconds", 120.0)
+    ctx.require("settings").set("stt.concurrency", 2)
+    ctx.streams.register_consumer("vlm", "video", gate_limit_fn=lambda: 75.0)
+    started = []
+    ready = threading.Event()
+
+    def start(spec):
+        started.append(spec)
+        ready.set()
+
+    monkeypatch.setattr(plugin, "_start_source", start)
+    try:
+        result = ctx.ui.dispatch_action(
+            "input.play_url", {"url": "https://example.com/media", "kind": kind},
+        )
+        assert result.ok
+        assert ready.wait(5.0)
+        assert started[0].audio_gate_limit == (10.0 if kind == "live" else 362.0)
+        assert started[0].video_gate_limit == (0.0 if kind == "live" else 75.0)
+    finally:
+        plugin.teardown()
+
+
+def test_gap_fill_combines_audio_transport_and_video_consumer_gates(monkeypatch, tmp_path) -> None:
+    ctx = _make_context(tmp_path)
+    plugin = InputPlugin()
+    plugin.setup(ctx)
+    ctx.require("settings").set("stt.batch_seconds", 120.0)
+    ctx.require("settings").set("stt.concurrency", 2)
+    ctx.streams.register_consumer("vlm", "video", gate_limit_fn=lambda: 75.0)
+    plugin._fill_course = {"course_id": "1"}
+    plugin._fill_target = "live-session"
+    monkeypatch.setattr(
+        plugin._catalog, "get_recording_streams",
+        lambda course_id, video_id: {"1": "https://example.com/recording.mp4"},
+    )
+    started = []
+    monkeypatch.setattr(plugin, "_start_source", lambda spec: started.append(spec))
+    try:
+        assert plugin._start_fill_part({"video_id": "v1"}, continue_session=False)
+        assert started[0].audio_gate_limit == 362.0
+        assert started[0].video_gate_limit == 75.0
+        assert started[0].meta["fill_for"] == "live-session"
+    finally:
+        plugin.teardown()
+
+
+def test_audio_gate_uses_transport_batch_and_live_limit() -> None:
+    plugin = InputPlugin()
+    settings = FakeSettings({"stt.batch_seconds": 120.0, "stt.concurrency": 2})
+    plugin._ctx = SimpleNamespace(require=lambda name: settings)
+    assert plugin._audio_gate_limit() == 362.0
+    assert plugin._audio_gate_limit(realtime=True) == 10.0
+
+
+def test_audio_enabled_uses_public_service_only() -> None:
+    plugin = InputPlugin()
+    plugin._ctx = SimpleNamespace(service=lambda name: None)
+    assert not plugin._audio_enabled()
+    service = SimpleNamespace(enabled=lambda: True)
+    plugin._ctx = SimpleNamespace(service=lambda name: service)
+    assert plugin._audio_enabled()
+
+
+def _run_audio_reader(hub, chunks, *, enabled=None, emit=None):
+    from plugins.input.sources import FFmpegSource
+
+    source = FFmpegSource(
+        SourceSpec(kind="recording", url="test"),
+        hub=hub, emit=emit or (lambda *a, **kw: None),
+        reconnect=False, audio_enabled=enabled,
+    )
+    source._session_id = hub.current.session_id
+    stdout = mock.Mock()
+    stdout.read1.side_effect = [*chunks, b""]
+    source._audio_proc = SimpleNamespace(stdout=stdout, poll=lambda: 0)
+    source._read_audio()
+    return source
+
+
+def test_audio_reader_gates_each_small_chunk_before_append() -> None:
+    hub = StreamHub()
+    session = hub.current
+    endpoints = []
+
+    def allow(end):
+        assert session.audio.duration < end
+        assert end - session.audio.duration <= 0.2 + 1e-9
+        endpoints.append(end)
+        return True
+
+    session.audio_gate.wait = allow
+    _run_audio_reader(hub, [b"\x01\x02" * 8000])
+    assert endpoints == pytest.approx([0.2, 0.4, 0.5])
+    assert session.audio.duration == pytest.approx(0.5)
+    assert session.audio.chunk_count == 3
+    assert session.audio.read(0, 0.5) == b"\x01\x02" * 8000
+
+
+def test_disabled_audio_discards_payload_and_resumes_real_pcm() -> None:
+    hub = StreamHub()
+    session = hub.current
+    enabled = iter([False, False, True])
+    _run_audio_reader(
+        hub, [b"\x01\x02" * 9600], enabled=lambda: next(enabled),
+    )
+    assert session.audio.duration == pytest.approx(0.6)
+    assert session.audio.chunk_count == 1
+    assert session.audio.earliest_time == pytest.approx(0.4)
+    assert session.audio.read(0, 0.4) == b""
+    assert session.audio.read(0.4, 0.6) == b"\x01\x02" * 3200
+    assert session.audio_gate.released == pytest.approx(0.4)
+
+
+def test_audio_gate_failure_reports_error_without_appending() -> None:
+    hub = StreamHub()
+    hub.current.audio_gate.wait = lambda end: False
+    events = []
+    source = _run_audio_reader(
+        hub, [b"\x01\x02" * 3200],
+        emit=lambda name, **payload: events.append((name, payload)),
+    )
+    assert hub.current.audio.duration == 0.0
+    assert not hub.current.input_done
+    assert any(name == "input.error" for name, payload in events)
+    assert not source.running
+
+
+def test_audio_reader_stays_bound_to_original_session() -> None:
+    hub = StreamHub()
+    original = hub.current
+
+    def enabled():
+        hub.start_session()
+        return True
+
+    _run_audio_reader(hub, [b"\x01\x02" * 3200], enabled=enabled)
+    assert original.audio.duration == pytest.approx(0.2)
+    assert hub.current.audio.duration == 0.0
+
+
+def test_file_eof_completes_both_readers_without_reconnect() -> None:
+    from plugins.input.sources import FFmpegSource
+
+    hub = StreamHub()
+    session = hub.start_session()
+    events = []
+    source = FFmpegSource(
+        SourceSpec(kind="file", url="/tmp/input.wav", realtime=False),
+        hub=hub, emit=lambda name, **payload: events.append(name), reconnect=True,
+    )
+    source._session_id = session.session_id
+    audio_stdout = mock.Mock()
+    audio_stdout.read1.side_effect = [b"\x01\x02" * 3200, b""]
+    video_stdout = mock.Mock()
+    video_stdout.read1.return_value = b""
+    source._audio_proc = SimpleNamespace(stdout=audio_stdout, poll=lambda: 0)
+    source._video_proc = SimpleNamespace(stdout=video_stdout, poll=lambda: 0)
+    source._restart_audio_process = mock.Mock(side_effect=AssertionError("Audio restarted after EOF"))
+    source._restart_video_process = mock.Mock(side_effect=AssertionError("Video restarted after EOF"))
+
+    source._read_audio()
+    assert session.audio.duration == pytest.approx(0.2)
+    assert not session.input_done
+    source._read_video()
+    assert session.input_done
+    assert source.finished
+    assert events.count("input.ended") == 1
+    source._restart_audio_process.assert_not_called()
+    source._restart_video_process.assert_not_called()

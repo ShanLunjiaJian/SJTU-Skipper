@@ -12,7 +12,7 @@
 - P3 llm-agent：完成；多会话、REPL、info/read/replace/append、扩展点。
 - P4 summarize：完成；文字/音频触发、水位、重试、三文件分类。
 - P5 input：完成；Canvas 13 门活跃课程、SJTU 新版录播/直播、ffmpeg 双流、UI。
-- P6 STT：完成；Google Cloud Speech-to-Text v2（OAuth，chirp_3）分块转写，音频流 -> 文字流。
+- P6 STT：兼容 HTTP/WebSocket 服务接入，服务端切分与上下文识别．
 - P7 VLM：完成；picture_parser 融合算法适配、实时窗口、prompt、去重、UI。
 - P8 Web UI：完成；FastAPI + 左右多 tab + toolbox + pages + WebSocket + action。
 - 全量测试通过；真实 Canvas/SJTU 录播/直播、真实 DeepSeek 文本/视觉调用均已冒烟。
@@ -21,7 +21,7 @@
 
 - Python 的 `len(stream)` 必须是 `int`，因此 `len` 返回整秒，亚秒精度用 `stream.duration`。
 - 输入插件默认只列 `active_only=True` 的 Canvas 课程（实测 13 门）；历史学期可通过底层 catalog 扩展。
-- STT 默认开启（`stt.enabled=true`）但需要先在「设置 → STT」粘贴 Google 服务账号 JSON（或配置 ADC）；v2 不接受 API Key。模型固定为用户选择；不启用「模型自适应」（Model adaptation：上传 phrase sets / custom classes 预制名词）。
+- STT 默认开启，服务地址为 `http://127.0.0.1:8766`，可设置课程上下文和语言．
 - VLM 默认开启（`vlm.enabled=true`），启动即运行 worker；视觉模型默认 `deepseek-flash`，连接与 API Key 复用 LLM 分组。
 - VLM 融合固定使用整帧原始分辨率输出（`crop=(0,0,1,1)`、`max_width=0`），不裁剪、不缩放、不切面板；FFT 位移估计在缩略图上完成以控制延迟，默认每窗最多 12 帧。
 - 直播设备默认取第 0 个（老师机位），可在 `input.live_device` 切换；URL 自带签名，必要时可扩展 headers。
@@ -217,20 +217,19 @@
 
 - `src/plugins/stt/__init__.py`
 - `src/plugins/stt/plugin.py`
-- `src/plugins/stt/google_cloud.py`
-- `src/plugins/stt/credentials.py`
+- `src/plugins/stt/client.py`
 - `src/plugins/stt/errors.py`
 - `tests/test_stt.py`
 
 要求：
 
 - 依赖 `settings`，注册分组「STT」的设置项。
-- 后端：Google Cloud Speech-to-Text **v2** REST `recognizers.recognize`，OAuth（service-account / authorized_user / ADC）；不使用 API Key。
-- 设置：`stt.enabled`、`stt.credentials_json`（secret）、`stt.credentials_file`、`stt.project_id`、`stt.location`、`stt.model`（默认 `chirp_3`）、`stt.language_code`、`stt.chunk_seconds`、`stt.enable_punctuation`、`stt.timeout`。
-- 读 `audio` 固定长度块，封装为 WAV（1–55 秒；v2 Recognize 上限 60 秒 / 10 MB）→ 请求 → 按 `resultEndOffset` 追加 `transcript`（`source="stt"`）。
-- 失败保留游标并指数退避重试；会话结束/退出 flush 剩余音频。
-- 事件 `stt.segment` / `stt.error`；UI 页 `stt:transcript` 显示状态与最近转写。
-- 测试：OAuth token/项目解析、v2 请求体、分段偏移、错误映射、分块转写、设置项、无凭据状态、UI；全部用 `httpx.MockTransport`，不访问网络。
+- 后端：兼容 `POST /v1/transcriptions` 与 WebSocket `/v1/stream` 的服务．
+- 设置：`stt.enabled`、`stt.server_url`、`stt.language`、`stt.context`、`stt.timeout`、`stt.batch_seconds`、`stt.concurrency`．
+- 直播与录播连续发送最多 200 ms PCM．直播 partial 替换临时文字，final 写入永久记录．录播选择 offline 模式并显式传入并发数；声学切分、上下文与文本合并仅在 Rust 服务实现．
+- 接收位置只释放传输背压，成功处理位置才更新覆盖和释放 PCM．断线从未提交范围恢复，结束完成尾音．
+- 事件 `stt.partial`、`stt.segment`、`stt.error`；调试页显示临时文字、定稿和处理位置．
+- 验证协议错误、覆盖空洞、上下文边界、顺序提交、尾音、断线及会话隔离．真实服务另作短时应用验证．
 
 ### P7 VLM 插件（并行任务 G）
 
@@ -292,7 +291,7 @@
 - 日志用标准 `logging`；不要 print（CLI 除外）。
 - 测试不访问网络；LLM 用 `httpx.MockTransport`；Canvas/SJTU 用 fake client。
 - 所有新增 public 函数/类写 docstring。
-- 不引入 google-cloud-speech SDK：STT 只用 `google-auth` 获取 OAuth token，用 `httpx` 直接调用 v2 REST；生产代码不含 mock 转写后端。
+- STT 使用兼容 HTTP/WebSocket 协议．
 - 所有文件 UTF-8，LF。
 
 ## 4. 测试矩阵

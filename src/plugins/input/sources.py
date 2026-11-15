@@ -115,6 +115,7 @@ class FFmpegSource:
         realtime: bool = True,
         downloader: MediaDownloader | None = None,
         media_dir: Path | None = None,
+        audio_enabled: Callable[[], bool] | None = None,
     ) -> None:
         self.spec = spec
         self._hub = hub
@@ -132,6 +133,7 @@ class FFmpegSource:
         self._media_dir = Path(media_dir) if media_dir is not None else None
         self._input_url = spec.url
         self._media_path: Path | None = None
+        self._audio_enabled = audio_enabled
         self._audio_done = False
         self._video_done = False
         self._session_id = ""
@@ -370,6 +372,10 @@ class FFmpegSource:
         self._audio_stop.set()
         self._video_stop.set()
         self._pause_event.set()  # unpause so threads can exit
+        session = self._hub.get_session(self._session_id)
+        if session is not None:
+            session.audio_gate.close()
+            session.video_gate.close()
 
         for proc, label in [
             (self._audio_proc, "audio"),
@@ -479,7 +485,7 @@ class FFmpegSource:
                 # read1 returns whatever is currently available instead of
                 # blocking until the full buffer is filled (real-time audio).
                 read = getattr(proc.stdout, "read1", proc.stdout.read)
-                chunk = read(self._buffer_size)
+                chunk = read(min(self._buffer_size, 6400))
             except Exception:
                 chunk = None
 
@@ -488,20 +494,38 @@ class FFmpegSource:
                 self._pause_event.wait()
                 if self._audio_stop.is_set():
                     break
-                try:
-                    current = self._hub.current
-                    gate = getattr(current, "audio_gate", None)
-                    if gate is not None and not gate.wait(current.audio.duration):
-                        break
-                    current.audio.append(chunk)
-                except Exception:
-                    _log.exception("audio append failed")
+                current = self._hub.get_session(self._session_id) if self._session_id else self._hub.current
+                if current is None:
+                    return
+                for offset in range(0, len(chunk), 6400):
+                    self._pause_event.wait()
+                    if self._audio_stop.is_set():
+                        return
+                    payload = chunk[offset:offset + 6400]
+                    duration = current.audio.bytes_to_duration(len(payload))
+                    gate = current.audio_gate
+                    if self._audio_enabled is not None and not self._audio_enabled():
+                        current.audio.discard(duration)
+                        gate.release(current.audio.duration)
+                        continue
+                    if not gate.wait(current.audio.duration + duration):
+                        if not self._audio_stop.is_set():
+                            self._emit(
+                                "input.error",
+                                message="Audio backlog limit timed out. Input stopped.",
+                                source=self.spec.title,
+                            )
+                            self.stop()
+                        return
+                    if self._audio_stop.is_set():
+                        return
+                    current.audio.append(payload)
             else:
                 # EOF – process exited
                 rc = proc.poll()
                 if rc is not None:
                     _log.info("Audio ffmpeg exited with code %s", rc)
-                    if self.spec.kind == "recording":
+                    if self.spec.kind in ("recording", "file"):
                         self._mark_reader_done("audio")
                         break
                     if not self._reconnect or self._audio_stop.is_set():
@@ -614,7 +638,7 @@ class FFmpegSource:
                 rc = proc.poll()
                 if rc is not None:
                     _log.info("Video ffmpeg exited with code %s", rc)
-                    if self.spec.kind == "recording":
+                    if self.spec.kind in ("recording", "file"):
                         self._mark_reader_done("video")
                         break
                     if not self._reconnect or self._video_stop.is_set():
@@ -693,6 +717,7 @@ class SourceManager:
         reconnect: bool = True,
         media_root: Path | None = None,
         downloader: MediaDownloader | None = None,
+        audio_enabled: Callable[[], bool] | None = None,
     ) -> None:
         self._hub = hub
         self._emit = emit
@@ -702,6 +727,7 @@ class SourceManager:
         self._reconnect = bool(reconnect)
         self._media_root = Path(media_root) if media_root is not None else None
         self._downloader = downloader or MediaDownloader()
+        self._audio_enabled = audio_enabled
         self._lock = threading.RLock()
         self._current: FFmpegSource | None = None
         self._state: Literal["idle", "playing", "paused", "stopped"] = "idle"
@@ -766,8 +792,15 @@ class SourceManager:
                 current.meta.update(meta)
             current.input_done = False
             current.input_done_at = None
-            current.audio_gate.configure(spec.audio_gate_limit)
-            current.video_gate.configure(spec.video_gate_limit)
+            current.audio_gate.configure(
+                spec.audio_gate_limit,
+                released=current.audio_gate.released if reuse else 0.0,
+                fail_closed=True,
+            )
+            current.video_gate.configure(
+                spec.video_gate_limit,
+                released=current.video_gate.released if reuse else 0.0,
+            )
 
             media_dir = None
             if self._media_root is not None:
@@ -783,6 +816,7 @@ class SourceManager:
                 realtime=spec.realtime,
                 downloader=self._downloader,
                 media_dir=media_dir,
+                audio_enabled=self._audio_enabled,
             )
             self._current = source
             self._state = "playing"
