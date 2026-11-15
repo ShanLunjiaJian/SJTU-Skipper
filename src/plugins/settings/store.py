@@ -182,10 +182,12 @@ class SettingsStore:
 class SettingsService:
     """Spec registry + typed access to :class:`SettingsStore`.
 
-    ``get`` returns real values (including secrets); ``all(public=True)`` and
-    ``public_all()`` mask secrets.  Every accepted change emits
+    Deliberately narrow (10 public methods): other plugins must not reach into
+    the store or the listener list.  ``get`` returns real values (including
+    secrets); ``all(public=True)`` masks them.  Every accepted change emits
     ``settings.changed`` with ``key`` / ``old`` / ``new`` when an ``emit``
-    callable was supplied.
+    callable was supplied — external plugins observe changes through that
+    event, never by registering listeners here.
     """
 
     def __init__(
@@ -197,51 +199,42 @@ class SettingsService:
     ) -> None:
         self._store = store
         self._emit = emit
-        self.logger = logger_ or logger
+        self._logger = logger_ or logger
         self._specs: dict[str, SettingsSpec] = {}
+        # key -> owning plugin id, so a hot-unplugged plugin can drop its specs.
+        self._owners: dict[str, str] = {}
         self._listeners: list[Listener] = []
         self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Introspection
     # ------------------------------------------------------------------
-    @property
-    def store(self) -> SettingsStore:
-        return self._store
-
     def specs(self) -> list[SettingsSpec]:
         with self._lock:
             return sorted(
                 self._specs.values(), key=lambda s: (s.group, s.order, s.key)
             )
 
-    def groups(self) -> list[str]:
-        seen: dict[str, None] = {}
-        for spec in self.specs():
-            seen.setdefault(spec.group, None)
-        return list(seen)
-
     def get_spec(self, key: str) -> SettingsSpec | None:
         with self._lock:
             return self._specs.get(key)
 
-    def keys(self) -> list[str]:
+    def _all_keys(self) -> list[str]:
+        """Every declared or stored key (internal: ``all`` uses it)."""
+
         with self._lock:
             declared = list(self._specs)
         return list(dict.fromkeys([*sorted(declared), *self._store.keys()]))
 
-    def has(self, key: str) -> bool:
-        return self._store.has(key)
-
     # ------------------------------------------------------------------
-    # Listener plumbing (UI refresh, toolbox sync, ...)
+    # Listener plumbing (plugin-internal: UI refresh, toolbox sync, ...)
     # ------------------------------------------------------------------
-    def add_listener(self, listener: Listener) -> Listener:
+    def _add_listener(self, listener: Listener) -> Listener:
         with self._lock:
             self._listeners.append(listener)
         return listener
 
-    def remove_listener(self, listener: Listener) -> None:
+    def _remove_listener(self, listener: Listener) -> None:
         with self._lock:
             if listener in self._listeners:
                 self._listeners.remove(listener)
@@ -253,7 +246,7 @@ class SettingsService:
             try:
                 listener(reason)
             except Exception:  # noqa: BLE001 - listeners are plugin code
-                self.logger.exception("settings listener failed: %s", reason)
+                self._logger.exception("settings listener failed: %s", reason)
 
     def _emit_changed(self, key: str, old: Any, new: Any) -> None:
         if self._emit is None:
@@ -261,18 +254,26 @@ class SettingsService:
         try:
             self._emit(CHANGED_EVENT, key=key, old=old, new=new)
         except Exception:  # noqa: BLE001 - bus must not break saving
-            self.logger.exception("failed to emit %s", CHANGED_EVENT)
+            self._logger.exception("failed to emit %s", CHANGED_EVENT)
 
     # ------------------------------------------------------------------
     # Registration
     # ------------------------------------------------------------------
-    def register(self, spec: SettingsSpec) -> SettingsSpec:
-        """Declare a setting (idempotent per key) and return the spec."""
+    def register(
+        self, spec: SettingsSpec, *, plugin_id: str = ""
+    ) -> SettingsSpec:
+        """Declare a setting (idempotent per key) and return the spec.
+
+        ``plugin_id`` records the owner so :meth:`unregister` can drop every
+        spec of a plugin that is unloaded at runtime.
+        """
 
         if not isinstance(spec, SettingsSpec):
             raise TypeError("register() expects a SettingsSpec")
         with self._lock:
             self._specs[spec.key] = spec
+            if plugin_id:
+                self._owners[spec.key] = plugin_id
         # Seed explicitly declared environment-backed settings into the store
         # once.  This keeps the settings page truthful: what the UI shows is
         # exactly what the plugins read.
@@ -284,15 +285,49 @@ class SettingsService:
                 try:
                     self._store.set(spec.key, spec.coerce(raw))
                 except (TypeError, ValueError):
-                    self.logger.warning(
+                    self._logger.warning(
                         "ignoring invalid %s value from environment", spec.key
                     )
                 break
         self._notify(f"register:{spec.key}")
         return spec
 
-    def register_many(self, specs: Iterable[SettingsSpec]) -> list[SettingsSpec]:
-        return [self.register(spec) for spec in specs]
+    def unregister(
+        self,
+        key: str | Iterable[str] | None = None,
+        *,
+        plugin_id: str = "",
+    ) -> list[str]:
+        """Drop declared specs by key(s) or by owning plugin.
+
+        With ``plugin_id`` every spec owned by that plugin is removed, plus any
+        spec whose key is namespaced ``"<plugin_id>."``; ``key`` may narrow the
+        set to one key or an explicit list.  Returns the removed keys.
+        """
+
+        wanted: set[str] = set()
+        if isinstance(key, str):
+            wanted.add(key)
+        elif key is not None:
+            wanted.update(str(item) for item in key)
+
+        removed: list[str] = []
+        with self._lock:
+            targets = set(wanted)
+            if plugin_id:
+                prefix = f"{plugin_id}."
+                for existing in self._specs:
+                    if self._owners.get(existing) == plugin_id:
+                        targets.add(existing)
+                    elif existing.startswith(prefix):
+                        targets.add(existing)
+            for existing in sorted(targets):
+                if self._specs.pop(existing, None) is not None:
+                    self._owners.pop(existing, None)
+                    removed.append(existing)
+        if removed:
+            self._notify("unregister:" + ",".join(removed))
+        return removed
 
     # ------------------------------------------------------------------
     # Values
@@ -309,7 +344,7 @@ class SettingsService:
             return spec.default
         return default
 
-    def public_value(self, key: str) -> Any:
+    def _public_value(self, key: str) -> Any:
         """Return the value safe for the UI (secrets masked)."""
 
         value = self.get(key)
@@ -317,12 +352,6 @@ class SettingsService:
         if spec is None:
             return value
         return spec.mask(value)
-
-    def is_set(self, key: str) -> bool:
-        """True when a non-empty value is configured or defaulted."""
-
-        value = self.get(key)
-        return value not in (None, "")
 
     def set(self, key: str, value: Any) -> Any:
         """Validate, persist and announce one value; returns the stored value."""
@@ -381,14 +410,9 @@ class SettingsService:
         """Return every declared or stored setting as a plain dict."""
 
         out: dict[str, Any] = {}
-        for key in self.keys():
-            out[key] = self.public_value(key) if public else self.get(key)
+        for key in self._all_keys():
+            out[key] = self._public_value(key) if public else self.get(key)
         return out
-
-    def public_all(self) -> dict[str, Any]:
-        """``all(public=True)`` shorthand."""
-
-        return self.all(public=True)
 
     def describe(self) -> list[dict[str, Any]]:
         """UI-friendly spec list including masked values and ``is_set``."""
@@ -412,9 +436,6 @@ class SettingsService:
                 }
             )
         return out
-
-    def __contains__(self, key: object) -> bool:
-        return isinstance(key, str) and self.get_spec(key) is not None
 
 
 def _ensure_jsonable(key: str, value: Any) -> Any:

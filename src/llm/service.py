@@ -8,12 +8,13 @@ stays decoupled from any particular settings plugin.
 from __future__ import annotations
 
 import logging
+import os
 import threading
-from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Union
 
 from .errors import LLMError
 from .provider import Provider, ProviderRegistry
+from .trace import LLMTrace, TraceCall
 from .types import (
     ChatRequest,
     ChatResponse,
@@ -104,9 +105,13 @@ def _coerce_tool(tool: ToolDef | dict[str, Any]) -> ToolDef:
     raise TypeError(f"expected ToolDef or dict, got {type(tool).__name__}")
 
 
-@dataclass
 class LLMService:
     """Multi-provider LLM facade.
+
+    Every collaborator is private state: callers configure the service through
+    the constructor and then only use the eight public methods
+    (``register_provider``, ``unregister_provider``, ``chat``, ``stream``,
+    ``config_for``, ``usage_snapshot``, ``info``, ``close``).
 
     Parameters
     ----------
@@ -118,29 +123,54 @@ class LLMService:
     on_event : callable | None
         ``(event_type: str, payload: dict) -> None`` callback for observability
         (``llm.request``, ``llm.response``, ``llm.error``).
+    trace_dir : path-like | None
+        When set, every call is written verbatim to a JSON file under this
+        directory (see :mod:`llm.trace`).  ``None`` disables on-disk tracing.
+    registry : ProviderRegistry | None
+        Shared provider registry; a private one is created when omitted.
     """
 
-    config_provider: ConfigCallback = field(default=lambda _: _DEFAULT_CONFIG)
-    default_provider: str = "openai"
-    on_event: Callable[[str, dict[str, Any]], None] | None = None
-    registry: ProviderRegistry = field(default_factory=ProviderRegistry)
-    usage_by_model: dict[str, dict[str, int]] = field(default_factory=dict)
-    """Per-model token totals: ``requests``, ``input_tokens``, ``output_tokens``,
-    ``cache_read_tokens``.  Counted, not priced: pricing depends on the plan and
-    peak hours, so it is left to a later accounting layer."""
-    _usage_lock: threading.Lock = field(
-        default_factory=threading.Lock, init=False, repr=False
-    )
+    def __init__(
+        self,
+        config_provider: ConfigCallback | None = None,
+        default_provider: str = "openai",
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        trace_dir: str | os.PathLike[str] | None = None,
+        registry: ProviderRegistry | None = None,
+    ) -> None:
+        self._config_provider: ConfigCallback = (
+            config_provider if config_provider is not None else (lambda _: _DEFAULT_CONFIG)
+        )
+        self._default_provider = str(default_provider or "openai")
+        self._on_event = on_event
+        self._trace_dir = trace_dir
+        self._registry = registry if registry is not None else ProviderRegistry()
+        self._trace: LLMTrace | None = (
+            LLMTrace(trace_dir) if trace_dir is not None else None
+        )
+        # Per-model token totals: ``requests``, ``input_tokens``,
+        # ``output_tokens``, ``cache_read_tokens``.  Counted, not priced:
+        # pricing depends on the plan and peak hours, so it is left to a later
+        # accounting layer.
+        self._usage_by_model: dict[str, dict[str, int]] = {}
+        self._usage_lock = threading.Lock()
 
     def register_provider(self, name: str, provider: Provider) -> None:
-        self.registry.register(name, provider)
+        self._registry.register(name, provider)
 
-    def _record_usage(self, model: str, usage: Usage) -> dict[str, int]:
+    def unregister_provider(self, name: str) -> None:
+        """Stop exposing a provider (hot-unplug support)."""
+
+        self._registry.unregister(name)
+
+    def _record_usage(
+        self, model: str, usage: Usage, trace_path: Any = None
+    ) -> dict[str, int]:
         """Add one response to the per-model totals and log the request line."""
 
         key = model or "unknown"
         with self._usage_lock:
-            totals = self.usage_by_model.setdefault(
+            totals = self._usage_by_model.setdefault(
                 key,
                 {
                     "requests": 0,
@@ -157,7 +187,7 @@ class LLMService:
 
         logger.info(
             "llm usage model=%s input=%d output=%d cache_read=%d | "
-            "total input=%d output=%d cache_read=%d",
+            "total input=%d output=%d cache_read=%d | trace=%s",
             key,
             usage.prompt_tokens,
             usage.completion_tokens,
@@ -165,6 +195,7 @@ class LLMService:
             snapshot["input_tokens"],
             snapshot["output_tokens"],
             snapshot["cache_read_tokens"],
+            trace_path or "-",
         )
         return snapshot
 
@@ -172,10 +203,10 @@ class LLMService:
         """Copy of the per-model token totals (safe to hand to the UI)."""
 
         with self._usage_lock:
-            return {model: dict(totals) for model, totals in self.usage_by_model.items()}
+            return {model: dict(totals) for model, totals in self._usage_by_model.items()}
 
     def _provider_for(self, config: ProviderConfig) -> Provider:
-        provider = self.registry.require(config.provider or self.default_provider)
+        provider = self._registry.require(config.provider or self._default_provider)
         reconfigure = getattr(provider, "reconfigure", None)
         if callable(reconfigure):
             reconfigure(config)
@@ -219,8 +250,8 @@ class LLMService:
             parent_session_id=parent_session_id,
         )
 
-        if self.on_event:
-            self.on_event("llm.request", {
+        if self._on_event:
+            self._on_event("llm.request", {
                 "profile": profile,
                 "model": request.model,
                 "message_count": len(coerced),
@@ -229,16 +260,25 @@ class LLMService:
                 "session_id": session_id,
             })
 
+        call = self._trace_start("chat", profile, request, config)
         try:
             response = provider.chat(request)
-        except LLMError:
-            if self.on_event:
-                self.on_event("llm.error", {"profile": profile, "phase": "chat"})
+        except BaseException as exc:  # noqa: BLE001 - re-raised after tracing
+            if call is not None:
+                call.fail(exc)
+            if isinstance(exc, LLMError) and self._on_event:
+                self._on_event("llm.error", {"profile": profile, "phase": "chat"})
             raise
 
-        totals = self._record_usage(response.model or request.model or "", response.usage)
-        if self.on_event:
-            self.on_event("llm.response", {
+        totals = self._record_usage(
+            response.model or request.model or "",
+            response.usage,
+            call.path if call is not None else None,
+        )
+        if call is not None:
+            call.finish(response)
+        if self._on_event:
+            self._on_event("llm.response", {
                 "profile": profile,
                 "model": response.model,
                 "finish_reason": response.finish_reason,
@@ -289,8 +329,8 @@ class LLMService:
             parent_session_id=parent_session_id,
         )
 
-        if self.on_event:
-            self.on_event("llm.request", {
+        if self._on_event:
+            self._on_event("llm.request", {
                 "profile": profile,
                 "model": request.model,
                 "message_count": len(coerced),
@@ -299,24 +339,70 @@ class LLMService:
                 "session_id": session_id,
             })
 
+        call = self._trace_start("stream", profile, request, config)
         try:
             for event in provider.stream(request):
+                if call is not None:
+                    if event.type == "text":
+                        call.on_text(event.text)
+                    elif event.type == "reasoning":
+                        call.on_reasoning(event.text)
+                    elif event.type == "tool_call":
+                        call.on_tool_call(event.tool_call)
                 if event.type == "done" and event.response is not None:
+                    usage = event.response.usage
                     self._record_usage(
                         event.response.model or request.model or "",
-                        event.response.usage,
+                        usage,
+                        call.path if call is not None else None,
                     )
-                if event.type == "error" and self.on_event:
-                    self.on_event("llm.error", {
-                        "profile": profile,
-                        "phase": "stream",
-                        "error": str(event.error) if event.error else "",
-                    })
+                    if call is not None:
+                        call.finish(event.response)
+                if event.type == "error":
+                    if call is not None:
+                        call.on_error(event.error)
+                    if self._on_event:
+                        self._on_event("llm.error", {
+                            "profile": profile,
+                            "phase": "stream",
+                            "error": str(event.error) if event.error else "",
+                        })
                 yield event
-        except LLMError:
-            if self.on_event:
-                self.on_event("llm.error", {"profile": profile, "phase": "stream"})
+        except GeneratorExit:
+            if call is not None:
+                call.abort("consumer closed the stream early")
             raise
+        except BaseException as exc:  # noqa: BLE001 - re-raised after tracing
+            if call is not None:
+                call.fail(exc)
+            if isinstance(exc, LLMError) and self._on_event:
+                self._on_event("llm.error", {"profile": profile, "phase": "stream"})
+            raise
+        finally:
+            if call is not None:
+                call.close()
+
+    def _trace_start(
+        self,
+        kind: str,
+        profile: str,
+        request: ChatRequest,
+        config: ProviderConfig,
+    ) -> TraceCall | None:
+        trace = self._trace
+        if trace is None:
+            return None
+        try:
+            return trace.start(
+                kind=kind,
+                profile=profile,
+                request=request,
+                config=config,
+                provider=config.provider or self._default_provider,
+            )
+        except Exception:  # noqa: BLE001 - tracing must never break a call
+            logger.exception("failed to start LLM trace for profile %s", profile)
+            return None
 
     # ------------------------------------------------------------------
     # config
@@ -326,7 +412,7 @@ class LLMService:
 
         The *vlm* profile overrides ``model`` with ``vlm_model`` when set.
         """
-        base = self.config_provider(profile)
+        base = self._config_provider(profile)
         config = ProviderConfig(
             base_url=base.base_url or _DEFAULT_CONFIG.base_url,
             api_key=base.api_key or _DEFAULT_CONFIG.api_key,
@@ -358,13 +444,13 @@ class LLMService:
     # ------------------------------------------------------------------
     def close(self) -> None:
         """Close every registered provider."""
-        self.registry.close_all()
+        self._registry.close_all()
 
     def info(self) -> dict[str, Any]:
         return {
             "registered": True,
-            "provider": self.default_provider,
-            "providers": self.registry.names(),
-            "default_provider": self.default_provider,
+            "provider": self._default_provider,
+            "providers": self._registry.names(),
+            "default_provider": self._default_provider,
             "usage": self.usage_snapshot(),
         }

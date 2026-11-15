@@ -150,6 +150,10 @@ page = ctx.ui.add_page("input:course:123", "课程详情", render=render_page, c
 page.open()
 ctx.ui.register_command("input.manual", "手动播放", category="调试", page_id="input:manual")
 ctx.ui.refresh("reason")
+# 右侧面板顶部的上下文条：返回 {"title", "subtitle", "state", "selected"}；
+# 返回 None 时（且没有历史）右侧面板显示“还没有选择课程”的占位。
+ctx.ui.set_context_provider(lambda: {"title": "高等数学", "subtitle": "11-05 · 录播 · 处理中",
+                                     "state": "busy", "selected": True})
 ```
 
 Block：

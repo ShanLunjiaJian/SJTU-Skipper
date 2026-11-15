@@ -14,6 +14,7 @@ from .errors import (
 from .openai_compat import OpenAICompatibleProvider
 from .provider import Provider, ProviderRegistry
 from .service import LLMService
+from .trace import LLMTrace
 from .types import (
     ChatRequest,
     ChatResponse,
@@ -40,6 +41,7 @@ __all__ = [
     "LLMStreamError",
     "LLMTimeoutError",
     "LLMService",
+    "LLMTrace",
     "Message",
     "OpenAICompatibleProvider",
     "Provider",

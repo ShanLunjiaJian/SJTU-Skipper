@@ -12,8 +12,9 @@
   --err: #d93025;
   --warn: #f29900;
   --radius: 10px;
-  --sidebar-w: 260px;
-  --right-w: 288px;
+  --sidebar-w: 280px;
+  --right-w: 320px;
+  --resizer-w: 7px;
 }
 
 * { box-sizing: border-box; }
@@ -53,25 +54,93 @@ body {
 .pill-live { color: var(--accent-2); border-color: rgba(249, 171, 0, .35); }
 
 .workspace {
+  position: relative;
   flex: 1; min-height: 0; display: grid;
   grid-template-columns:
-    var(--left-col, var(--sidebar-w)) minmax(0, 1fr) var(--right-col, var(--right-w));
+    var(--left-col, var(--sidebar-w))
+    var(--left-resizer, var(--resizer-w))
+    minmax(0, 1fr)
+    var(--right-resizer, var(--resizer-w))
+    var(--right-col, var(--right-w));
 }
 
-/* Sidebars are collapsible: the toggles live in the top bar, and a collapsed
-   sidebar keeps its column at 0 so the centre grows to fill the space. */
-#app.left-collapsed { --left-col: 0px; }
-#app.right-collapsed { --right-col: 0px; }
+/* Sidebars are collapsible: the × lives in the panel header, and a slim
+   handle on the window edge brings the panel back. */
+#app.left-collapsed { --left-col: 0px; --left-resizer: 0px; }
+#app.right-collapsed { --right-col: 0px; --right-resizer: 0px; }
 #app.left-collapsed .sidebar-left,
 #app.right-collapsed .sidebar-right { display: none; }
-.sidebar-toggle { font-size: 13px; line-height: 1; padding: 5px 7px; }
-.sidebar-toggle.active { background: var(--panel-3); color: var(--text); }
+#app.left-collapsed .restore-left,
+#app.right-collapsed .restore-right { display: flex; }
 
 .sidebar {
   min-height: 0; display: flex; flex-direction: column;
   background: var(--panel); border-right: 1px solid var(--line);
 }
 .sidebar-right { border-right: 0; border-left: 1px solid var(--line); }
+
+/* Panel header: title + close (×), the modern replacement for top-bar toggles. */
+.sidebar-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  min-height: 44px; padding: 0 8px 0 14px;
+}
+.sidebar-title {
+  flex: 1; min-width: 0; font-size: 13px; font-weight: 500; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sidebar-close {
+  flex: 0 0 auto; width: 28px; height: 28px; display: grid; place-items: center;
+  border: 0; border-radius: 50%; background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 17px; line-height: 1; padding: 0;
+}
+.sidebar-close:hover { background: var(--panel-3); color: var(--text); }
+
+/* Context strip: which course / lesson the right-hand panel is talking about. */
+.sidebar-context {
+  flex: 0 0 auto; margin: 0 10px 8px; padding: 9px 11px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px;
+}
+.sidebar-context[hidden] { display: none; }
+.context-title {
+  font-size: 12.5px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.context-tag {
+  font-size: 10px; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 999px; padding: 0 6px; white-space: nowrap;
+}
+.context-sub {
+  margin-top: 3px; font-size: 11px; color: var(--muted); display: flex;
+  align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.context-sub .dot { width: 6px; height: 6px; }
+
+/* Drag-to-resize gutters between a sidebar and the centre column. */
+.resizer {
+  position: relative; z-index: 5; cursor: col-resize; touch-action: none;
+  background: transparent;
+}
+.resizer::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 50%;
+  width: 1px; transform: translateX(-50%); background: var(--line);
+  transition: background .15s, width .15s;
+}
+.resizer:hover::after, .resizer.dragging::after {
+  width: 3px; background: var(--accent); border-radius: 2px;
+}
+body.resizing { cursor: col-resize; user-select: none; }
+
+/* Slim edge handles that bring a collapsed panel back. */
+.sidebar-restore {
+  position: absolute; top: 50%; transform: translateY(-50%); z-index: 8;
+  display: none; align-items: center; justify-content: center;
+  width: 16px; height: 52px; padding: 0; border: 1px solid var(--line);
+  background: var(--panel); color: var(--muted); cursor: pointer;
+  font-size: 13px; line-height: 1;
+}
+.sidebar-restore:hover { background: var(--panel-3); color: var(--accent); }
+.restore-left { left: 0; border-left: 0; border-radius: 0 8px 8px 0; }
+.restore-right { right: 0; border-right: 0; border-radius: 8px 0 0 8px; }
 
 .side-tabs {
   display: flex; gap: 4px; padding: 10px; overflow-x: auto;
@@ -247,16 +316,23 @@ code {
 video { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); }
 
 .statusbar {
-  flex: 0 0 auto; display: flex; gap: 18px; align-items: center;
-  padding: 7px 16px; border-top: 1px solid var(--line);
-  background: rgba(13,17,23,.9); color: var(--muted); font-size: 11px;
+  flex: 0 0 auto; display: flex; gap: 16px; align-items: center;
+  padding: 8px 16px; border-top: 1px solid var(--line);
+  background: var(--panel-2); color: var(--muted); font-size: 11.5px;
   overflow-x: auto; white-space: nowrap;
 }
-.statusbar b { color: var(--text); font-weight: 500; }
-.status-item { display: inline-flex; gap: 5px; align-items: center; }
+.statusbar b { color: var(--text); font-weight: 600; }
+.status-item {
+  display: inline-flex; gap: 6px; align-items: center;
+  padding-right: 16px; border-right: 1px solid var(--line);
+}
+.status-item:last-child { border-right: 0; padding-right: 0; }
+.status-item > span:not(.dot) { color: var(--muted); }
+.status-item b { font-variant-numeric: tabular-nums; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
 .dot.ok { background: var(--ok); box-shadow: 0 0 8px rgba(63,185,80,.6); }
 .dot.err { background: var(--err); }
+.dot.warn { background: var(--warn); }
 .dot.busy { background: var(--warn, #f29900); box-shadow: 0 0 8px rgba(210,153,34,.7); animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 
@@ -277,11 +353,12 @@ video { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); }
 ::-webkit-scrollbar-track { background: transparent; }
 
 @media (max-width: 1100px) {
-  :root { --sidebar-w: 230px; --right-w: 260px; }
+  :root { --sidebar-w: 250px; --right-w: 290px; }
 }
 @media (max-width: 900px) {
   .workspace { grid-template-columns: 1fr; }
-  .sidebar { display: none; }
+  .sidebar, .resizer { display: none; }
+  #app .sidebar-restore { display: none !important; }
 }
 
 /* --- interaction polish ------------------------------------------------ */
@@ -686,3 +763,31 @@ code { background: #f1f3f4; border-color: #e8eaed; }
 .badge, .pill, .tag { border-radius: 999px; }
 .logout-form { display: inline-flex; margin: 0 0 0 4px; }
 .logout-form .btn { color: var(--muted); }
+
+/* --- panel chrome & status bar (final pass) --------------------------- */
+.sidebar-head { padding: 0 8px 0 16px; }
+.sidebar-title { font-size: 13px; font-weight: 500; letter-spacing: .1px; }
+.side-tabs { padding: 0 10px 8px; }
+.sidebar-context {
+  margin: 0 10px 10px; padding: 10px 12px;
+  background: #f8f9fa; border-color: #e8eaed; border-radius: 8px;
+}
+.context-title { font-size: 13px; font-weight: 500; }
+.context-sub { font-size: 11px; }
+.resizer::after { background: transparent; }
+.resizer:hover::after, .resizer.dragging::after { background: #d2e3fc; }
+.sidebar-restore { border-color: #e8eaed; box-shadow: 0 1px 2px rgba(60,64,67,.12); }
+.statusbar {
+  background: #f8f9fa; border-top: 1px solid #e8eaed;
+  color: #5f6368; font-size: 11.5px; padding: 8px 16px;
+}
+.statusbar b { color: #202124; font-weight: 500; }
+.status-item { border-right-color: #e8eaed; }
+.dot.busy { box-shadow: none; background: #f29900; }
+.dot.ok { box-shadow: none; }
+.sidebar-empty {
+  margin: 10px; padding: 18px 14px; text-align: center;
+  color: var(--muted); font-size: 12px; line-height: 1.8;
+  border: 1px dashed #dadce0; border-radius: 10px; background: #fafafa;
+}
+.sidebar-empty b { display: block; color: var(--text); font-weight: 500; margin-bottom: 4px; }

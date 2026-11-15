@@ -8,6 +8,6 @@ recognition.
 
 from __future__ import annotations
 
-from .plugin import VlmPlugin
+from .plugin import VLMPlugin, VLMService, VlmPlugin
 
-__all__ = ["VlmPlugin"]
+__all__ = ["VLMPlugin", "VLMService", "VlmPlugin"]

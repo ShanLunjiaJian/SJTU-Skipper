@@ -144,24 +144,54 @@ class EventBus:
             return
         with self._lock:
             subscription.active = False
+            self._purge_locked(lambda sub: sub is subscription)
 
     def remove_plugin(self, plugin_id: str) -> None:
-        """Cancel every subscription owned by a plugin."""
+        """Cancel and physically drop every subscription owned by a plugin."""
 
         with self._lock:
-            for subs in self._handlers.values():
-                for sub in subs:
-                    if sub.plugin_id == plugin_id:
-                        sub.active = False
-            for sub in self._any:
-                if sub.plugin_id == plugin_id:
+            self._purge_locked(lambda sub: sub.plugin_id == plugin_id)
+
+    def _purge_locked(self, predicate: Callable[[Subscription], bool]) -> int:
+        """Remove matching subscriptions from the dispatch lists.
+
+        Deactivating alone leaked a reference (and the closure it captured) for
+        the lifetime of the bus, which matters because plugins are unloaded and
+        hot-reloaded at runtime.
+        """
+
+        removed = 0
+        for name in list(self._handlers):
+            kept: list[Subscription] = []
+            for sub in self._handlers[name]:
+                if predicate(sub):
                     sub.active = False
+                    removed += 1
+                else:
+                    kept.append(sub)
+            if kept:
+                self._handlers[name] = kept
+            else:
+                self._handlers.pop(name, None)
+        kept_any: list[Subscription] = []
+        for sub in self._any:
+            if predicate(sub):
+                sub.active = False
+                removed += 1
+            else:
+                kept_any.append(sub)
+        self._any[:] = kept_any
+        return removed
 
     def handler_count(self, event_type: str | None = None) -> int:
         with self._lock:
             if event_type is None:
-                return sum(len(s) for s in self._handlers.values()) + len(self._any)
-            return len(self._handlers.get(str(event_type), ())) + len(self._any)
+                return sum(
+                    1 for subs in self._handlers.values() for sub in subs if sub.active
+                ) + sum(1 for sub in self._any if sub.active)
+            return sum(
+                1 for sub in self._handlers.get(str(event_type), ()) if sub.active
+            ) + sum(1 for sub in self._any if sub.active)
 
     # ------------------------------------------------------------------
     # Emission
@@ -272,6 +302,8 @@ class EventBus:
                     continue
                 if sub.once:
                     sub.active = False
+                    with self._lock:
+                        self._purge_locked(lambda item, _sub=sub: item is _sub)
                 try:
                     sub.handler(event)
                 except Exception:  # noqa: BLE001 - handlers are untrusted

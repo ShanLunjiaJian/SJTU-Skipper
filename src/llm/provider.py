@@ -28,17 +28,16 @@ class ProviderRegistry:
         self._lock = threading.RLock()
 
     def register(self, name: str, provider: Provider) -> None:
+        """Publish *provider* under *name*, replacing any previous binding.
+
+        Replacement (instead of raising) keeps re-registration idempotent: a
+        plugin that is set up twice, or a provider that is swapped after a
+        settings change, must not fail.
+        """
+
         if not isinstance(name, str) or not name.strip():
             raise ValueError("provider name must be a non-empty string")
         with self._lock:
-            existing = self._providers.get(name)
-            if existing is not None:
-                if existing is not provider:
-                    raise ValueError(
-                        f"provider {name!r} already registered with a different object"
-                    )
-                # Same object — idempotent re-registration, no-op.
-                return
             self._providers[name] = provider
 
     def unregister(self, name: str) -> None:

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from core.plugin import Plugin, PluginContext
-from plugins.settings.spec import SettingsSpec
+from core.settings_spec import SettingsSpec
 
 from .prompts import (
     DRAFT_SECTION_TEMPLATE,
@@ -95,11 +95,42 @@ VISUAL_LOG = "visual.jsonl"
 # ---------------------------------------------------------------------------
 # Plugin
 # ---------------------------------------------------------------------------
+class SummarizeService:
+    """Narrow public ``summarize`` service (5 members)."""
+
+    __slots__ = ("_plugin",)
+
+    def __init__(self, plugin: "SummarizePlugin") -> None:
+        self._plugin = plugin
+
+    @property
+    def busy(self) -> bool:
+        return self._plugin.busy
+
+    def start(self, session_id: str = "") -> bool:
+        return self._plugin.start(session_id)
+
+    def running_tasks(self) -> list[dict[str, Any]]:
+        return self._plugin.running_tasks()
+
+    def source_path(self, session_id: str = "") -> Path | None:
+        """The lecture record handed to the writer for *session_id*."""
+
+        return self._plugin.source_path(session_id)
+
+    def note_files(self) -> dict[str, tuple[str, str]]:
+        """``{doc_key: (filename, title)}`` of the handout files."""
+
+        return self._plugin.note_files()
+
+
 class SummarizePlugin(Plugin):
     """One-shot whole-lecture summarizer producing structured handouts."""
 
     id = "summarize"
     requires = ("settings", "llm-agent", "reader")
+    optional_requires = ("input", "stt", "vlm", "instant-summarize")
+    provides = ("summarize",)
 
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
@@ -109,7 +140,7 @@ class SummarizePlugin(Plugin):
         for spec in _SETTING_SPECS:
             self._settings_service.register(spec)
 
-        ctx.register_service("summarize", self)
+        ctx.register_service("summarize", SummarizeService(self))
 
         self._job_lock = threading.Lock()
         self._job_busy = False
@@ -127,7 +158,7 @@ class SummarizePlugin(Plugin):
         ctx.events.define("summarize.finished", "Whole-lecture summary finished")
         ctx.events.define("summarize.error", "Whole-lecture summary failed")
 
-        ctx.ui.register_task_provider(self.running_tasks)
+        ctx.ui.register_task_provider(self.running_tasks, plugin_id=self.id)
         ctx.events.on(
             "session.started", self._on_session_started, plugin_id=self.id
         )
@@ -139,6 +170,23 @@ class SummarizePlugin(Plugin):
 
     def teardown(self) -> None:
         self._stop_event.set()
+        ctx = getattr(self, "ctx", None)
+        if ctx is None:
+            return
+        for action_id in (
+            "summarize.full",
+            "summarize.read",
+            "summarize.set_mode",
+            "summarize.fill_again",
+        ):
+            try:
+                ctx.ui.unregister_action(action_id)
+            except Exception:  # noqa: BLE001 - shutdown is best effort
+                pass
+        try:
+            ctx.ui.remove_toolbox_item("summarize.notes")
+        except Exception:  # noqa: BLE001 - shutdown is best effort
+            pass
 
     # ------------------------------------------------------------------
     # Settings
@@ -270,7 +318,7 @@ class SummarizePlugin(Plugin):
 
         # Right sidebar: the shared "note" area, one item per notes plugin.
         if not ui.has_tab("note"):
-            ui.add_tab("right", "note", "笔记", icon="📘", order=20)
+            ui.add_tab("right", "note", "笔记", icon="📘", order=20, plugin_id=self.id)
         if not ui.has_toolbox_item("summarize.notes"):
             ui.add_toolbox_item(
                 "note",
@@ -279,6 +327,7 @@ class SummarizePlugin(Plugin):
                 description="整堂课整理出的结构化讲义",
                 order=10,
                 render=self._render_note_item,
+                plugin_id=self.id,
             )
 
         ui.register_action(
@@ -479,6 +528,25 @@ class SummarizePlugin(Plugin):
         )
 
     # ------------------------------------------------------------------
+    # Service API
+    # ------------------------------------------------------------------
+    def source_path(self, session_id: str = "") -> Path | None:
+        """Path of the lecture record for *session_id* (may not exist yet)."""
+
+        sid = session_id or self.ctx.streams.notes_session_id
+        if not sid:
+            return None
+        return self.ctx.data_dir / "sessions" / sid / SOURCE_FILENAME
+
+    def note_files(self) -> dict[str, tuple[str, str]]:
+        """``{doc_key: (filename, title)}`` of the three handout files."""
+
+        return {
+            key: (_DOC_FILES[key], label)
+            for key, label in self._DOC_LABELS.items()
+        }
+
+    # ------------------------------------------------------------------
     # Action
     # ------------------------------------------------------------------
     def _on_summarize_full(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -509,7 +577,7 @@ class SummarizePlugin(Plugin):
         sid = event.get("session_id", "")
         if not sid:
             return
-        meta = self._session_meta(sid)
+        meta = self._load_session_record(sid)
         fill_for = str(meta.get("fill_for") or "")
         if fill_for:
             # A gap-filling pass over the class recording just finished: build
@@ -541,9 +609,17 @@ class SummarizePlugin(Plugin):
             daemon=True,
         ).start()
 
-    def _session_meta(self, session_id: str) -> dict[str, Any]:
+    def _load_session_record(self, session_id: str) -> dict[str, Any]:
         """Meta of a session that may already have ended (best effort)."""
 
+        input_svc = self.ctx.service("input")
+        if input_svc is not None:
+            try:
+                record = input_svc.session_meta(session_id)
+            except Exception:  # noqa: BLE001 - meta lookup is best effort
+                record = None
+            if isinstance(record, dict):
+                return dict(record)
         try:
             for info in self.ctx.streams.list_sessions():
                 if info.session_id == session_id:
@@ -562,9 +638,8 @@ class SummarizePlugin(Plugin):
         visible for the rest of the class, not just as a toast.
         """
 
-        service = self.ctx.service("input")
-        fill = getattr(service, "fill_gaps", None) if service is not None else None
-        if not callable(fill):
+        input_svc = self.ctx.service("input")
+        if input_svc is None:
             self._note_fallback(session_id, "输入服务不可用")
             self._auto_start_when_ready(session_id)
             return
@@ -577,7 +652,7 @@ class SummarizePlugin(Plugin):
             self.ctx.ui.refresh("summarize.fill.lookup")
             started = False
             try:
-                started = bool(fill(session_id))
+                started = bool(input_svc.fill_gaps(session_id))
             except Exception:  # noqa: BLE001 - fall back to a direct handout
                 self.ctx.logger.exception("gap fill failed to start")
             if started:
@@ -629,16 +704,22 @@ class SummarizePlugin(Plugin):
             "auto summarize for %s: %s", session_id, "started" if started else "skipped"
         )
 
+    def _busy_probes(self) -> list[Any]:
+        """Narrow-service probes telling whether a transcriber is still busy."""
+
+        probes: list[Any] = []
+        stt = self.ctx.service("stt")
+        if stt is not None:
+            probes.extend((stt.busy, stt.flushing))
+        vlm = self.ctx.service("vlm")
+        if vlm is not None:
+            probes.extend((vlm.busy, vlm.flushing))
+        return probes
+
     def _wait_for_processors(self, *, timeout: float = 120.0) -> None:
         """Let STT/VLM flush their buffers before their logs are read."""
 
-        probes = []
-        for name in ("stt", "vlm"):
-            service = self.ctx.service(name)
-            for attr in ("busy", "flushing"):
-                probe = getattr(service, attr, None)
-                if callable(probe):
-                    probes.append(probe)
+        probes = self._busy_probes()
         if not probes:
             return
         # Live VLM windows are flushed after the stop event and do not show up
@@ -755,23 +836,33 @@ class SummarizePlugin(Plugin):
 
         return _merge_logs(transcript, visual)
 
-    def _instant_draft_text(self, session_id: str) -> str:
-        """Merge the live instant notes into one draft document.
+    def _instant_drafts(self, session_id: str) -> dict[str, Path]:
+        """Draft files of the live notes, asked from the plugin that owns them."""
 
-        The instant plugin writes ``instant_note_*.md`` next to the handout
-        files while the lecture is running.  Handing them to the writer as a
-        draft avoids starting from a blank page; the prompt makes it verify
-        every claim against the lecture record and delete the rest.
-        """
-
+        service = self.ctx.service("instant-summarize")
+        if service is not None:
+            return dict(service.draft_paths(session_id))
         notes_dir = (
             self.ctx.data_dir / "sessions" / session_id / self._notes_dir_name
         )
+        return {
+            key: notes_dir / f"instant_{filename}"
+            for key, filename in _DOC_FILES.items()
+            if (notes_dir / f"instant_{filename}").exists()
+        }
+
+    def _collect_instant_draft(self, session_id: str) -> str:
+        """Merge the live instant notes into one draft document.
+
+        Handing the live notes to the writer as a draft avoids starting from a
+        blank page; the prompt makes it verify every claim against the lecture
+        record and delete the rest.
+        """
+
         parts: list[str] = []
-        for key, filename in _DOC_FILES.items():
-            path = notes_dir / f"instant_{filename}"
+        for key, path in self._instant_drafts(session_id).items():
             try:
-                text = path.read_text("utf-8")
+                text = Path(path).read_text("utf-8")
             except OSError:
                 continue
             if text.strip():
@@ -849,7 +940,7 @@ class SummarizePlugin(Plugin):
         source_path.write_text(material, "utf-8")
         file_paths[SOURCE_FILENAME] = str(source_path)
 
-        draft_text = self._instant_draft_text(session_id)
+        draft_text = self._collect_instant_draft(session_id)
         draft_section = ""
         if draft_text:
             draft_path = notes_dir / INSTANT_DRAFT_FILENAME
@@ -893,7 +984,11 @@ class SummarizePlugin(Plugin):
             max_history_chars=self._max_history_chars,
             max_tokens=self._max_tokens,
             llm_extra={"reasoning_effort": "max"},
-            meta={"lecture_session": session_id, "role": "writer"},
+            meta={
+                "internal": True,
+                "lecture_session": session_id,
+                "role": "writer",
+            },
         )
 
         reviewer = None
@@ -909,7 +1004,11 @@ class SummarizePlugin(Plugin):
                 max_history_chars=self._max_history_chars,
                 max_tokens=self._review_max_tokens,
                 llm_extra={"reasoning_effort": "max"},
-                meta={"lecture_session": session_id, "role": "reviewer"},
+                meta={
+                    "internal": True,
+                    "lecture_session": session_id,
+                    "role": "reviewer",
+                },
             )
 
         self._running_phase = "writing"
@@ -946,6 +1045,19 @@ class SummarizePlugin(Plugin):
         finally:
             self._agent_session_id = ""
             self._running_phase = ""
+            # Both contexts live for the whole job only; leaving them behind
+            # leaks one agent session per handout.
+            for finished in (writer, reviewer):
+                if finished is None:
+                    continue
+                closer = getattr(agent, "close", None)
+                if callable(closer):
+                    try:
+                        closer(finished.id)
+                    except Exception:  # noqa: BLE001 - cleanup is best effort
+                        self.ctx.logger.warning(
+                            "could not close agent session %s", finished.id
+                        )
 
     def _review_loop(
         self,
@@ -1073,7 +1185,15 @@ class SummarizePlugin(Plugin):
             llm_extra={"reasoning_effort": "max"},
         )
         self._agent_session_id = retry.id
-        agent.run(retry.id, RETRY_PROMPT)
+        try:
+            agent.run(retry.id, RETRY_PROMPT)
+        finally:
+            closer = getattr(agent, "close", None)
+            if callable(closer):
+                try:
+                    closer(retry.id)
+                except Exception:  # noqa: BLE001 - cleanup is best effort
+                    pass
 
 # ---------------------------------------------------------------------------
 # Helpers

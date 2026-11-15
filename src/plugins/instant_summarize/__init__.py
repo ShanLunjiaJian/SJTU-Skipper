@@ -6,6 +6,12 @@ from .plugin import (
     INSTANT_NOTE_FILES,
     INSTANT_NOTE_HEADERS,
     InstantSummarizePlugin,
+    InstantSummarizeService,
 )
 
-__all__ = ["InstantSummarizePlugin", "INSTANT_NOTE_FILES", "INSTANT_NOTE_HEADERS"]
+__all__ = [
+    "InstantSummarizePlugin",
+    "InstantSummarizeService",
+    "INSTANT_NOTE_FILES",
+    "INSTANT_NOTE_HEADERS",
+]

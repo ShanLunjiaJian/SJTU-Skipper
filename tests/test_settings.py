@@ -90,7 +90,7 @@ def test_set_persists_atomically_and_reloads(tmp_path: Path) -> None:
     assert list(tmp_path.glob(".settings.json.*")) == []
 
     reloaded = SettingsService(SettingsStore(path))
-    assert reloaded.store.get("a.b") == 7
+    assert reloaded._store.get("a.b") == 7
     assert reloaded.get("a.b") == 7
     assert reloaded.get("missing") is None
 
@@ -206,11 +206,10 @@ def test_secret_masking_and_internal_value(tmp_path: Path) -> None:
             SettingsSpec(key="llm.model", label="模型", default="m"),
         ],
     )
-    assert service.public_all() == {"llm.model": "m", "llm.api_key": ""}
+    assert service.all(public=True) == {"llm.model": "m", "llm.api_key": ""}
     service.set("llm.api_key", "real-token")
     assert service.get("llm.api_key") == "real-token"
     assert service.all()["llm.api_key"] == "real-token"
-    assert service.public_all()["llm.api_key"] == SECRET_MASK
     assert service.all(public=True)["llm.api_key"] == SECRET_MASK
     described = {item["key"]: item for item in service.describe()}
     assert described["llm.api_key"]["value"] == SECRET_MASK
@@ -259,7 +258,7 @@ def test_plugin_registers_service_and_tab(tmp_path: Path) -> None:
     try:
         service = runtime.services.require("settings")
         assert isinstance(service, SettingsService)
-        assert service.store.path == tmp_path / "settings.json"
+        assert service._store.path == tmp_path / "settings.json"
         snapshot = runtime.ui.snapshot()
         assert "settings" not in snapshot["tabs"], "settings must live in a page, not a tab"
         assert snapshot["pages"]["settings:main"] == "设置"

@@ -179,6 +179,8 @@ def create_app(runtime: Runtime) -> FastAPI:
         finally:
             subscription.cancel()
             notify_subscription.cancel()
+            # Any subscription this adapter registered under "server" goes too.
+            runtime.bus.remove_plugin("server")
             client: httpx.AsyncClient | None = getattr(app.state, "media_client", None)
             if client is not None:
                 try:
@@ -194,15 +196,8 @@ def create_app(runtime: Runtime) -> FastAPI:
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-    if not runtime.ui.has_action("ui.open_page"):
-        runtime.ui.register_action(
-            "ui.open_page",
-            lambda payload: {
-                "ok": True,
-                "open_page": payload.get("page_id") or payload.get("value"),
-            },
-            plugin_id="server",
-        )
+    # ``ui.open_page`` is a core action (see UIManager.__init__); the web
+    # adapter must not fake ownership of it.
 
     @app.get("/")
     def index() -> FileResponse:

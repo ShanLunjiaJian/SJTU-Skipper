@@ -14,14 +14,22 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping
 
+from core.agent_types import (
+    AgentEvent,
+    AgentProfile,
+    AgentRunResult,
+    AgentTool,
+)
 from core.plugin import Plugin, PluginContext
+from core.settings_spec import SettingsSpec
+
 from .prompts import DEFAULT_SYSTEM_PROMPT
 from .session import AgentSession
 from .tools import ToolContext, ToolSpec, build_tools
 from .workspace import FileWorkspace
+
 
 # ---------------------------------------------------------------------------
 # Run result types
@@ -30,58 +38,14 @@ from .workspace import FileWorkspace
 _DEFAULT_TOOL_DECLARATIONS = ("info", "read", "replace", "append")
 
 
-@dataclass(slots=True)
-class AgentEvent:
-    """An observable event emitted during a run loop (passed to *on_event*)."""
+def _tool_schema(tool: Any) -> dict[str, Any]:
+    """Return the OpenAI tool schema of *tool* (contract or local ToolSpec)."""
 
-    type: str
-    """One of ``run.started``, ``message``, ``tool_call``, ``tool_result``,
-    ``run.finished``, ``error``."""
-
-    session_id: str
-    step: int = 0
-    data: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
-class AgentRunResult:
-    """Returned by ``AgentService.run`` after the REPL loop finishes."""
-
-    session_id: str
-    steps: int = 0
-    final_message: str = ""
-    total_tokens: int = 0
-    error: str | None = None
-
-
-@dataclass(slots=True)
-class AgentTool:
-    """One tool a behavior plugin wants, with its parameters."""
-
-    name: str
-    params: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
-class AgentProfile:
-    """A named agent configuration registered by a behavior plugin.
-
-    The plugin declares the tools (and their parameters), prompt, model and
-    limits; the agent plugin owns the loop, the tools themselves and the
-    context.  ``None`` means "fall back to the service default".
-    """
-
-    name: str
-    system_prompt: str = ""
-    tools: list[AgentTool] = field(default_factory=list)
-    model: str | None = None
-    max_steps: int | None = None
-    max_tool_output: int | None = None
-    max_history_chars: int | None = None
-    max_tokens: int | None = None
-    llm_extra: dict[str, Any] = field(default_factory=dict)
-    final_answer_on_limit: bool = False
-    stream: bool = False
+    for name in ("openai_schema", "to_openai_schema"):
+        schema = getattr(tool, name, None)
+        if callable(schema):
+            return schema()
+    raise TypeError(f"{tool!r} cannot produce an OpenAI tool schema")
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +133,8 @@ class AgentService:
 
     - ``create_session`` / ``create_subsession``
     - ``get_session`` / ``list_sessions`` / ``reset`` / ``close``
-    - ``run`` / ``run_async``
-    - ``register_tool`` / ``unregister_tool``
+    - ``run``
+    - ``register_agent`` / ``register_tool`` / ``unregister_tool``
     - ``add_prompt_contributor`` / ``set_system_prompt`` / ``add_instruction``
     """
 
@@ -385,7 +349,7 @@ class AgentService:
             return None
         if isinstance(agent, AgentProfile):
             return agent
-        profile = self.get_agent(str(agent))
+        profile = self._get_agent(str(agent))
         if profile is None:
             raise KeyError(f"agent profile {agent!r} is not registered")
         return profile
@@ -452,11 +416,11 @@ class AgentService:
         with self._lock:
             self._agents[profile.name] = profile
 
-    def unregister_agent(self, name: str) -> None:
+    def _unregister_agent(self, name: str) -> None:
         with self._lock:
             self._agents.pop(name, None)
 
-    def get_agent(self, name: str) -> AgentProfile | None:
+    def _get_agent(self, name: str) -> AgentProfile | None:
         with self._lock:
             return self._agents.get(name)
 
@@ -637,7 +601,7 @@ class AgentService:
         finally:
             session.lock.release()
 
-    def run_async(
+    def _run_async(
         self,
         session_id: str,
         user_input: str,
@@ -676,7 +640,7 @@ class AgentService:
         total_tokens = 0
         final_message = ""
 
-        tool_schemas = [t.openai_schema() for t in session.tools.values()]
+        tool_schemas = [_tool_schema(t) for t in session.tools.values()]
 
         # --- REPL ---
         while session.max_steps <= 0 or step < session.max_steps:
@@ -983,17 +947,20 @@ class AgentService:
 _AGENT_SETTINGS_GROUP = "Agent"
 _AGENT_TAB_ID = "agent"
 
-# Session-name prefixes used by plugins that drive the agent internally; these
-# are implementation details and must not show up in the user's session list.
-_INTERNAL_SESSION_PREFIXES = ("summarize-", "instant-summarize-")
-
-
-def _is_internal_session(name: Any) -> bool:
-    """Return True for agent sessions owned by background note workers."""
-
-    text = str(name or "")
-    return text.startswith(_INTERNAL_SESSION_PREFIXES)
 _AGENT_PAGE_ID = "agent:chat"
+
+
+def _is_user_session(item: Any) -> bool:
+    """True for sessions the user owns.
+
+    Plugins that drive the agent in the background mark their sessions with
+    ``meta["internal"] = True``; nothing here knows their names.
+    """
+
+    if isinstance(item, Mapping):
+        return not bool(item.get("internal"))
+    meta = getattr(item, "meta", None)
+    return not bool(meta.get("internal")) if isinstance(meta, Mapping) else True
 
 
 def _new_session_id() -> str:
@@ -1018,6 +985,7 @@ class AgentPlugin(Plugin):
         self.service: AgentService | None = None
         self._tab_added = False
         self._page_added = False
+        self._command_added = False
         self._actions: list[str] = []
         self._current_session_id = ""
 
@@ -1029,8 +997,6 @@ class AgentPlugin(Plugin):
         settings = ctx.require("settings")
 
         # --- register settings ---
-        from plugins.settings.spec import SettingsSpec
-
         agent_specs = [
             SettingsSpec(
                 key="agent.model",
@@ -1108,7 +1074,7 @@ class AgentPlugin(Plugin):
             lambda: {
                 "default_model": default_model,
                 "default_max_steps": default_max_steps,
-                "sessions": len(self.service._sessions),  # noqa: SLF001
+                "sessions": len(self.service.list_sessions()),
             },
             plugin_id=self.id,
         )
@@ -1174,7 +1140,7 @@ class AgentPlugin(Plugin):
                 except Exception:
                     pass
             self._actions.clear()
-            if getattr(self, "_command_added", False):
+            if self._command_added:
                 try:
                     ctx.ui.unregister_command("agent.open")
                 except Exception:
@@ -1200,7 +1166,7 @@ class AgentPlugin(Plugin):
         return [
             s
             for s in service.list_sessions()
-            if not _is_internal_session(s.get("name", ""))
+            if _is_user_session(s)
         ]
 
     def _current_session(self, sessions: list[dict[str, Any]]) -> str:
@@ -1213,7 +1179,7 @@ class AgentPlugin(Plugin):
             (
                 s
                 for s in reversed(sessions)
-                if not _is_internal_session(s.get("name", ""))
+                if _is_user_session(s)
             ),
             sessions[-1] if sessions else None,
         )
@@ -1369,7 +1335,7 @@ class AgentPlugin(Plugin):
         else:
             session_id = self._current_session(sessions)
 
-        service.run_async(session_id, message)
+        service._run_async(session_id, message)  # noqa: SLF001 - internal UI path
         return {"ok": True, "message": "Agent 正在处理…", "refresh": True}
 
     def _handle_new_session(self, payload: dict[str, Any]) -> dict[str, Any]:

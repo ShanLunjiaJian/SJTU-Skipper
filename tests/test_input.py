@@ -863,10 +863,8 @@ class TestInputPluginUI:
         assert hasattr(svc, "resume")
         assert hasattr(svc, "status")
         assert hasattr(svc, "list_courses")
-        assert hasattr(svc, "list_recordings")
-        assert hasattr(svc, "get_recording_url")
-        assert hasattr(svc, "list_lives")
-        assert hasattr(svc, "get_live_devices")
+        assert hasattr(svc, "fill_gaps")
+        assert hasattr(svc, "session_meta")
 
         plugin.teardown()
 
@@ -1320,6 +1318,7 @@ class TestClassPlayer:
         monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
 
         self._open_class(ctx, plugin, videos=("v1", "v2"))
+        monkeypatch.setattr(plugin, "_resolve_job_streams", lambda job: None)
         # A finished class is reopened on its last part, keeping its streams.
         plugin._class_index = 1
         plugin._class_streams = {"main": "https://example.com/v2.mp4"}
@@ -1668,3 +1667,146 @@ def test_pick_recordings_handles_three_parts() -> None:
     picked = InputPlugin._pick_recordings(recordings, started, ended)
 
     assert [item["video_id"] for item in picked] == ["v0", "v1", "v2"]
+
+
+class TestProcessingQueue:
+    """Switching classes must not stop processing; extra classes wait in line."""
+
+    def _setup(self, monkeypatch):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        started: list[SourceSpec] = []
+        monkeypatch.setattr(plugin, "_start_source", lambda spec: started.append(spec))
+        return ctx, plugin, started
+
+    @staticmethod
+    def _open(ctx, plugin, class_id, name):
+        return ctx.ui.dispatch_action(
+            "input.open_class",
+            {
+                "id": class_id,
+                "kind": "recording",
+                "course": "1",
+                "name": name,
+                "label": "11-05 08:00–09:35",
+                "videos": [f"{class_id}-v1"],
+            },
+        )
+
+    def test_switching_class_keeps_the_running_job(self, monkeypatch):
+        ctx, plugin, started = self._setup(monkeypatch)
+        self._open(ctx, plugin, "class:a", "高等数学")
+        plugin._class_streams = {"main": "https://example.com/a.mp4"}
+        plugin._streams_loading = False
+        ctx.ui.dispatch_action("input.start_processing", {})
+        assert plugin._active_job is not None
+        assert plugin._active_job.id == "class:a"
+
+        # Select another class: the engine keeps running A.
+        self._open(ctx, plugin, "class:b", "线性代数")
+        assert plugin._processing is True
+        assert plugin._active_job is not None
+        assert plugin._active_job.id == "class:a"
+        assert [job.url for job in started] == ["https://example.com/a.mp4"]
+
+        plugin.teardown()
+
+    def test_second_class_waits_in_queue_then_starts(self, monkeypatch):
+        ctx, plugin, started = self._setup(monkeypatch)
+        self._open(ctx, plugin, "class:a", "高等数学")
+        plugin._class_streams = {"main": "https://example.com/a.mp4"}
+        plugin._streams_loading = False
+        ctx.ui.dispatch_action("input.start_processing", {})
+
+        self._open(ctx, plugin, "class:b", "线性代数")
+        plugin._class_streams = {"main": "https://example.com/b.mp4"}
+        plugin._streams_loading = False
+        result = ctx.ui.dispatch_action("input.start_processing", {})
+        assert result.ok
+        assert "队列" in result.message
+        assert plugin._queue == ["class:b"]
+        assert plugin._active_job.id == "class:a"
+
+        # A finishes -> B takes the engine slot automatically.
+        first = plugin._active_job
+        plugin._finish_job(first, "test finished")
+        deadline = time.monotonic() + 5
+        while len(started) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert [job.url for job in started] == [
+            "https://example.com/a.mp4",
+            "https://example.com/b.mp4",
+        ]
+        assert plugin._active_job is not None
+        assert plugin._active_job.id == "class:b"
+
+        plugin.teardown()
+
+    def test_queue_item_is_listed_in_right_sidebar(self, monkeypatch):
+        ctx, plugin, _started = self._setup(monkeypatch)
+        self._open(ctx, plugin, "class:a", "高等数学")
+        plugin._class_streams = {"main": "https://example.com/a.mp4"}
+        plugin._streams_loading = False
+        ctx.ui.dispatch_action("input.start_processing", {})
+        self._open(ctx, plugin, "class:b", "线性代数")
+        plugin._class_streams = {"main": "https://example.com/b.mp4"}
+        plugin._streams_loading = False
+        ctx.ui.dispatch_action("input.start_processing", {})
+
+        state = ctx.ui.state()
+        items = {
+            item["id"]: item
+            for tab in state["right_tabs"]
+            for item in tab["toolbox"]
+        }
+        rows = next(
+            block
+            for block in items["input.queue"]["blocks"]
+            if block["type"] == "rows"
+        )
+        assert len(rows["items"]) == 2
+        assert "高等数学" in rows["items"][0]["title"]
+        assert "线性代数" in rows["items"][1]["title"]
+
+        plugin.teardown()
+
+    def test_context_names_the_selected_class(self, monkeypatch):
+        ctx, plugin, _started = self._setup(monkeypatch)
+        assert ctx.ui.state()["context"] is None
+        self._open(ctx, plugin, "class:a", "高等数学")
+        context = ctx.ui.state()["context"]
+        assert context["title"] == "高等数学"
+        assert "11-05" in context["subtitle"]
+        assert context["selected"] is True
+        plugin.teardown()
+
+    def test_course_tree_badges_the_background_job(self, monkeypatch):
+        ctx, plugin, _started = self._setup(monkeypatch)
+        plugin._tree["nodes"] = [
+            {
+                "id": "course:1",
+                "children": [
+                    {
+                        "id": "class:a",
+                        "action": {"action": "input.open_class", "value": {"id": "class:a"}},
+                    }
+                ],
+            }
+        ]
+        self._open(ctx, plugin, "class:a", "高等数学")
+        plugin._class_streams = {"main": "https://example.com/a.mp4"}
+        plugin._streams_loading = False
+        ctx.ui.dispatch_action("input.start_processing", {})
+        plugin._apply_tree_state()
+        child = plugin._tree["nodes"][0]["children"][0]
+        assert child["badge"] == "处理中"
+        assert child["badge_class"] == "live"
+
+        # Selecting another class keeps A's badge on the tree.
+        self._open(ctx, plugin, "class:b", "线性代数")
+        plugin._apply_tree_state()
+        child = plugin._tree["nodes"][0]["children"][0]
+        assert child["badge"] == "处理中"
+        plugin.teardown()

@@ -49,6 +49,7 @@ class SettingsPlugin(Plugin):
         self._page_added = False
         self._action_added = False
         self._clear_action_added = False
+        self._command_added = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -61,7 +62,7 @@ class SettingsPlugin(Plugin):
         )
         ctx.register_service("settings", self.service)
 
-        self._listener = self.service.add_listener(self._on_settings_changed)
+        self._listener = self.service._add_listener(self._on_settings_changed)
 
         ui = ctx.ui
         # Settings live in a page only; no sidebar tab.  Reachable from the
@@ -98,7 +99,7 @@ class SettingsPlugin(Plugin):
 
     def teardown(self) -> None:
         if self.service is not None and self._listener is not None:
-            self.service.remove_listener(self._listener)
+            self.service._remove_listener(self._listener)
             self._listener = None
         ctx = self.ctx
         if ctx is not None:
@@ -120,7 +121,7 @@ class SettingsPlugin(Plugin):
                 except Exception:  # noqa: BLE001
                     pass
                 self._page_added = False
-            if getattr(self, "_command_added", False):
+            if self._command_added:
                 try:
                     ctx.ui.unregister_command("settings.open")
                 except Exception:  # noqa: BLE001

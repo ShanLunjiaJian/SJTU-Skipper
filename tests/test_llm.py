@@ -787,7 +787,7 @@ def test_service_close() -> None:
     service.register_provider("openai", scripted_provider)
     service.close()
     # Registry should be empty after close_all
-    assert service.registry.names() == []
+    assert service.info()["providers"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -900,11 +900,11 @@ def test_llm_plugin_setup_registers_settings_and_service() -> None:
     # Check service is published and has the openai provider registered
     llm_service = services.get("llm")
     assert llm_service is not None
-    assert "openai" in llm_service.registry.names()
+    assert "openai" in llm_service.info()["providers"]
 
     # Replace the openai provider with a mock for testing
-    llm_service.registry.unregister("openai")
-    llm_service.registry.unregister("openai-compatible")
+    llm_service.unregister_provider("openai")
+    llm_service.unregister_provider("openai-compatible")
     scripted_provider = ScriptedProvider(script=["plugin test ok"])
     llm_service.register_provider("openai", scripted_provider)
     response = llm_service.chat(

@@ -154,4 +154,7 @@ class AgentSession:
             "parent_id": self.parent_id,
             "created_at": self.created_at,
             "last_message": last_content,
+            # Background workers (summarize / instant-summarize / ask) mark
+            # their sessions; the UI hides them without knowing any names.
+            "internal": bool(self.meta.get("internal")),
         }

@@ -181,6 +181,9 @@ class _Tab:
     icon: str | None
     order: float
     plugin_id: str
+    # Plugins that share this tab (a tab may be contributed by several
+    # plugins, e.g. "note" is used by both summarizers).
+    owners: set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -243,7 +246,10 @@ class UIManager:
         self._on_change = on_change
         self._on_notify = on_notify
         self._status_provider: Callable[[], dict[str, Any]] | None = None
-        self._task_providers: list[Callable[[], list[dict[str, Any]]]] = []
+        self._status_provider_owner: str = ""
+        self._context_provider: Callable[[], dict[str, Any] | None] | None = None
+        self._context_provider_owner: str = ""
+        self._task_providers: list[tuple[str, Callable[[], list[dict[str, Any]]]]] = []
         self._lock = threading.RLock()
         self._tabs: dict[str, _Tab] = {}
         self._items: dict[str, _Item] = {}
@@ -254,6 +260,16 @@ class UIManager:
         self._active_page: str | None = None
         self._version = 0
         self._last_refresh = 0.0
+        # Generic navigation action every plugin may reuse; the web adapter no
+        # longer has to fake ownership of it.
+        self.register_action(
+            "ui.open_page",
+            lambda payload: {
+                "ok": True,
+                "open_page": payload.get("page_id") or payload.get("value"),
+            },
+            plugin_id="core",
+        )
 
     # ------------------------------------------------------------------
     # Contributions
@@ -271,9 +287,19 @@ class UIManager:
         if side not in ("left", "right"):
             raise ValueError("side must be 'left' or 'right'")
         with self._lock:
-            if id in self._tabs:
-                raise ValueError(f"UI tab {id!r} already exists")
-            self._tabs[id] = _Tab(
+            existing = self._tabs.get(id)
+            if existing is not None:
+                # A plugin may *share* an existing tab (same side + title), but
+                # an anonymous duplicate is still a bug in the caller.
+                if not plugin_id:
+                    raise ValueError(f"UI tab {id!r} already exists")
+                if existing.side != side or existing.title != title:
+                    raise ValueError(
+                        f"UI tab {id!r} already exists with different side/title"
+                    )
+                existing.owners.add(plugin_id)
+                return TabHandle(self, id)
+            tab = _Tab(
                 id=id,
                 side=side,
                 title=title,
@@ -281,6 +307,9 @@ class UIManager:
                 order=float(order),
                 plugin_id=plugin_id,
             )
+            if plugin_id:
+                tab.owners.add(plugin_id)
+            self._tabs[id] = tab
         return TabHandle(self, id)
 
     def remove_tab(self, id: str) -> None:
@@ -546,11 +575,38 @@ class UIManager:
             return
         self._on_notify(str(topic), dict(payload or {}))
 
-    def set_status_provider(self, provider: Callable[[], dict[str, Any]] | None) -> None:
-        self._status_provider = provider
+    def set_status_provider(
+        self,
+        provider: Callable[[], dict[str, Any]] | None,
+        *,
+        plugin_id: str = "",
+    ) -> None:
+        with self._lock:
+            self._status_provider = provider
+            self._status_provider_owner = plugin_id if provider is not None else ""
+
+    def set_context_provider(
+        self,
+        provider: Callable[[], dict[str, Any] | None] | None,
+        *,
+        plugin_id: str = "",
+    ) -> None:
+        """Register the "what is this panel about" descriptor.
+
+        The web layer renders it at the top of the right sidebar (and hides the
+        panel when it is empty), so a sidebar never silently refers to an
+        unknown course.
+        """
+
+        with self._lock:
+            self._context_provider = provider
+            self._context_provider_owner = plugin_id if provider is not None else ""
 
     def register_task_provider(
-        self, provider: Callable[[], list[dict[str, Any]]]
+        self,
+        provider: Callable[[], list[dict[str, Any]]],
+        *,
+        plugin_id: str = "",
     ) -> None:
         """Register a callable returning the plugin's currently running tasks.
 
@@ -559,8 +615,72 @@ class UIManager:
         """
 
         with self._lock:
-            if provider not in self._task_providers:
-                self._task_providers.append(provider)
+            if any(existing is provider for _owner, existing in self._task_providers):
+                return
+            self._task_providers.append((plugin_id, provider))
+
+    def remove_plugin(self, plugin_id: str) -> None:
+        """Drop every contribution owned by *plugin_id* (plugin teardown).
+
+        Shared tabs stay alive as long as another owner remains; a tab whose
+        declaring plugin leaves and that has no owners and no items left is
+        removed.
+        """
+
+        if not plugin_id:
+            return
+        with self._lock:
+            for page_id in [
+                page.id for page in self._pages.values() if page.plugin_id == plugin_id
+            ]:
+                self._pages.pop(page_id, None)
+                if page_id in self._open_pages:
+                    self._open_pages.remove(page_id)
+                if self._active_page == page_id:
+                    self._active_page = self._open_pages[-1] if self._open_pages else None
+            for item_id in [
+                item.id for item in self._items.values() if item.plugin_id == plugin_id
+            ]:
+                self._items.pop(item_id, None)
+            for action_id in [
+                action.id
+                for action in self._actions.values()
+                if action.plugin_id == plugin_id
+            ]:
+                self._actions.pop(action_id, None)
+            for command_id in [
+                command.id
+                for command in self._commands.values()
+                if command.plugin_id == plugin_id
+            ]:
+                self._commands.pop(command_id, None)
+            self._task_providers = [
+                (owner, provider)
+                for owner, provider in self._task_providers
+                if owner != plugin_id
+            ]
+            for tab_id in list(self._tabs):
+                tab = self._tabs[tab_id]
+                tab.owners.discard(plugin_id)
+                if tab.plugin_id == plugin_id:
+                    if tab.owners:
+                        # Ownership passes to a remaining sharer so a later
+                        # teardown of *that* plugin still cleans the tab up.
+                        tab.plugin_id = sorted(tab.owners)[0]
+                    else:
+                        tab.plugin_id = ""
+                if tab.plugin_id:
+                    continue
+                if any(item.tab_id == tab_id for item in self._items.values()):
+                    continue
+                self._tabs.pop(tab_id, None)
+            if self._status_provider_owner == plugin_id:
+                self._status_provider = None
+                self._status_provider_owner = ""
+            if self._context_provider_owner == plugin_id:
+                self._context_provider = None
+                self._context_provider_owner = ""
+        self.refresh(f"plugin-removed:{plugin_id}")
 
     def _render(self, renderer: Renderer | None, label: str) -> list[dict[str, Any]]:
         if renderer is None:
@@ -669,11 +789,20 @@ class UIManager:
             except Exception as exc:  # noqa: BLE001
                 status = {"error": str(exc)}
         tasks: list[dict[str, Any]] = []
-        for provider in list(self._task_providers):
+        for _owner, provider in list(self._task_providers):
             try:
                 tasks.extend(provider() or [])
             except Exception:  # noqa: BLE001 - a broken task provider must not
                 continue
+
+        context: dict[str, Any] | None = None
+        if self._context_provider is not None:
+            try:
+                value = self._context_provider()
+                context = dict(value) if isinstance(value, dict) and value else None
+            except Exception:  # noqa: BLE001 - context is decoration
+                logger.exception("UI context provider failed")
+                context = None
 
         return {
             "version": version,
@@ -693,6 +822,7 @@ class UIManager:
             "active_page": active,
             "page_content": page_content,
             "tasks": tasks,
+            "context": context,
             "commands": self.list_commands(),
             "status": status,
         }

@@ -3,8 +3,9 @@
 Registered services
 -------------------
 ``"vlm"``
-    - ``status()`` – returns dict with cursor, session, error info.
-    - ``process_window(start, end, frames)`` – force-process a window.
+    A :class:`VLMService` facade (six methods, no plugin internals):
+    ``status()``, ``enabled()``, ``busy()``, ``flushing()``,
+    ``process_window(start, end)`` and ``visual_path(session_id)``.
 """
 
 from __future__ import annotations
@@ -24,8 +25,8 @@ from core.coverage import CoverageStore, skip_coverage
 from core.events import Event
 from core.pipeline import WindowError
 from core.plugin import Plugin, PluginContext
+from core.settings_spec import SettingsSpec
 from core.streams import VideoFrame
-from plugins.settings.spec import SettingsSpec
 
 from .fusion import fuse_frames
 from .prompts import (
@@ -47,6 +48,45 @@ VISUAL_LOG = "visual.jsonl"
 
 
 # ---------------------------------------------------------------------------
+# Service facade
+# ---------------------------------------------------------------------------
+
+
+class VLMService:
+    """Narrow public ``vlm`` service facade (6 methods, no leaked state)."""
+
+    __slots__ = ("_plugin",)
+
+    def __init__(self, plugin: "VlmPlugin") -> None:
+        self._plugin = plugin
+
+    def status(self) -> dict[str, Any]:
+        return self._plugin.status()
+
+    def enabled(self) -> bool:
+        return self._plugin.enabled()
+
+    def busy(self) -> bool:
+        return self._plugin.busy()
+
+    def flushing(self) -> bool:
+        """True while the stop-time tail flush is still writing its log."""
+
+        return self._plugin.flushing()
+
+    def process_window(self, start: float, end: float) -> list[dict[str, Any]]:
+        """Force-process one window of the current video stream."""
+
+        result = self._plugin.process_range(start, end)
+        return [result] if isinstance(result, dict) else []
+
+    def visual_path(self, session_id: str = "") -> Path | None:
+        """Path of this session's ``visual.jsonl`` (``None`` without ctx)."""
+
+        return self._plugin.visual_path(session_id)
+
+
+# ---------------------------------------------------------------------------
 # Plugin
 # ---------------------------------------------------------------------------
 
@@ -54,6 +94,13 @@ class VlmPlugin(Plugin):
     id = "vlm"
     requires = ("settings", "llm")
     provides = ("vlm",)
+
+    def __init__(self) -> None:
+        self._service: VLMService | None = None
+        self._ctx: PluginContext | None = None
+        self._page_added = False
+        self._command_added = False
+        self._consumer_registered = False
 
     # ----------------------------------------------------------------
     # Lifecycle
@@ -86,6 +133,7 @@ class VlmPlugin(Plugin):
         self._register_settings()
         self._register_service()
         self._setup_ui()
+        self._register_consumer(ctx)
 
         ctx.events.on("session.started", self._on_session_started, plugin_id=self.id)
         ctx.events.on("session.stopped", self._on_session_stopped, plugin_id=self.id)
@@ -103,6 +151,58 @@ class VlmPlugin(Plugin):
             self._worker = None
         if worker is not None and worker.is_alive():
             worker.join(timeout=3.0)
+        ctx = self._ctx
+        if ctx is not None:
+            if self._consumer_registered:
+                try:
+                    ctx.streams.unregister_consumer(self.id)
+                except Exception:  # noqa: BLE001 - hub may already be gone
+                    pass
+                self._consumer_registered = False
+            if self._page_added:
+                try:
+                    ctx.ui.remove_page("vlm:board")
+                except Exception:  # noqa: BLE001 - UI may already be gone
+                    pass
+                self._page_added = False
+            if self._command_added:
+                try:
+                    ctx.ui.unregister_command("vlm.debug")
+                except Exception:  # noqa: BLE001
+                    pass
+                self._command_added = False
+
+    # ----------------------------------------------------------------
+    # Backpressure contract (video consumer)
+    # ----------------------------------------------------------------
+    def _register_consumer(self, ctx: PluginContext) -> None:
+        """Publish this plugin as the ``video`` consumer of the stream hub."""
+
+        if ctx.streams is None:
+            return
+        ctx.streams.register_consumer(
+            self.id,
+            "video",
+            cursor_fn=lambda: float(self.status().get("cursor", 0.0) or 0.0),
+            busy_fn=lambda: self.busy() or self.flushing(),
+            gate_limit_fn=self._gate_limit,
+        )
+        self._consumer_registered = True
+
+    def _gate_limit(self) -> float:
+        """How many video seconds may buffer ahead of board recognition."""
+
+        if not self.enabled():
+            return 0.0
+        try:
+            concurrency = int(self._setting("vlm.concurrency", 4))
+        except (TypeError, ValueError):
+            concurrency = 4
+        try:
+            window = float(self._setting("vlm.window_seconds", 20.0))
+        except (TypeError, ValueError):
+            window = 20.0
+        return max(1, concurrency) * max(1.0, window)
 
     # ----------------------------------------------------------------
     # Settings
@@ -223,7 +323,9 @@ class VlmPlugin(Plugin):
     # Service
     # ----------------------------------------------------------------
     def _register_service(self) -> None:
-        self._ctx.register_service("vlm", self)
+        service = VLMService(self)
+        self._service = service
+        self._ctx.register_service("vlm", service)
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -254,8 +356,40 @@ class VlmPlugin(Plugin):
         end: float,
         frames: list[VideoFrame],
     ) -> dict[str, Any]:
-        """Manually process one window (used by tests and UI actions)."""
+        """Manually process one window with explicit frames (tests/UI)."""
         return self._process_window(start, end, frames, force=True)
+
+    def process_range(self, start: float, end: float) -> dict[str, Any]:
+        """Force-process ``[start, end)`` of the current video stream."""
+
+        ctx = self._ctx
+        if ctx is None:
+            return {"ok": False, "error": "vlm 插件尚未初始化"}
+        frames = ctx.streams.current.video.read_frames(float(start), float(end))
+        if not frames:
+            return {
+                "ok": False,
+                "start": float(start),
+                "end": float(end),
+                "error": "该区间没有视频帧",
+            }
+        return self._process_window(float(start), float(end), frames, force=True)
+
+    def visual_path(self, session_id: str = "") -> Path | None:
+        """``sessions/<id>/visual.jsonl`` for *session_id* (current if empty)."""
+
+        ctx = self._ctx
+        if ctx is None:
+            return None
+        sid = str(session_id or "")
+        if not sid:
+            try:
+                sid = str(ctx.streams.current.session_id or "")
+            except Exception:  # noqa: BLE001 - no session yet
+                return None
+        if not sid:
+            return None
+        return ctx.data_dir / "sessions" / sid / VISUAL_LOG
 
     def _persist_item(self, session_id: str, item: Any) -> None:
         """Append one written board item to ``sessions/<id>/visual.jsonl``."""
@@ -305,6 +439,8 @@ class VlmPlugin(Plugin):
             keywords="vlm board blackboard debug 板书",
             plugin_id=self.id,
         )
+        self._page_added = True
+        self._command_added = True
 
     def _render_board_page(self) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
@@ -922,7 +1058,8 @@ class VlmPlugin(Plugin):
             gate.release(before)
 
     def _setting(self, key: str, default: Any = None) -> Any:
-        settings = self._ctx.service("settings")
+        ctx = self._ctx
+        settings = ctx.service("settings") if ctx is not None else None
         if settings is None:
             return default
         return settings.get(key, default)

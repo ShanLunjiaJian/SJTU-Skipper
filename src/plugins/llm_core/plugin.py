@@ -66,15 +66,19 @@ class LLMPlugin(Plugin):
 
     def __init__(self) -> None:
         self._settings: Any | None = None
+        self._service: LLMService | None = None
+        self._ctx: PluginContext | None = None
+        self._actions_added = False
         self._login_lock = threading.RLock()
         self._refresh_lock = threading.RLock()
         self._login_thread: threading.Thread | None = None
 
     def setup(self, ctx: PluginContext) -> None:
-        settings = ctx.services.require("settings")
+        self._ctx = ctx
+        settings = ctx.require("settings")
         self._settings = settings
 
-        from plugins.settings.spec import SettingsSpec
+        from core.settings_spec import SettingsSpec
 
         specs = [
             SettingsSpec(
@@ -251,6 +255,7 @@ class LLMPlugin(Plugin):
         ctx.ui.register_action(
             "llm.opencode_logout", self._handle_opencode_logout, plugin_id=self.id
         )
+        self._actions_added = True
 
         def _config_provider(profile: str) -> ProviderConfig:
             try:
@@ -306,6 +311,9 @@ class LLMPlugin(Plugin):
         service = LLMService(
             config_provider=_config_provider,
             on_event=_on_llm_event,
+            # Every call is written verbatim (request, response, usage, errors)
+            # under ``<data_dir>/llm/<date>/`` — see ``llm.trace``.
+            trace_dir=ctx.data_dir / "llm",
         )
 
         try:
@@ -318,7 +326,30 @@ class LLMPlugin(Plugin):
         service.register_provider("openai-compatible", openai_provider)
 
         ctx.register_service("llm", service)
-        logger.info("LLM plugin setup complete; providers: %s", service.registry.names())
+        self._service = service
+        logger.info(
+            "LLM plugin setup complete; providers: %s",
+            service.info().get("providers", []),
+        )
+
+    def teardown(self) -> None:
+        """Close providers and drop this plugin's UI contributions."""
+
+        service = self._service
+        self._service = None
+        if service is not None:
+            try:
+                service.close()
+            except Exception:  # noqa: BLE001 - shutdown is best effort
+                logger.exception("failed to close the LLM service")
+        ctx = self._ctx
+        if ctx is not None and self._actions_added:
+            for action_id in ("llm.opencode_login", "llm.opencode_logout"):
+                try:
+                    ctx.ui.unregister_action(action_id)
+                except Exception:  # noqa: BLE001 - UI may already be gone
+                    pass
+            self._actions_added = False
 
     # ------------------------------------------------------------------
     # OpenCode mode

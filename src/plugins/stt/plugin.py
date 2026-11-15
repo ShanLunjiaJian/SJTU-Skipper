@@ -17,12 +17,13 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from core.coverage import CoverageStore, skip_coverage
 from core.pipeline import OrderedWindowPool, WindowError
 from core.plugin import Plugin, PluginContext
-from plugins.settings.spec import SettingsSpec
+from core.settings_spec import SettingsSpec
 
 from .credentials import GoogleTokenProvider
 from .errors import SttError
@@ -67,7 +68,9 @@ _STATE_LABELS = {
 
 
 class STTService:
-    """Public ``stt`` service."""
+    """Narrow public ``stt`` service facade (6 methods, no leaked state)."""
+
+    __slots__ = ("_plugin",)
 
     def __init__(self, plugin: "SttPlugin") -> None:
         self._plugin = plugin
@@ -75,18 +78,30 @@ class STTService:
     def status(self) -> dict[str, Any]:
         return self._plugin.status()
 
-    def transcribe(
-        self, start: float | None = None, end: float | None = None
-    ) -> dict[str, Any]:
-        """Transcribe one audio range now (used by tests and manual calls)."""
-
-        return self._plugin.transcribe_range(start, end)
-
     def enabled(self) -> bool:
         return self._plugin.enabled()
 
     def busy(self) -> bool:
         return self._plugin.busy()
+
+    def flushing(self) -> bool:
+        """True while the stop-time tail flush is still writing its log."""
+
+        return self._plugin.flushing()
+
+    def transcribe(
+        self, start: float | None = None, end: float | None = None
+    ) -> list[dict[str, Any]]:
+        """Transcribe one audio range now; returns the committed segments."""
+
+        result = self._plugin.transcribe_range(start, end)
+        items = result.get("items") if isinstance(result, dict) else None
+        return list(items or [])
+
+    def transcript_path(self, session_id: str = "") -> Path | None:
+        """Path of this session's ``transcript.jsonl`` (``None`` without ctx)."""
+
+        return self._plugin.transcript_path(session_id)
 
 
 class SttPlugin(Plugin):
@@ -128,6 +143,8 @@ class SttPlugin(Plugin):
         self._page_added = False
         self._item_added = False
         self._tab_added = False
+        self._command_added = False
+        self._consumer_registered = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -138,6 +155,7 @@ class SttPlugin(Plugin):
         ctx.register_service("stt", STTService(self))
         ctx.meta.register("stt", self._meta, plugin_id=self.id)
         self._setup_ui(ctx)
+        self._register_consumer(ctx)
         ctx.events.on("session.started", self._on_session_started, plugin_id=self.id)
         ctx.events.on("session.stopped", self._on_session_stopped, plugin_id=self.id)
         ctx.events.on("settings.changed", self._on_settings_changed, plugin_id=self.id)
@@ -165,19 +183,61 @@ class SttPlugin(Plugin):
             auth.close()
         ctx = self._ctx
         if ctx is not None:
+            if self._consumer_registered:
+                try:
+                    ctx.streams.unregister_consumer(self.id)
+                except Exception:  # noqa: BLE001 - hub may already be gone
+                    pass
+                self._consumer_registered = False
             if self._page_added:
                 try:
                     ctx.ui.remove_page(PAGE_ID)
                 except Exception:  # noqa: BLE001 - UI may already be gone
                     pass
                 self._page_added = False
-            if getattr(self, "_command_added", False):
+            if self._command_added:
                 try:
                     ctx.ui.unregister_command("stt.debug")
                 except Exception:  # noqa: BLE001
                     pass
                 self._command_added = False
         self._ctx = None
+
+    # ------------------------------------------------------------------
+    # Backpressure contract (audio consumer)
+    # ------------------------------------------------------------------
+    def _register_consumer(self, ctx: PluginContext) -> None:
+        """Publish this plugin as the ``audio`` consumer of the stream hub."""
+
+        if ctx.streams is None:
+            return
+        ctx.streams.register_consumer(
+            self.id,
+            "audio",
+            cursor_fn=lambda: float(self.status().get("cursor", 0.0) or 0.0),
+            busy_fn=lambda: self.busy() or self.flushing(),
+            gate_limit_fn=self._gate_limit,
+        )
+        self._consumer_registered = True
+
+    def _gate_limit(self) -> float:
+        """How many audio seconds may buffer ahead of transcription.
+
+        One chunk per concurrent request; ``0.0`` (gate disabled) when
+        transcription is switched off.
+        """
+
+        if not self.enabled():
+            return 0.0
+        try:
+            concurrency = int(self._setting("stt.concurrency", 4))
+        except (TypeError, ValueError):
+            concurrency = 4
+        try:
+            window = float(self._setting("stt.chunk_seconds", _DEFAULT_CHUNK_SECONDS))
+        except (TypeError, ValueError):
+            window = _DEFAULT_CHUNK_SECONDS
+        return max(1, concurrency) * max(1.0, window)
 
     # ------------------------------------------------------------------
     # Settings
@@ -529,6 +589,7 @@ class SttPlugin(Plugin):
                 "end": finish,
                 "segments": 0,
                 "chars": 0,
+                "items": [],
             }
         if audio.sample_width != 2:
             raise SttError("Google STT 仅支持 16-bit PCM 音频")
@@ -542,6 +603,7 @@ class SttPlugin(Plugin):
                 "end": finish,
                 "segments": 0,
                 "chars": 0,
+                "items": [],
             }
 
         config, provider = self._speech_config()
@@ -568,13 +630,40 @@ class SttPlugin(Plugin):
                 model=used.model,
             )
             ctx.ui.refresh("stt.segment")
+        items = [
+            {
+                "start": round(begin + max(0.0, segment.start), 3),
+                "end": round(begin + max(segment.start, segment.end), 3),
+                "text": segment.text.strip(),
+            }
+            for segment in segments
+            if segment.text.strip()
+        ]
         return {
             "ok": True,
             "start": begin,
             "end": finish,
             "segments": appended,
             "chars": chars,
+            "items": items,
         }
+
+    def transcript_path(self, session_id: str = "") -> Path | None:
+        """``sessions/<id>/transcript.jsonl`` for *session_id* (current one
+        when omitted); ``None`` while the plugin has no context."""
+
+        ctx = self._ctx
+        if ctx is None:
+            return None
+        sid = str(session_id or "")
+        if not sid:
+            try:
+                sid = str(ctx.streams.current.session_id or "")
+            except Exception:  # noqa: BLE001 - no session yet
+                return None
+        if not sid:
+            return None
+        return ctx.data_dir / "sessions" / sid / TRANSCRIPT_LOG
 
     def _persist_item(self, session_id: str, item: Any) -> None:
         """Append one committed line to ``sessions/<id>/transcript.jsonl``."""

@@ -8,42 +8,21 @@ they want *and their parameters* when they register an agent profile, e.g.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
+
+from core.agent_types import ToolContext, ToolSpec
 
 from .workspace import FileWorkspace
 
+__all__ = [
+    "TOOL_FACTORIES",
+    "ToolContext",
+    "ToolSpec",
+    "build_tool",
+    "build_tools",
+]
+
 _DEFAULT_TOOL_NAMES = ("info", "read", "replace", "append")
-
-
-@dataclass(slots=True)
-class ToolSpec:
-    """A named tool with JSON Schema parameters and a callable handler."""
-
-    name: str
-    description: str
-    parameters: dict[str, Any]
-    handler: Callable[..., str]
-
-    def openai_schema(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
-            },
-        }
-
-
-@dataclass(slots=True)
-class ToolContext:
-    """Everything a tool factory may need, independent of any plugin."""
-
-    workspace: FileWorkspace
-    session_getter: Callable[[], Any]
-    meta_getter: Callable[[], str]
-    max_tool_output: int = 8000
 
 
 # ---------------------------------------------------------------------------

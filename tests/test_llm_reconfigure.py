@@ -16,7 +16,7 @@ def test_provider_reconfigures_without_restart(tmp_path: Path) -> None:
     runtime.start()
     try:
         service = runtime.services.require("llm")
-        provider = service.registry.require("openai")
+        provider = service._registry.require("openai")  # noqa: SLF001
         settings = runtime.services.require("settings")
 
         settings.set("llm.base_url", "http://127.0.0.1:9/v1")

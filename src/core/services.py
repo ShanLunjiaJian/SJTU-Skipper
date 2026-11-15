@@ -34,9 +34,13 @@ class ServiceRegistry:
         with self._lock:
             existing = self._services.get(name)
             if existing is not None and existing is not obj:
-                raise ServiceError(
-                    f"service {name!r} already registered by {self._owners.get(name)!r}"
-                )
+                previous_owner = self._owners.get(name, "")
+                # A service injected by the embedder (``build_runtime(llm=...)``)
+                # is a placeholder: the real provider plugin may take it over.
+                if previous_owner != "<injected>":
+                    raise ServiceError(
+                        f"service {name!r} already registered by {previous_owner!r}"
+                    )
             self._services[name] = obj
             self._owners[name] = plugin_id
 
@@ -49,6 +53,22 @@ class ServiceRegistry:
             self._services.pop(name, None)
             self._owners.pop(name, None)
 
+    def remove_plugin(self, plugin_id: str) -> list[str]:
+        """Drop every service owned by *plugin_id*; return the removed names."""
+
+        if not plugin_id:
+            return []
+        with self._lock:
+            removed = [
+                name
+                for name, owner in list(self._owners.items())
+                if owner == plugin_id
+            ]
+            for name in removed:
+                self._services.pop(name, None)
+                self._owners.pop(name, None)
+            return removed
+
     def get(self, name: str) -> Any | None:
         with self._lock:
             return self._services.get(name)
@@ -60,6 +80,13 @@ class ServiceRegistry:
         return obj
 
     def call(self, name: str, method: str, *args: Any, **kwargs: Any) -> Any:
+        if not isinstance(method, str) or not method:
+            raise ServiceError("service method name must be a non-empty string")
+        # No reflection escape hatch: private helpers stay private.
+        if method.startswith("_"):
+            raise ServiceError(
+                f"service {name!r}: private method {method!r} cannot be called through call()"
+            )
         service = self.require(name)
         func = getattr(service, method, None)
         if func is None or not callable(func):

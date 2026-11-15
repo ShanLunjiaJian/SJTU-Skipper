@@ -14,10 +14,10 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
+from core.agent_types import AgentProfile, AgentTool
 from core.plugin import Plugin, PluginContext
+from core.settings_spec import SettingsSpec
 from core.ui import render_markdown
-from plugins.agent import AgentProfile, AgentTool
-from plugins.settings.spec import SettingsSpec
 
 from .prompts import ASK_PROMPT_TEMPLATE, INSTANT_SYSTEM_PROMPT, RESEARCH_SYSTEM_PROMPT
 
@@ -33,11 +33,27 @@ READ_MAX_LINES_DEFAULT = 50
 SEARCH_MAX_HITS_DEFAULT = 200
 
 
+class AskService:
+    """Narrow public ``ask`` service (1 method)."""
+
+    __slots__ = ("_plugin",)
+
+    def __init__(self, plugin: "AskPlugin") -> None:
+        self._plugin = plugin
+
+    def ask(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Ask one question (same payload as the ``ask.ask`` UI action)."""
+
+        return self._plugin._on_ask(payload)  # noqa: SLF001 - the plugin owns it
+
+
 class AskPlugin(Plugin):
     """Reader selection menu → in-note Q&A with a live, collapsible answer."""
 
     id = "ask"
     requires = ("settings", "llm-agent", "reader")
+    optional_requires = ("summarize", "instant-summarize")
+    provides = ("ask",)
 
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
@@ -48,7 +64,7 @@ class AskPlugin(Plugin):
         for spec in _SETTING_SPECS:
             self._settings.register(spec)
 
-        ctx.register_service("ask", self)
+        ctx.register_service("ask", AskService(self))
         ctx.ui.register_action(ACTION, self._on_ask, plugin_id=self.id)
 
         self._reader.register_selection_action(
@@ -68,6 +84,22 @@ class AskPlugin(Plugin):
             },
             owner=self.id,
         )
+
+    def teardown(self) -> None:
+        """Drop the UI action and the selection-menu item this plugin added."""
+
+        ctx = getattr(self, "ctx", None)
+        if ctx is not None:
+            try:
+                ctx.ui.unregister_action(ACTION)
+            except Exception:  # noqa: BLE001 - shutdown is best effort
+                pass
+        reader = getattr(self, "_reader", None)
+        if reader is not None:
+            try:
+                reader.unregister_selection_action("", SELECTION_ID, owner=self.id)
+            except Exception:  # noqa: BLE001 - shutdown is best effort
+                pass
 
     # ------------------------------------------------------------------
     # Settings
@@ -202,7 +234,12 @@ class AskPlugin(Plugin):
             name=f"ask-{qa_id}",
             agent=profile.name,
             files=files,
-            meta={"role": "ask", "qa_id": qa_id, "intensity": intensity},
+            meta={
+                "internal": True,
+                "role": "ask",
+                "qa_id": qa_id,
+                "intensity": intensity,
+            },
         )
 
         started = time.time()
@@ -274,7 +311,7 @@ class AskPlugin(Plugin):
             instructions = "材料已经足够，直接回答；本题没有工具可用。"
         return ASK_PROMPT_TEMPLATE.format(
             course_name=self._course_name(),
-            file_label=_doc_label(name),
+            file_label=self._doc_label(name),
             file_name=name,
             selection=_truncate_words(selection, self._selection_words)
             or "（浏览器没有回传选中文本）",
@@ -289,16 +326,49 @@ class AskPlugin(Plugin):
         )
 
     def _workspace_files(self, path: str) -> dict[str, str]:
-        notes_dir = Path(path).parent
+        note = Path(path)
         files = {
             item.name: str(item)
-            for item in sorted(notes_dir.glob("*.md"))
+            for item in sorted(note.parent.glob("*.md"))
             if item.is_file()
         }
-        source = notes_dir.parent / "lecture_source.md"
-        if source.exists():
-            files["lecture_source.md"] = str(source)
+        source = self._source_file(note)
+        if source is not None:
+            files[source.name] = str(source)
         return files
+
+    def _source_file(self, note: Path) -> Path | None:
+        """The lecture record that belongs to *note*, asked from its owner."""
+
+        service = self.ctx.service("summarize")
+        if service is not None:
+            for session_id in (
+                note.parent.parent.name,
+                self.ctx.streams.notes_session_id,
+            ):
+                if not session_id:
+                    continue
+                found = service.source_path(session_id)
+                if found is not None and Path(found).exists():
+                    return Path(found)
+        fallback = note.parent.parent / "lecture_source.md"
+        return fallback if fallback.exists() else None
+
+    def _doc_label(self, name: str) -> str:
+        """Human title of a note file, asked from the plugin that writes it."""
+
+        for service_name in ("summarize", "instant-summarize"):
+            service = self.ctx.service(service_name)
+            if service is None:
+                continue
+            try:
+                files = service.note_files()
+            except Exception:  # noqa: BLE001 - a label must never break an answer
+                continue
+            for filename, title in (files or {}).values():
+                if filename == name:
+                    return title
+        return _DEFAULT_DOC_LABELS.get(name, Path(name).stem)
 
     def _course_name(self) -> str:
         meta = self.ctx.streams.notes_meta or self.ctx.streams.current.meta or {}
@@ -459,15 +529,15 @@ def _tool_detail(name: str, arguments: Mapping[str, Any]) -> str:
     return json.dumps(arguments, ensure_ascii=False)[:120]
 
 
-def _doc_label(name: str) -> str:
-    return {
-        "note_knowledge.md": "知识",
-        "note_gossip.md": "闲话与分享",
-        "note_notice.md": "通知",
-        "instant_note_knowledge.md": "即时知识",
-        "instant_note_gossip.md": "即时闲话",
-        "instant_note_notice.md": "即时通知",
-    }.get(name, Path(name).stem)
+# Fallback titles when the notes plugins are not loaded (service API first).
+_DEFAULT_DOC_LABELS = {
+    "note_knowledge.md": "知识",
+    "note_gossip.md": "闲话与分享",
+    "note_notice.md": "通知",
+    "instant_note_knowledge.md": "即时知识",
+    "instant_note_gossip.md": "即时闲话",
+    "instant_note_notice.md": "即时通知",
+}
 
 
 _WORD_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]|[A-Za-z]+|[0-9]+")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import logging
 import sys
 from pathlib import Path
@@ -33,26 +32,15 @@ def _config_from_args(args: argparse.Namespace):
     return cfg
 
 
-def _load_extra_plugins(specs: Sequence[str]) -> list[object]:
-    plugins = []
-    for spec in specs:
-        module_name, _, attr = spec.partition(":")
-        if not module_name or not attr:
-            raise SystemExit(f"invalid plugin spec {spec!r}; expected module:Class")
-        module = importlib.import_module(module_name)
-        plugin_cls = getattr(module, attr)
-        plugins.append(plugin_cls())
-    return plugins
-
-
 def cmd_serve(args: argparse.Namespace) -> int:
     from app import build_default_runtime, create_app
     import uvicorn
 
     cfg = _config_from_args(args)
     runtime = build_default_runtime(cfg)
-    if args.plugin:
-        runtime.add_plugins(_load_extra_plugins(args.plugin))
+    for spec in args.plugin:
+        # Register the spec string so the plugin stays reloadable at runtime.
+        runtime.add_plugin(spec)
     app = create_app(runtime)
     uvicorn.run(
         app,

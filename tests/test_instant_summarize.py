@@ -737,7 +737,8 @@ def test_exhausted_retries(harness: tuple) -> None:
             assert len(error_events) >= 1, "instant-summarize.error was not emitted"
 
             # Watermarks should have advanced (avoid infinite loop).
-            wm = rt.services.get("instant-summarize")._watermarks.get(sid, {})
+            plugin = rt.plugins.get("instant-summarize")
+            wm = plugin._watermarks.get(sid, {})
             assert wm.get("transcript", 0) > 0, (
                 "watermarks should advance even on failure"
             )

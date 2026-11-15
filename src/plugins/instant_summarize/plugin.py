@@ -8,6 +8,7 @@ clear outline and may rewrite whole files to keep the structure coherent.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import threading
 import time
 from datetime import datetime
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from core.plugin import Plugin, PluginContext
-from plugins.settings.spec import SettingsSpec
+from core.settings_spec import SettingsSpec
 
 from .prompts import RETRY_PROMPT, SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
@@ -59,11 +60,34 @@ _TOOLS = [("info", {}), ("read", {}), ("replace", {}), ("append", {})]
 # ---------------------------------------------------------------------------
 # Plugin
 # ---------------------------------------------------------------------------
+class InstantSummarizeService:
+    """Narrow public ``instant-summarize`` service (3 methods)."""
+
+    __slots__ = ("_plugin",)
+
+    def __init__(self, plugin: "InstantSummarizePlugin") -> None:
+        self._plugin = plugin
+
+    def draft_paths(self, session_id: str = "") -> dict[str, Path]:
+        """Existing live-note draft files of *session_id* (``{doc_key: path}``)."""
+
+        return self._plugin.draft_paths(session_id)
+
+    def note_files(self) -> dict[str, tuple[str, str]]:
+        """``{doc_key: (filename, title)}`` for the live notes."""
+
+        return self._plugin.note_files()
+
+    def running_tasks(self) -> list[dict[str, Any]]:
+        return self._plugin.running_tasks()
+
+
 class InstantSummarizePlugin(Plugin):
     """Continuously merge lecture streams into three structured notes."""
 
     id = "instant-summarize"
     requires = ("settings", "llm-agent", "reader")
+    provides = ("instant-summarize",)
 
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
@@ -75,7 +99,7 @@ class InstantSummarizePlugin(Plugin):
             self._settings_service.register(spec)
 
         # --- service --------------------------------------------------------
-        ctx.register_service("instant-summarize", self)
+        ctx.register_service("instant-summarize", InstantSummarizeService(self))
 
         # --- state ----------------------------------------------------------
         # Per-session watermarks: session_id -> {transcript:idx, visual:idx, audio:float}
@@ -115,6 +139,18 @@ class InstantSummarizePlugin(Plugin):
 
     def teardown(self) -> None:
         self._stop_event.set()
+        ctx = getattr(self, "ctx", None)
+        if ctx is None:
+            return
+        for action_id in ("instant-summarize.toggle", "instant-summarize.read"):
+            try:
+                ctx.ui.unregister_action(action_id)
+            except Exception:  # noqa: BLE001 - shutdown is best effort
+                pass
+        try:
+            ctx.ui.remove_toolbox_item("instant-summarize.notes")
+        except Exception:  # noqa: BLE001 - shutdown is best effort
+            pass
 
     # ------------------------------------------------------------------
     # Settings
@@ -184,7 +220,7 @@ class InstantSummarizePlugin(Plugin):
         ui = self.ctx.ui
 
         if not ui.has_tab("note"):
-            ui.add_tab("right", "note", "笔记", icon="📘", order=20)
+            ui.add_tab("right", "note", "笔记", icon="📘", order=20, plugin_id=self.id)
         if not ui.has_toolbox_item("instant-summarize.notes"):
             ui.add_toolbox_item(
                 "note",
@@ -193,6 +229,7 @@ class InstantSummarizePlugin(Plugin):
                 description="课堂中持续合并的笔记",
                 order=11,
                 render=self._render_note_item,
+                plugin_id=self.id,
             )
 
         ui.register_action(
@@ -300,6 +337,41 @@ class InstantSummarizePlugin(Plugin):
             / self._notes_dir_name
             / filename
         )
+
+    # ------------------------------------------------------------------
+    # Service API
+    # ------------------------------------------------------------------
+    def draft_paths(self, session_id: str = "") -> dict[str, Path]:
+        """Live-note files that already exist for *session_id* (``{key: path}``)."""
+
+        sid = session_id or self.ctx.streams.notes_session_id
+        paths: dict[str, Path] = {}
+        for key, filename in _DOC_FILES.items():
+            path = self._note_path(sid, filename)
+            if path.exists():
+                paths[key] = path
+        return paths
+
+    def note_files(self) -> dict[str, tuple[str, str]]:
+        """``{doc_key: (filename, title)}`` of the live notes."""
+
+        return {
+            key: (_DOC_FILES[key], label)
+            for key, label in self._DOC_LABELS.items()
+        }
+
+    def _create_session(self, session_id: str, **kwargs: Any) -> Any:
+        """Create one internal agent session (hidden from the user's list)."""
+
+        agent = self._agent_service
+        meta = {"internal": True, "session_id": session_id}
+        if _accepts_kwarg(agent.create_session, "meta"):
+            kwargs["meta"] = meta
+        session = agent.create_session(**kwargs)
+        holder = getattr(session, "meta", None)
+        if isinstance(holder, dict):
+            holder.update(meta)
+        return session
 
     def _on_toggle(self, payload: dict[str, Any]) -> dict[str, Any]:
         """The live-switch in the notes toolbox turns accumulation on/off."""
@@ -605,7 +677,8 @@ class InstantSummarizePlugin(Plugin):
         # Create agent session and run.
         agent = self._agent_service
         model = self._model or None
-        session = agent.create_session(
+        session = self._create_session(
+            session_id,
             name=f"instant-summarize-{session_id[:12]}",
             system_prompt=self._system_prompt,
             files=file_paths,
@@ -622,7 +695,8 @@ class InstantSummarizePlugin(Plugin):
         }
         if hashes_after == hashes_before:
             # Retry with stricter prompt.
-            retry_session = agent.create_session(
+            retry_session = self._create_session(
+                session_id,
                 name=f"instant-summarize-retry-{session_id[:12]}",
                 system_prompt=self._system_prompt,
                 files=file_paths,
@@ -643,6 +717,18 @@ class InstantSummarizePlugin(Plugin):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _accepts_kwarg(func: Any, name: str) -> bool:
+    """True when *func* accepts a *name* keyword argument."""
+
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - builtins/C callables
+        return False
+    if name in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 def _course_name(streams: Any) -> str:
     meta = getattr(streams, "meta", {}) or {}
     name: Any = meta.get("course_name") or meta.get("course")

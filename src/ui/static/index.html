@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SJTU-Skipper</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%231a73e8'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-size='19' fill='%23ffffff'%3E%E2%88%91%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/styles.css?v=9">
+  <link rel="stylesheet" href="/static/styles.css?v=10">
   <link rel="stylesheet" href="/static/vendor/katex/katex.min.css?v=6">
 </head>
 <body>
@@ -20,8 +20,6 @@
     </div>
     <nav id="menubar" class="menubar" aria-label="菜单"></nav>
     <div class="topbar-right">
-      <button id="toggle-left" class="btn btn-sm btn-ghost sidebar-toggle" type="button" title="收起 / 展开左侧栏">◧</button>
-      <button id="toggle-right" class="btn btn-sm btn-ghost sidebar-toggle" type="button" title="收起 / 展开右侧栏">◨</button>
       <button id="palette-btn" class="btn btn-sm btn-ghost" type="button" title="Ctrl+P">
         命令 <kbd>Ctrl P</kbd>
       </button>
@@ -34,10 +32,15 @@
   </header>
 
   <div class="workspace">
-    <aside class="sidebar sidebar-left">
+    <aside id="sidebar-left" class="sidebar sidebar-left">
+      <div class="sidebar-head">
+        <span class="sidebar-title">课程</span>
+        <button class="sidebar-close" type="button" data-side="left" title="收起课程面板">×</button>
+      </div>
       <div id="left-tabs" class="side-tabs"></div>
       <div id="left-toolbox" class="toolbox"></div>
     </aside>
+    <div class="resizer" data-side="left" title="拖动调整宽度"></div>
 
     <main class="center">
       <div id="page-tabs" class="page-tabs"></div>
@@ -50,10 +53,19 @@
       </div>
     </main>
 
-    <aside class="sidebar sidebar-right">
+    <div class="resizer" data-side="right" title="拖动调整宽度"></div>
+    <aside id="sidebar-right" class="sidebar sidebar-right">
+      <div class="sidebar-head">
+        <span class="sidebar-title">详情</span>
+        <button class="sidebar-close" type="button" data-side="right" title="收起详情面板">×</button>
+      </div>
+      <div id="right-context" class="sidebar-context" hidden></div>
       <div id="right-tabs" class="side-tabs"></div>
       <div id="right-toolbox" class="toolbox"></div>
     </aside>
+
+    <button class="sidebar-restore restore-left" type="button" data-side="left" title="展开课程面板">›</button>
+    <button class="sidebar-restore restore-right" type="button" data-side="right" title="展开详情面板">‹</button>
   </div>
 
   <footer id="statusbar" class="statusbar">
@@ -98,6 +110,6 @@
 <script src="/static/vendor/mpegts/mpegts.min.js?v=6"></script>
 <script src="/static/vendor/katex/katex.min.js?v=6"></script>
 <script src="/static/vendor/katex/contrib/auto-render.min.js?v=6"></script>
-<script src="/static/app.js?v=9"></script>
+<script src="/static/app.js?v=10"></script>
 </body>
 </html>

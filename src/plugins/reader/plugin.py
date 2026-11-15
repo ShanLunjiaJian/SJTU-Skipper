@@ -37,10 +37,120 @@ COLLAPSE_QA_ACTION = "reader.qa_collapse"
 _DEFAULT_SELECTION_KIND = "action"
 
 
+class ReaderService:
+    """Narrow public ``reader`` service (8 methods).
+
+    Notes plugins and the Q&A plugin talk to the reader only through this
+    object, never through the plugin instance.
+    """
+
+    __slots__ = ("_plugin",)
+
+    def __init__(self, plugin: "ReaderPlugin") -> None:
+        self._plugin = plugin
+
+    # -- pages ---------------------------------------------------------
+    def show(
+        self,
+        *,
+        title: str = "笔记",
+        docs: list[dict[str, Any]] | None = None,
+        active: str = "",
+        page_key: str = "",
+        open_page: bool = True,
+        owner: str = "",
+    ) -> str:
+        return self._plugin.show(
+            title=title,
+            docs=docs,
+            active=active,
+            page_key=page_key,
+            open_page=open_page,
+            owner=owner,
+        )
+
+    # -- selection menu ------------------------------------------------
+    def register_selection_action(
+        self, page: str, item: dict[str, Any], *, owner: str = ""
+    ) -> dict[str, Any]:
+        """Add one selection-menu item; returns the normalized item."""
+
+        return self._plugin.register_selection_action(page, item, owner=owner)
+
+    def unregister_selection_action(
+        self, page: str = "", item_id: str = "", *, owner: str = ""
+    ) -> None:
+        """Remove one item, or every item registered by *owner* (item_id "")."""
+
+        self._plugin.unregister_selection_action(page, item_id, owner=owner)
+
+    def selection_actions(
+        self, page: str, owner: str = ""
+    ) -> list[dict[str, Any]]:
+        return self._plugin.selection_actions(page, owner)
+
+    # -- inline Q&A blocks ---------------------------------------------
+    def qa_begin(
+        self,
+        path: str | Path,
+        *,
+        question: str,
+        selection: str = "",
+        intensity: str = "instant",
+    ) -> dict[str, Any]:
+        return self._plugin.qa_begin(
+            path,
+            question=question,
+            selection=selection,
+            intensity=intensity,
+        )
+
+    def qa_finish(
+        self,
+        path: str | Path,
+        qa_id: str,
+        *,
+        answer: str,
+        status: str = "done",
+        collapsed: bool = True,
+    ) -> dict[str, Any] | None:
+        return self._plugin.qa_finish(
+            path,
+            qa_id,
+            answer=answer,
+            status=status,
+            collapsed=collapsed,
+        )
+
+    def qa_set_collapsed(
+        self, path: str | Path, qa_id: str, collapsed: bool
+    ) -> dict[str, Any] | None:
+        return self._plugin.qa_set_collapsed(path, qa_id, collapsed)
+
+    def qa_context(
+        self,
+        path: str | Path,
+        qa_id: str,
+        *,
+        before_words: int = 2000,
+        after_words: int = 2000,
+        history_words: int = 1000,
+    ) -> dict[str, Any]:
+        return self._plugin.qa_context(
+            path,
+            qa_id,
+            before_words=before_words,
+            after_words=after_words,
+            history_words=history_words,
+        )
+
+
 class ReaderPlugin(Plugin):
     """One reader page per notes session (plus a fallback ``reader:main``)."""
 
     id = "reader"
+    requires: tuple[str, ...] = ()
+    provides = ("reader",)
 
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
@@ -51,7 +161,7 @@ class ReaderPlugin(Plugin):
         # item id → normalized menu item, offered on every reader page
         self._global_selection: dict[str, dict[str, Any]] = {}
 
-        ctx.register_service("reader", self)
+        ctx.register_service("reader", ReaderService(self))
 
         ctx.ui.add_page(
             PAGE_ID,
@@ -70,7 +180,26 @@ class ReaderPlugin(Plugin):
         )
 
     def teardown(self) -> None:
-        pass
+        """Remove every page/action this plugin contributed."""
+
+        ctx = getattr(self, "ctx", None)
+        if ctx is None:
+            return
+        for action_id in (OPEN_ACTION, DELETE_QA_ACTION, COLLAPSE_QA_ACTION):
+            try:
+                ctx.ui.unregister_action(action_id)
+            except Exception:  # noqa: BLE001 - shutdown is best effort
+                pass
+        with self._lock:
+            page_ids = list(self._states)
+            self._states.clear()
+            self._selection.clear()
+            self._global_selection.clear()
+        for page_id in [PAGE_ID, *page_ids]:
+            try:
+                ctx.ui.remove_page(page_id)
+            except Exception:  # noqa: BLE001 - shutdown is best effort
+                pass
 
     # ------------------------------------------------------------------
     # Service API
@@ -78,8 +207,8 @@ class ReaderPlugin(Plugin):
     def show(
         self,
         *,
-        title: str,
-        docs: list[dict[str, str]],
+        title: str = "笔记",
+        docs: list[dict[str, Any]] | None = None,
         active: str = "",
         page_key: str = "",
         open_page: bool = True,
@@ -92,8 +221,8 @@ class ReaderPlugin(Plugin):
         """
 
         page_id = self._page_id(page_key)
-        cleaned: list[dict[str, str]] = []
-        for doc in docs:
+        cleaned: list[dict[str, Any]] = []
+        for doc in docs or []:
             path = str(doc.get("path", "") or "")
             key = str(doc.get("key", "") or Path(path).stem)
             label = str(doc.get("label", "") or key)
@@ -127,6 +256,7 @@ class ReaderPlugin(Plugin):
                 render=lambda pid=page_id: self._render_page(pid),
                 icon="📖",
                 order=5,
+                plugin_id=self.id,
             )
         else:
             self.ctx.ui.set_page_title(page_id, str(title or "阅读"))
@@ -158,13 +288,15 @@ class ReaderPlugin(Plugin):
         item: Mapping[str, Any],
         *,
         owner: str = "",
-    ) -> None:
+    ) -> dict[str, Any]:
         """Add one selection-menu item to a reader page (or to every page).
 
         *page* is a page id (``reader:...``), a page key, or empty / ``"*"``
         for an item offered on every reader page.  Per-page items are gated by
         *owner* (they only appear on documents that owner supplied); global
         items are not gated and must validate the document themselves.
+
+        Returns the normalized item.
         """
 
         item_id = str(item.get("id", "") or "").strip()
@@ -192,20 +324,39 @@ class ReaderPlugin(Plugin):
                 per_owner = self._selection.setdefault(page_id, {})
                 per_owner.setdefault(spec["owner"], {})[item_id] = spec
         self.ctx.ui.refresh(f"reader.selection:{text or '*'}")
+        return dict(spec)
 
     def unregister_selection_action(
-        self, page: str, item_id: str, *, owner: str = ""
+        self, page: str = "", item_id: str = "", *, owner: str = ""
     ) -> None:
+        """Remove one menu item — or every item registered by *owner*.
+
+        With an empty *item_id* and a non-empty *owner* this purges that
+        plugin's items from every page and from the global bucket, which is
+        what plugin teardown needs.
+        """
+
         text = str(page or "")
+        if item_id:
+            with self._lock:
+                if text in ("", "*"):
+                    self._global_selection.pop(item_id, None)
+                    return
+                page_id = self._as_page_id(text)
+                per_owner = self._selection.get(page_id) or {}
+                bucket = per_owner.get(str(owner or ""))
+                if bucket:
+                    bucket.pop(item_id, None)
+            return
+        if not owner:
+            return
         with self._lock:
-            if text in ("", "*"):
-                self._global_selection.pop(item_id, None)
-                return
-            page_id = self._as_page_id(text)
-            per_owner = self._selection.get(page_id) or {}
-            bucket = per_owner.get(str(owner or ""))
-            if bucket:
-                bucket.pop(item_id, None)
+            for per_owner in self._selection.values():
+                per_owner.pop(owner, None)
+            for key, spec in list(self._global_selection.items()):
+                if spec.get("owner") == owner:
+                    self._global_selection.pop(key, None)
+        self.ctx.ui.refresh(f"reader.selection:purge:{owner}")
 
     def selection_actions(
         self, page: str, owner: str = ""
@@ -233,11 +384,11 @@ class ReaderPlugin(Plugin):
     # ------------------------------------------------------------------
     def qa_begin(
         self,
-        path: str,
+        path: str | Path,
         *,
         question: str,
         selection: str = "",
-        intensity: str = "",
+        intensity: str = "instant",
     ) -> dict[str, Any]:
         """Insert a *pending* Q&A block below the selected paragraph.
 
@@ -268,13 +419,13 @@ class ReaderPlugin(Plugin):
 
     def qa_finish(
         self,
-        path: str,
+        path: str | Path,
         qa_id: str,
         *,
         answer: str,
         status: str = "done",
         collapsed: bool = True,
-    ) -> bool:
+    ) -> dict[str, Any] | None:
         """Write the agent's answer into an existing pending block."""
 
         def mutate(text: str) -> tuple[str, dict[str, Any]]:
@@ -299,10 +450,11 @@ class ReaderPlugin(Plugin):
                 raise ValueError("这条问答已不存在")
             return updated, {}
 
-        result = self._qa_write(path, mutate)
-        return bool(result)
+        return self._qa_write(path, mutate)
 
-    def qa_set_collapsed(self, path: str, qa_id: str, collapsed: bool) -> None:
+    def qa_set_collapsed(
+        self, path: str | Path, qa_id: str, collapsed: bool
+    ) -> dict[str, Any] | None:
         """Persist the fold state of one Q&A block in the note file."""
 
         def mutate(text: str) -> tuple[str, dict[str, Any]]:
@@ -324,11 +476,11 @@ class ReaderPlugin(Plugin):
                 return updated, {}
             raise ValueError("这条问答已不存在")
 
-        self._qa_write(path, mutate)
+        return self._qa_write(path, mutate)
 
     def qa_context(
         self,
-        path: str,
+        path: str | Path,
         qa_id: str,
         *,
         before_words: int = 500,
@@ -374,7 +526,7 @@ class ReaderPlugin(Plugin):
             "file_name": resolved.name,
         }
 
-    def _qa_write(self, path: str, mutate: Any) -> dict[str, Any]:
+    def _qa_write(self, path: str | Path, mutate: Any) -> dict[str, Any]:
         resolved = self._known_path(path)
         if resolved is None:
             raise ValueError("未知的文稿路径")
@@ -432,7 +584,7 @@ class ReaderPlugin(Plugin):
         # The browser already toggled the block; never re-render for this.
         return {"ok": True, "refresh": False}
 
-    def _known_path(self, path: str) -> Path | None:
+    def _known_path(self, path: str | Path) -> Path | None:
         """Only documents the reader is actually displaying may be edited."""
 
         try:

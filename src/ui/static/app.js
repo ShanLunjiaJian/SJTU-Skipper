@@ -555,6 +555,7 @@
 
     const stateText = () => {
       if (finished) return "已结束";
+      if (block.queued) return live ? "直播 · 排队中" : "排队中";
       if (live) return processing ? "直播 · 处理中" : "直播 · 已暂停处理";
       return processing ? "处理中" : "已暂停";
     };
@@ -562,7 +563,13 @@
     const toggle = el("button", {
       class: "btn btn-sm btn-primary",
       type: "button",
-      text: finished ? "已结束" : processing ? "暂停处理" : "继续处理",
+      text: finished
+        ? "已结束"
+        : block.queued
+          ? "提前处理"
+          : processing
+            ? "暂停处理"
+            : "继续处理",
     });
     toggle.disabled = finished;
 
@@ -585,6 +592,14 @@
 
     if (!finished) {
       toggle.addEventListener("click", async () => {
+        if (block.queued) {
+          // Already waiting in line: the server moves it to the front; the
+          // next poll reports whether it actually got the engine slot.
+          await postAction(block.start_action, {});
+          stateEl.textContent = stateText();
+          toggle.textContent = "提前处理";
+          return;
+        }
         const action = processing ? block.pause_action : block.start_action;
         const result = await postAction(action, {});
         if (!result || result.ok === false) return;
@@ -1117,8 +1132,22 @@
   }
 
   // ------------------------------------------------------------------
-  // Collapsible sidebars
+  // Collapsible, resizable sidebars
   // ------------------------------------------------------------------
+  const SIDEBAR_MIN = 200;
+  const SIDEBAR_MAX = 560;
+
+  function sidebarWidth(side) {
+    const fallback = side === "left" ? 280 : 320;
+    const stored = Number(localStorage.getItem(`lecture-agent.sidebar.${side}.w`));
+    return Number.isFinite(stored) && stored > 0 ? clampWidth(stored) : fallback;
+  }
+
+  function clampWidth(value) {
+    const hardMax = Math.min(SIDEBAR_MAX, Math.max(280, window.innerWidth * 0.45));
+    return Math.round(Math.min(hardMax, Math.max(SIDEBAR_MIN, value)));
+  }
+
   function applySidebarState() {
     const app = $("#app");
     if (!app) return;
@@ -1126,26 +1155,95 @@
       const collapsed =
         localStorage.getItem(`lecture-agent.sidebar.${side}`) === "collapsed";
       app.classList.toggle(`${side}-collapsed`, collapsed);
-      const btn = $(`#toggle-${side}`);
-      if (btn) btn.classList.toggle("active", collapsed);
+      app.style.setProperty(
+        `--${side}-col`,
+        collapsed ? "0px" : `${sidebarWidth(side)}px`
+      );
     }
   }
 
-  function bindSidebarToggles() {
-    for (const side of ["left", "right"]) {
-      const btn = $(`#toggle-${side}`);
-      if (!btn) continue;
+  function setSidebarCollapsed(side, collapsed) {
+    const app = $("#app");
+    if (!app) return;
+    app.classList.toggle(`${side}-collapsed`, collapsed);
+    app.style.setProperty(
+      `--${side}-col`,
+      collapsed ? "0px" : `${sidebarWidth(side)}px`
+    );
+    localStorage.setItem(
+      `lecture-agent.sidebar.${side}`,
+      collapsed ? "collapsed" : "open"
+    );
+  }
+
+  function bindSidebarControls() {
+    for (const btn of $$(".sidebar-close, .sidebar-restore")) {
       btn.addEventListener("click", () => {
-        const app = $("#app");
-        const collapsed = !app.classList.contains(`${side}-collapsed`);
-        app.classList.toggle(`${side}-collapsed`, collapsed);
-        btn.classList.toggle("active", collapsed);
-        localStorage.setItem(
-          `lecture-agent.sidebar.${side}`,
-          collapsed ? "collapsed" : "open"
-        );
+        const side = btn.dataset.side;
+        const collapsed = $("#app").classList.contains(`${side}-collapsed`);
+        setSidebarCollapsed(side, !collapsed);
       });
     }
+  }
+
+  function bindSidebarResize() {
+    for (const handle of $$(".resizer")) {
+      const side = handle.dataset.side;
+      handle.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        const app = $("#app");
+        if (app.classList.contains(`${side}-collapsed`)) return;
+        const workspace = $(".workspace");
+        const rect = workspace.getBoundingClientRect();
+        handle.setPointerCapture(event.pointerId);
+        handle.classList.add("dragging");
+        document.body.classList.add("resizing");
+        const move = (ev) => {
+          const width =
+            side === "left" ? ev.clientX - rect.left : rect.right - ev.clientX;
+          const value = `${clampWidth(width)}px`;
+          app.style.setProperty(`--${side}-col`, value);
+        };
+        const stop = () => {
+          handle.classList.remove("dragging");
+          document.body.classList.remove("resizing");
+          handle.removeEventListener("pointermove", move);
+          handle.removeEventListener("pointerup", stop);
+          handle.removeEventListener("pointercancel", stop);
+          const value = parseFloat(
+            getComputedStyle(app).getPropertyValue(`--${side}-col`)
+          );
+          if (Number.isFinite(value) && value > 0) {
+            localStorage.setItem(
+              `lecture-agent.sidebar.${side}.w`,
+              String(Math.round(value))
+            );
+          }
+        };
+        handle.addEventListener("pointermove", move);
+        handle.addEventListener("pointerup", stop);
+        handle.addEventListener("pointercancel", stop);
+      });
+      // Double-click a gutter to reset that panel to its default width.
+      handle.addEventListener("dblclick", () => {
+        localStorage.removeItem(`lecture-agent.sidebar.${side}.w`);
+        if (!$("#app").classList.contains(`${side}-collapsed`)) {
+          $("#app").style.setProperty(
+            `--${side}-col`,
+            `${sidebarWidth(side)}px`
+          );
+        }
+      });
+    }
+    window.addEventListener("resize", () => {
+      const app = $("#app");
+      if (!app) return;
+      for (const side of ["left", "right"]) {
+        if (app.classList.contains(`${side}-collapsed`)) continue;
+        app.style.setProperty(`--${side}-col`, `${sidebarWidth(side)}px`);
+      }
+    });
   }
 
   // ------------------------------------------------------------------
@@ -1338,10 +1436,49 @@
     return tabs[0]?.id || null;
   }
 
+  function renderSidebarContext() {
+    const box = $("#right-context");
+    if (!box) return;
+    const context = state.ui.context || null;
+    if (!context) {
+      box.hidden = true;
+      box.replaceChildren();
+      return;
+    }
+    box.hidden = false;
+    box.replaceChildren(
+      el("div", { class: "context-title", text: context.title || "" }),
+      el("div", { class: "context-sub" }, [
+        context.state ? el("span", { class: `dot ${context.state}` }) : null,
+        el("span", { text: context.subtitle || "" }),
+        context.recent
+          ? el("span", { class: "context-tag", text: "最近一节" })
+          : null,
+      ])
+    );
+  }
+
   function renderSidebar(side) {
     const tabs = side === "left" ? state.ui.left_tabs : state.ui.right_tabs;
     const tabsEl = $(`#${side}-tabs`);
     const toolboxEl = $(`#${side}-toolbox`);
+    if (side === "right") renderSidebarContext();
+    const contextKnown = Object.prototype.hasOwnProperty.call(state.ui, "context");
+    const context = side === "right" ? state.ui.context : null;
+    if (side === "right" && contextKnown && !context) {
+      // Nothing is selected and there is no class history: the right panel has
+      // nothing meaningful to show, so keep it out of the way instead of
+      // displaying a stack of "未选择课程" widgets.
+      tabsEl.replaceChildren();
+      tabsEl.hidden = true;
+      toolboxEl.replaceChildren(
+        el("div", { class: "sidebar-empty" }, [
+          el("b", { text: "还没有选择课程" }),
+          el("span", { text: "从左侧课程树展开课程，点一节课开始。" }),
+        ])
+      );
+      return;
+    }
     tabsEl.replaceChildren();
     // A single tab needs no tab strip: the left sidebar is just the course tree.
     tabsEl.hidden = (tabs || []).length <= 1;
@@ -1659,7 +1796,8 @@
 
   function boot() {
     applySidebarState();
-    bindSidebarToggles();
+    bindSidebarControls();
+    bindSidebarResize();
     bindSelectionMenu();
     bindAskDialog();
     bindPaletteTrigger();

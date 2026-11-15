@@ -534,7 +534,13 @@ class StreamSet:
     input_done_at: float | None = None
 
     def stream(self, name: str) -> AudioStream | VideoStream | TextStream:
-        value = getattr(self, name, None)
+        streams: dict[str, AudioStream | VideoStream | TextStream] = {
+            "audio": self.audio,
+            "video": self.video,
+            "transcript": self.transcript,
+            "visual": self.visual,
+        }
+        value = streams.get(name)
         if value is None:
             raise KeyError(f"unknown stream {name!r}")
         return value
@@ -603,6 +609,10 @@ class StreamHub:
         # after a restart it points at the most recent session on disk.
         self._notes_session_id: str = ""
         self._notes_meta: dict[str, Any] = {}
+        # (plugin_id, kind) -> callbacks describing one media consumer.
+        # Producers ask the hub about cursors/backpressure instead of reaching
+        # into the consumer plugins directly (no ``input -> stt/vlm`` imports).
+        self._consumers: dict[tuple[str, str], dict[str, Any]] = {}
         self._current = self._create("boot", {})
         self._sessions.append(self._current)
         if self._emit is not None:
@@ -841,3 +851,111 @@ class StreamHub:
 
     def shutdown(self) -> None:
         self.end_session("runtime shutdown")
+
+    # ------------------------------------------------------------------
+    # Media consumers (backpressure without cross-plugin imports)
+    # ------------------------------------------------------------------
+    def register_consumer(
+        self,
+        plugin_id: str,
+        kind: str,
+        *,
+        cursor_fn: Callable[[], float] | None = None,
+        busy_fn: Callable[[], bool] | None = None,
+        gate_limit_fn: Callable[[], float] | None = None,
+    ) -> None:
+        """Announce that *plugin_id* consumes ``kind`` (``"audio"``/``"video"``).
+
+        Producers (the input plugin) use :meth:`consumer_cursor`,
+        :meth:`consumer_gate_limit` and :meth:`consumers_busy` to decide how far
+        the stream may run ahead, so they never need a handle on the consumer
+        plugin itself.
+        """
+
+        key = (str(plugin_id), str(kind))
+        with self._lock:
+            self._consumers[key] = {
+                "cursor_fn": cursor_fn,
+                "busy_fn": busy_fn,
+                "gate_limit_fn": gate_limit_fn,
+            }
+
+    def unregister_consumer(self, plugin_id: str, kind: str | None = None) -> None:
+        with self._lock:
+            for key in list(self._consumers):
+                if key[0] != plugin_id:
+                    continue
+                if kind is not None and key[1] != str(kind):
+                    continue
+                self._consumers.pop(key, None)
+
+    def remove_plugin(self, plugin_id: str) -> None:
+        """Drop every consumer registered by *plugin_id* (plugin teardown)."""
+
+        self.unregister_consumer(plugin_id)
+
+    def consumers(self) -> list[dict[str, str]]:
+        """Introspection: registered consumers as ``{plugin_id, kind}``."""
+
+        with self._lock:
+            keys = list(self._consumers)
+        return [{"plugin_id": pid, "kind": kind} for pid, kind in keys]
+
+    def _consumer_fns(self, kind: str, name: str) -> list[Callable[..., Any]]:
+        with self._lock:
+            consumers = [
+                dict(entry)
+                for (pid, entry_kind), entry in self._consumers.items()
+                if entry_kind == str(kind)
+            ]
+        return [c[name] for c in consumers if callable(c.get(name))]
+
+    def consumer_cursor(self, kind: str) -> float:
+        """Furthest-back position consumed by the ``kind`` consumers.
+
+        Returns ``0.0`` when nothing has been consumed yet (or when there are no
+        consumers at all), which is what a producer treats as "no backpressure".
+        """
+
+        values: list[float] = []
+        for fn in self._consumer_fns(kind, "cursor_fn"):
+            try:
+                values.append(float(fn() or 0.0))
+            except Exception:  # noqa: BLE001 - a broken consumer must not stall input
+                _log.exception("consumer cursor failed for kind=%s", kind)
+        positive = [value for value in values if value > 0.0]
+        return min(positive) if positive else 0.0
+
+    def consumer_gate_limit(self, kind: str) -> float:
+        """Largest backlog (seconds) the ``kind`` consumers allow, else ``0.0``."""
+
+        limits: list[float] = []
+        for fn in self._consumer_fns(kind, "gate_limit_fn"):
+            try:
+                limit = float(fn() or 0.0)
+            except Exception:  # noqa: BLE001 - a broken consumer means "no limit"
+                _log.exception("consumer gate limit failed for kind=%s", kind)
+                continue
+            if limit > 0.0:
+                limits.append(limit)
+        return max(limits) if limits else 0.0
+
+    def consumers_busy(self) -> list[str]:
+        """Plugin ids whose consumer currently reports itself busy."""
+
+        with self._lock:
+            entries = [
+                (pid, dict(entry))
+                for (pid, _kind), entry in self._consumers.items()
+            ]
+        busy: list[str] = []
+        for pid, entry in entries:
+            fn = entry.get("busy_fn")
+            if not callable(fn):
+                continue
+            try:
+                if fn():
+                    busy.append(pid)
+            except Exception:  # noqa: BLE001 - busy is best effort
+                _log.exception("consumer busy check failed for plugin=%s", pid)
+        return list(dict.fromkeys(busy))
