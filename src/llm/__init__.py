@@ -1,56 +1,14 @@
-"""LLM layer: types, providers, service, and retry logic."""
+"""Role-based model service and application message types."""
 
-from __future__ import annotations
-
-from .errors import (
-    LLMAuthError,
-    LLMError,
-    LLMHTTPError,
-    LLMRateLimitError,
-    LLMRetryExhausted,
-    LLMStreamError,
-    LLMTimeoutError,
-)
-from .openai_compat import OpenAICompatibleProvider
-from .provider import Provider, ProviderRegistry
 from .service import LLMService
-from .trace import LLMTrace
-from .types import (
-    ChatRequest,
-    ChatResponse,
-    ImagePart,
-    Message,
-    ProviderConfig,
-    RetryPolicy,
-    StreamEvent,
-    TextPart,
-    ToolCall,
-    ToolDef,
-    Usage,
-)
+from .types import ChatResponse, ImagePart, Message, StreamEvent, TextPart, Usage
 
 __all__ = [
-    "ChatRequest",
+    "LLMService",
     "ChatResponse",
     "ImagePart",
-    "LLMAuthError",
-    "LLMError",
-    "LLMHTTPError",
-    "LLMRateLimitError",
-    "LLMRetryExhausted",
-    "LLMStreamError",
-    "LLMTimeoutError",
-    "LLMService",
-    "LLMTrace",
     "Message",
-    "OpenAICompatibleProvider",
-    "Provider",
-    "ProviderConfig",
-    "ProviderRegistry",
-    "RetryPolicy",
     "StreamEvent",
     "TextPart",
-    "ToolCall",
-    "ToolDef",
     "Usage",
 ]

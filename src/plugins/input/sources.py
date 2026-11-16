@@ -302,14 +302,14 @@ class FFmpegSource:
     def prepare(self) -> None:
         """Download one part and report its measured duration before decoding."""
         self._input_url = self._prepare_input()
-        self._duration = (
-            float(probe_duration(self._input_url) or 0.0)
-            if self.spec.kind != "live"
-            else 0.0
-        )
-        if self._download_handle is not None and self._duration <= 0:
-            self._download_handle.close()
-            raise OSError("Cannot probe recording duration")
+        try:
+            self._duration = (
+                probe_duration(self._input_url) if self.spec.kind != "live" else 0.0
+            )
+        except Exception:
+            if self._download_handle is not None:
+                self._download_handle.close()
+            raise
         self._prepared = True
         self._emit(
             "input.prepared",
@@ -375,6 +375,8 @@ class FFmpegSource:
                 daemon=True,
             )
             self._download_thread.start()
+        session.meta.pop("input_failed", None)
+        session.meta.pop("processing_cancelled", None)
         session = self._hub.get_session(self._session_id) or self._hub.current
         if self._media_path is not None:
             session.meta["media_path"] = str(self._media_path)
@@ -1008,6 +1010,7 @@ class SourceManager:
                     self._state = "idle"
             current = self._hub.current
             if current.session_id != "boot" and current.ended_at is None:
+                current.meta["input_failed"] = True
                 self._hub.end_session("source failed to start")
 
     def _make_source(self, spec: SourceSpec, media_dir: Path | None) -> FFmpegSource:

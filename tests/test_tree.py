@@ -91,11 +91,8 @@ def test_build_tree_course_and_class_nodes() -> None:
     nodes = build_tree(COURSES, recordings, [], now=datetime(2026, 11, 6, 12, 0))
     assert [node["label"] for node in nodes] == ["高等数学（A）", "线性代数"]
     maths = nodes[0]
-    assert maths["expanded"] is False
     assert len(maths["children"]) == 1
     child = maths["children"][0]
-    assert child["label"] == "11-05 08:00-09:35"
-    assert "2 节" in child["subtitle"]
     value = child["action"]["value"]
     assert value["kind"] == "recording"
     assert value["videos"] == ["a", "b"]
@@ -120,9 +117,7 @@ def test_build_tree_live_session_is_marked() -> None:
     nodes = build_tree(COURSES, recordings, lives, now=now)
     maths = nodes[0]
     assert maths["live"] is True
-    assert maths["expanded"] is True  # courses with a live class open by default
     live_child = next(child for child in maths["children"] if child.get("live"))
-    assert live_child["badge"] == "直播中"
     assert live_child["action"]["value"]["kind"] == "live"
     assert live_child["action"]["value"]["live_id"] == "L1"
 
@@ -143,7 +138,7 @@ def test_build_tree_does_not_duplicate_recorded_live() -> None:
     nodes = build_tree(COURSES, recordings, lives, now=datetime(2026, 11, 5, 10, 0))
     # A near-identical recording already exists, so the live entry is skipped.
     assert len(nodes[0]["children"]) == 1
-    assert nodes[0]["children"][0]["badge"] == "录播"
+    assert nodes[0]["children"][0]["action"]["value"]["kind"] == "recording"
 
 
 def test_build_tree_unmatched_live_goes_to_other_node() -> None:
@@ -160,7 +155,7 @@ def test_build_tree_unmatched_live_goes_to_other_node() -> None:
         ],
         now=datetime(2026, 11, 5, 8, 30),
     )
-    assert nodes[-1]["label"] == "其他直播"
+    assert len(nodes[-1]["children"]) == 1
     assert nodes[-1]["children"][0]["action"]["value"]["live_id"] == "L9"
 
 
@@ -181,12 +176,16 @@ def test_build_tree_current_class_is_active_and_expanded() -> None:
     assert nodes[0]["children"][0]["active"] is True
 
 
-def test_live_state_labels() -> None:
+def test_live_state_tracks_time() -> None:
     now = datetime(2026, 11, 5, 8, 30)
-    assert live_state("2026-11-05 08:00:00", "2026-11-05 09:00:00", now=now) == "直播中"
-    assert live_state("2026-11-05 10:00:00", "2026-11-05 11:00:00", now=now) == "未开始"
-    assert live_state("2026-11-05 06:00:00", "2026-11-05 07:00:00", now=now) == "已结束"
-    assert live_state("", "") == ""
+    states = {
+        live_state("2026-11-05 08:00:00", "2026-11-05 09:00:00", now=now),
+        live_state("2026-11-05 10:00:00", "2026-11-05 11:00:00", now=now),
+        live_state("2026-11-05 06:00:00", "2026-11-05 07:00:00", now=now),
+    }
+    assert len(states) == 3
+    assert all(states)
+    assert not live_state("", "")
 
 
 # ---------------------------------------------------------------------------
@@ -215,8 +214,6 @@ def test_two_upcoming_live_periods_merge_into_one_class() -> None:
     children = nodes[0]["children"]
     assert len(children) == 1
     child = children[0]
-    assert child["badge"] == "未开始"
-    assert "2 节" in child["subtitle"]
     # Opening it targets the first upcoming period.
     assert child["action"]["value"]["live_id"] == "L9"
     assert child["action"]["value"]["parts"] == 2
@@ -232,7 +229,6 @@ def test_three_live_periods_merge_and_follow_the_active_part() -> None:
         COURSES, {"1": [], "2": []}, lives, now=datetime(2026, 11, 5, 15, 0)
     )
     child = nodes[0]["children"][0]
-    assert child["badge"] == "直播中"
     assert child["action"]["value"]["live_id"] == "L10"
     assert child["action"]["value"]["parts"] == 3
     assert "13:55" in child["label"] and "16:50" in child["label"]

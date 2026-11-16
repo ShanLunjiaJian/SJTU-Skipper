@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from config import SHUTDOWN_TIMEOUT
+from core.services import ServiceNotFound
 from core.runtime import Runtime
 from ui.auth import COOKIE_NAME as AUTH_COOKIE, install as install_auth
 
@@ -55,6 +56,12 @@ class ActionRequest(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
     page_id: str | None = None
     item_id: str | None = None
+
+
+class NavigationRequest(BaseModel):
+    page: str = ""
+    class_id: str = Field(default="", alias="class")
+    doc: str = ""
 
 
 class _Broadcaster:
@@ -215,9 +222,60 @@ def create_app(runtime: Runtime) -> FastAPI:
             "plugin_order": runtime.plugins.order,
         }
 
+    def navigation_state() -> dict[str, Any]:
+        state = runtime.ui.state()
+        page = state.get("active_page") or ""
+        navigation = {"page": page}
+        input_service = runtime.services.get("input")
+        reader = runtime.services.get("reader")
+        if page == "input:session" and input_service is not None:
+            navigation["class"] = input_service.selected_class()
+        if page.startswith("reader:") and reader is not None:
+            navigation["doc"] = reader.navigation(page)
+        state["navigation"] = navigation
+        return state
+
     @app.get("/api/ui/state")
     def ui_state() -> JSONResponse:
-        return JSONResponse(runtime.ui.state())
+        return JSONResponse(navigation_state())
+
+    @app.post("/api/ui/navigate")
+    def navigate(request: NavigationRequest) -> JSONResponse:
+        page = request.page
+        try:
+            if not page:
+                runtime.ui.show_home()
+            else:
+                if page == "input:session" and request.class_id:
+                    runtime.services.require("input").open_class(request.class_id)
+                elif page.startswith("reader:notes:") and page.endswith(":summarize"):
+                    sid = page.removeprefix("reader:notes:").removesuffix(":summarize")
+                    if not sid or Path(sid).name != sid or sid in {".", ".."}:
+                        raise ValueError("Invalid session ID")
+                    if not (runtime.data_dir / "sessions" / sid).is_dir():
+                        raise KeyError("Session not found")
+                    runtime.services.require("summarize").open_notes(
+                        sid, request.doc or "knowledge"
+                    )
+                elif page.startswith("summarize:logs:"):
+                    sid = page.removeprefix("summarize:logs:")
+                    if not sid or Path(sid).name != sid or sid in {".", ".."}:
+                        raise ValueError("Invalid session ID")
+                    if not (runtime.data_dir / "sessions" / sid).is_dir():
+                        raise KeyError("Session not found")
+                    runtime.services.require("summarize").open_logs(sid)
+                if request.doc:
+                    runtime.services.require("reader").select_document(
+                        page, request.doc
+                    )
+                runtime.ui.open_page(page)
+        except (KeyError, ServiceNotFound) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(
+            {"ok": True, "navigation": navigation_state()["navigation"]}
+        )
 
     @app.get("/api/runtime")
     def runtime_status() -> JSONResponse:

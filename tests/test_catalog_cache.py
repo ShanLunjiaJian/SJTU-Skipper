@@ -37,7 +37,12 @@ class FakeUpstream:
 def test_catalog_caches_courses(monkeypatch) -> None:
     upstream = FakeUpstream()
     catalog = Catalog(settings=FakeSettings())
-    monkeypatch.setattr(Catalog, "_cat", lambda self: upstream)
+
+    def client(self):
+        self._sjt_cat = upstream
+        return upstream
+
+    monkeypatch.setattr(Catalog, "_cat", client)
 
     assert catalog.list_courses() == [{"id": "1", "name": "x"}]
     assert catalog.list_courses() == [{"id": "1", "name": "x"}]

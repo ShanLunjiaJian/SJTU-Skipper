@@ -21,7 +21,7 @@ def _make_runtime(tmp_path: Path):
 def _note(tmp_path: Path, name: str = "note_knowledge.md") -> Path:
     path = tmp_path / name
     path.write_text(
-        "# 课堂讲义：知识\n\n## 第一节\n\n第一段内容，讲定义。\n\n"
+        "# 笔记：知识\n\n## 第一节\n\n第一段内容，讲定义。\n\n"
         "第二段内容，讲定理 $a^2+b^2=c^2$ 的证明。\n\n第三段内容，讲例题。\n",
         encoding="utf-8",
     )
@@ -33,7 +33,7 @@ def _open(
 ) -> str:
     reader = runtime.services.require("reader")
     return reader.show(
-        title="课堂讲义",
+        title="笔记",
         docs=[{"key": "knowledge", "label": "知识", "path": str(path)}],
         active="knowledge",
         page_key=key,

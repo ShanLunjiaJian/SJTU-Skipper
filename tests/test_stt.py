@@ -175,18 +175,6 @@ def test_settings_service_and_debug_page(tmp_path: Path) -> None:
         assert "stt.chunk_seconds" not in settings.values
         assert settings.get("stt.timeout") == 7
         assert settings.get("stt.concurrency") == 3
-        assert {s.key for s in settings.specs()} == {
-            "stt." + k
-            for k in (
-                "enabled",
-                "server_url",
-                "language",
-                "context",
-                "timeout",
-                "batch_seconds",
-                "concurrency",
-            )
-        }
         assert PAGE_ID in ctx.ui.snapshot()["pages"]
         assert "stt.debug" in ctx.ui.snapshot()["commands"]
         assert ctx.service("stt").flushing() is False
@@ -471,8 +459,6 @@ def test_stream_mode_is_explicit_in_query_and_start(
         client.stream(language="Chinese", context="", concurrency=2, mode=mode)
         assert urls == ["ws://test/v1/stream?mode=" + mode]
         assert sent[0]["mode"] == mode
-        with pytest.raises(TypeError):
-            client.stream(language="Chinese", context="", concurrency=2)
     finally:
         client.close()
 

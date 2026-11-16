@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import hmac
 import json
 import logging
@@ -126,7 +127,7 @@ class AuthStore:
             raw["users"] = users
             created = True
             logger.warning(
-                "created %s with username 'admin' and password %s — change it",
+                "created %s with username 'admin' and password %s - change it",
                 self.path,
                 password,
             )
@@ -262,6 +263,7 @@ _LOGIN_HTML = """<!doctype html>
     <h1>SJTU-Skipper</h1>
     <p class="sub">请使用本地 auth.json 中配置的账号登录</p>
     {error}
+    <input type="hidden" name="next" value="{next}">
     <label for="username">用户名</label>
     <input id="username" name="username" autocomplete="username" autofocus required>
     <label for="password">密码</label>
@@ -271,6 +273,27 @@ _LOGIN_HTML = """<!doctype html>
 </body>
 </html>
 """
+
+
+def _safe_next(value: str | None) -> str:
+    if not value:
+        return "/"
+    decoded = urllib.parse.unquote(value)
+    if (
+        not value.startswith("/")
+        or not decoded.startswith("/")
+        or decoded.startswith("//")
+        or "\\" in decoded
+        or any(ord(char) < 32 or ord(char) == 127 for char in decoded)
+    ):
+        return "/"
+    return value
+
+
+def _login_html(next_url: str, error: str = "") -> str:
+    return _LOGIN_HTML.replace("{error}", error).replace(
+        "{next}", html.escape(next_url, quote=True)
+    )
 
 
 def _cookie_secure(request: Request) -> bool:
@@ -285,9 +308,10 @@ def install(app: Any, data_dir: Path) -> AuthStore:
 
     @app.get("/login")
     def login_page(request: Request) -> Any:
+        next_url = _safe_next(request.query_params.get("next"))
         if store.check(request.cookies.get(COOKIE_NAME, "")):
-            return RedirectResponse("/", status_code=303)
-        return HTMLResponse(_LOGIN_HTML.replace("{error}", ""))
+            return RedirectResponse(next_url, status_code=303)
+        return HTMLResponse(_login_html(next_url))
 
     @app.post("/login")
     async def login_submit(request: Request) -> Any:
@@ -301,15 +325,16 @@ def install(app: Any, data_dir: Path) -> AuthStore:
         }
         username = str(form.get("username") or "")
         password = str(form.get("password") or "")
+        next_url = _safe_next(form.get("next"))
         if store.locked(username):
             error = '<p class="error">尝试次数过多，请五分钟后再试。</p>'
-            return HTMLResponse(_LOGIN_HTML.replace("{error}", error), status_code=429)
+            return HTMLResponse(_login_html(next_url, error), status_code=429)
         if not store.verify(username, password, key=username):
             logger.warning("failed login for %r", username)
             error = '<p class="error">用户名或密码不正确。</p>'
-            return HTMLResponse(_LOGIN_HTML.replace("{error}", error), status_code=401)
+            return HTMLResponse(_login_html(next_url, error), status_code=401)
         token = store.issue(username)
-        response = RedirectResponse("/", status_code=303)
+        response = RedirectResponse(next_url, status_code=303)
         response.set_cookie(
             COOKIE_NAME,
             token,
@@ -339,7 +364,12 @@ def install(app: Any, data_dir: Path) -> AuthStore:
         if user is None:
             if path.startswith("/api/"):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
-            return RedirectResponse("/login", status_code=303)
+            raw_path = request.scope.get("raw_path")
+            next_url = raw_path.decode("ascii") if raw_path is not None else path
+            if request.url.query:
+                next_url += "?" + request.url.query
+            query = urllib.parse.urlencode({"next": _safe_next(next_url)})
+            return RedirectResponse("/login?" + query, status_code=303)
         request.state.user = user
         return await call_next(request)
 

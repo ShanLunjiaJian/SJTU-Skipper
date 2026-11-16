@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the latest source tree directly (no reinstall / no build step).
+# Run the source tree with the installed project dependencies.
 #
 #   ./start.sh                 # serve on the default host/port
 #   ./start.sh --port 9000     # options are forwarded to `serve`
@@ -11,6 +11,16 @@ PY="$ROOT/.venv/bin/python"
 
 if [[ ! -x $PY ]]; then
   echo "error: $PY not found; create the .venv first (see README)." >&2
+  exit 1
+fi
+
+if ! command -v bun >/dev/null 2>&1; then
+  echo "error: Bun >=1.4.4 is required; enter nix develop (see README)." >&2
+  exit 1
+fi
+bun -e 'if (Bun.semver.satisfies(Bun.version, ">=1.4.4") === false) throw new Error("Bun >=1.4.4 is required")'
+if [[ ! -d $ROOT/node_modules/@oh-my-pi/pi-coding-agent ]]; then
+  echo "error: runtime dependencies not found; run bun install --frozen-lockfile." >&2
   exit 1
 fi
 

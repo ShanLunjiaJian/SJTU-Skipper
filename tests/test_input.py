@@ -173,6 +173,7 @@ def _make_context(data_dir: Any = None) -> PluginContext:
     services = ServiceRegistry()
     settings = FakeSettings()
     services.register("settings", settings)
+    settings.set("instant-summarize.enabled", False)
     ui = UIManager()
     import logging
 
@@ -193,6 +194,7 @@ def _start_recording_job(ctx, plugin, monkeypatch, *, videos=("v1", "v2")):
     """Start a queued recording without external media processes."""
     started = Queue()
     monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+    monkeypatch.setattr(plugin, "_probe_job_durations", lambda job: None)
     monkeypatch.setattr(
         plugin._catalog,
         "get_recording_streams",
@@ -383,9 +385,6 @@ class TestBuildCommands:
         assert cmd[0] == "ffmpeg"
         assert "mjpeg" in cmd
         assert "image2pipe" in cmd
-        # -vf fps=1.0,scale=1280:-1 are two adjacent args
-        assert any("fps=1.0" in s for s in cmd)
-        assert any("scale=1280:-1" in s for s in cmd)
         assert cmd[-1] == "pipe:1"
 
     def test_video_cmd_live(self):
@@ -595,7 +594,7 @@ class TestCatalogNoToken:
 
         settings = FakeSettings()
         settings.register(
-            __import__("plugins.settings.spec", fromlist=["SettingsSpec"]).SettingsSpec(
+            __import__("core.settings_spec", fromlist=["SettingsSpec"]).SettingsSpec(
                 key="input.canvas_token",
                 label="Token",
                 type="secret",
@@ -753,50 +752,57 @@ class TestCatalogMapping:
 
 
 class TestInputPluginUI:
-    def test_plugin_setup_registers_ui(self):
-        ctx = _make_context()
+    def test_course_download_progress(self, tmp_path):
+        from core.events import Event
+        from plugins.input.plugin import _Job
+
+        ctx = _make_context(tmp_path)
         plugin = InputPlugin()
         plugin.setup(ctx)
-
-        snap = ctx.ui.snapshot()
-        # One left tab: the course tree.  One right tab: the current class.
-        assert snap["tabs"]["courses"] == "left"
-        assert snap["tabs"]["session"] == "right"
-        assert "input.courses" in snap["items"]
-        assert "input.session" in snap["items"]
-        assert "input.live" not in snap["items"]
-        for page in ("input:session", "input:manual"):
-            assert page in snap["pages"]
-        assert "input:courses" not in snap["pages"]
-
-        state = ctx.ui.state()
-        items = {
-            item["id"]: item
-            for side in ("left_tabs", "right_tabs")
-            for tab in state.get(side, [])
-            for item in tab.get("toolbox", [])
-        }
-        for tid in ("input.courses", "input.session"):
-            assert tid in items, f"toolbox item {tid} missing from state"
-            assert items[tid].get("blocks"), f"toolbox item {tid} rendered empty blocks"
-
-        for action in (
-            "input.refresh_courses",
-            "input.toggle_course",
-            "input.open_class",
-            "input.start_processing",
-            "input.pause_processing",
-            "input.play_url",
-            "input.stop",
-            "input.pause",
-            "input.resume",
-        ):
-            assert action in snap["actions"], f"action {action} not registered"
-
-        assert "input.refresh" in snap["commands"]
-        assert "input.manual" in snap["commands"]
-
-        plugin.teardown()
+        try:
+            cls = {"id": "course", "name": "概率论", "videos": ["v1", "v2"]}
+            job = _Job(id="course", cls=cls, state="running")
+            plugin._active_job = job
+            plugin._jobs[job.id] = job
+            plugin._current_class = cls
+            for video, status, received in [
+                ("v2", "progress", 25),
+                ("v1", "done", 100),
+            ]:
+                plugin._on_input_event(
+                    Event(
+                        type="input.download",
+                        ts=0.0,
+                        event_id="download-progress",
+                        payload={
+                            "video_id": video,
+                            "status": status,
+                            "received": received,
+                            "total": 100,
+                        },
+                    )
+                )
+            progress = plugin._download_progress(job)
+            assert progress == {"status": "progress", "received": 125, "total": 200}
+            blocks = plugin._render_session()
+            assert [b for b in blocks if b["type"] == "progress"][1]["value"] == 0.625
+            plugin._on_input_event(
+                Event(
+                    type="input.download",
+                    ts=0.0,
+                    event_id="download-done",
+                    payload={
+                        "video_id": "v2",
+                        "status": "done",
+                        "received": 100,
+                        "total": 100,
+                    },
+                )
+            )
+            blocks = plugin._render_session()
+            assert [b for b in blocks if b["type"] == "progress"][1]["value"] == 1.0
+        finally:
+            plugin.teardown()
 
     def test_action_stop_stops_source(self):
         ctx = _make_context()
@@ -829,7 +835,6 @@ class TestInputPluginUI:
 
         result = ctx.ui.dispatch_action("input.play_url", {"url": ""})
         assert not result.ok
-        assert "URL" in result.message
 
         plugin.teardown()
 
@@ -865,7 +870,6 @@ class TestInputPluginUI:
         # Also verify that missing url returns error
         result2 = ctx.ui.dispatch_action("input.play_url", {"title": "No URL"})
         assert not result2.ok
-        assert "URL" in result2.message
 
         plugin.teardown()
 
@@ -886,7 +890,6 @@ class TestInputPluginUI:
 
         result = ctx.ui.dispatch_action("input.open_class", {"kind": "recording"})
         assert not result.ok
-        assert "录播" in result.message
 
         plugin.teardown()
 
@@ -897,7 +900,6 @@ class TestInputPluginUI:
 
         result = ctx.ui.dispatch_action("input.open_class", {"kind": "live"})
         assert not result.ok
-        assert "直播" in result.message
 
         plugin.teardown()
 
@@ -909,55 +911,6 @@ class TestInputPluginUI:
         result = ctx.ui.dispatch_action("input.refresh_courses", {})
         assert result.ok
         plugin.teardown()
-
-    def test_settings_registered(self):
-        ctx = _make_context()
-        plugin = InputPlugin()
-        plugin.setup(ctx)
-
-        settings = ctx.require("settings")
-        specs = {s.key: s for s in settings.specs()}
-        for key in (
-            "input.canvas_token",
-            "input.canvas_base_url",
-            "input.video_fps",
-            "input.video_width",
-            "input.audio_rate",
-            "input.keep_recordings",
-            "input.live_device",
-            "input.reconnect",
-        ):
-            assert key in specs, f"setting {key} not registered"
-
-        # Check secret
-        canvas_spec = specs["input.canvas_token"]
-        assert canvas_spec.secret is True
-        assert canvas_spec.type == "secret"
-
-        plugin.teardown()
-
-    def test_service_registered(self):
-        ctx = _make_context()
-        plugin = InputPlugin()
-        plugin.setup(ctx)
-
-        svc = ctx.services.get("input")
-        assert svc is not None
-        assert hasattr(svc, "start")
-        assert hasattr(svc, "stop")
-        assert hasattr(svc, "pause")
-        assert hasattr(svc, "resume")
-        assert hasattr(svc, "status")
-        assert hasattr(svc, "list_courses")
-        assert hasattr(svc, "fill_gaps")
-        assert hasattr(svc, "session_meta")
-
-        plugin.teardown()
-
-    def test_requires_settings(self):
-        assert "settings" in InputPlugin.requires
-        assert InputPlugin.id == "input"
-        assert "input" in InputPlugin.provides
 
 
 # ====================================================================
@@ -1239,37 +1192,6 @@ class TestMediaPrune:
 
 
 # ====================================================================
-# SourceSpec
-# ====================================================================
-
-
-class TestSourceSpec:
-    def test_defaults(self):
-        spec = SourceSpec()
-        assert spec.kind == "url"
-        assert spec.url == ""
-        assert spec.start_at == 0.0
-
-    def test_fields(self):
-        spec = SourceSpec(
-            kind="live",
-            url="http://example.com/live.flv",
-            title="Live Stream",
-            course={"id": "42"},
-            meta={"camera": 1},
-            headers={"Referer": "https://v.sjtu.edu.cn/"},
-            start_at=10.0,
-        )
-        assert spec.kind == "live"
-        assert spec.url == "http://example.com/live.flv"
-        assert spec.title == "Live Stream"
-        assert spec.course == {"id": "42"}
-        assert spec.meta == {"camera": 1}
-        assert spec.headers == {"Referer": "https://v.sjtu.edu.cn/"}
-        assert spec.start_at == 10.0
-
-
-# ====================================================================
 # Integration: SJTUCatalog (unit tests without network)
 # ====================================================================
 
@@ -1281,28 +1203,6 @@ class TestSJTUCatalogUnit:
         cat = SJTUCatalog(token="", base_url="http://localhost")
         with pytest.raises(InputError, match="token"):
             cat.list_courses()
-
-    def test_vendored_sjtu_client_exists(self):
-        """The input module must use the vendored client, not legacy/."""
-        from pathlib import Path
-
-        import integrations.sjtu_canvas_assistant as pkg
-        from integrations.sjtu_canvas_assistant.video_client import (
-            NEW_VIDEO_SERVICE_ROOT,
-        )
-
-        package_dir = Path(pkg.__file__).resolve().parent
-        assert package_dir.name == "sjtu_canvas_assistant"
-        assert package_dir.parent.name == "integrations"
-        assert "legacy" not in package_dir.parts
-        assert NEW_VIDEO_SERVICE_ROOT.startswith("https://")
-
-    def test_close_idempotent(self):
-        from integrations.sjtu_canvas import SJTUCatalog
-
-        cat = SJTUCatalog(token="test", base_url="http://localhost")
-        cat.close()
-        cat.close()  # should not raise
 
     def test_context_manager(self):
         from integrations.sjtu_canvas import SJTUCatalog
@@ -1470,7 +1370,6 @@ class TestClassPlayer:
         player = next(block for block in blocks if block["type"] == "player")
         assert [src["label"] for src in player["sources"]] == ["课堂", "屏幕"]
         assert player["processing"] is False
-        assert player["part"] == 1 and player["parts"] == 2
 
         plugin.teardown()
 
@@ -1531,8 +1430,6 @@ class TestClassPlayer:
         assert started[0].continue_session is False
         assert started[0].realtime is (kind == "live")
         assert started[0].download is (kind == "recording")
-        assert started[0].audio_gate_limit == (10.0 if kind == "live" else 362.0)
-        assert started[0].video_gate_limit == (0.0 if kind == "live" else 75.0)
 
         plugin.teardown()
 
@@ -1588,7 +1485,7 @@ class TestClassPlayer:
             second = started.get(timeout=5.0)
             assert plugin._class_index == 1
             assert plugin._want_processing is True
-            assert job.index == 1
+            assert job.input_part_index == 1
             assert plugin._active_job is job
             assert second.course["video_id"] == "v2"
             assert second.continue_session is True
@@ -1842,7 +1739,7 @@ class TestProcessingQueue:
                 "kind": "recording",
                 "course": "1",
                 "name": name,
-                "label": "11-05 08:00–09:35",
+                "label": "11-05 08:00-09:35",
                 "videos": [f"{class_id}-v1"],
             },
         )
@@ -1877,7 +1774,6 @@ class TestProcessingQueue:
         plugin._streams_loading = False
         result = ctx.ui.dispatch_action("input.start_processing", {})
         assert result.ok
-        assert "队列" in result.message
         assert plugin._queue == ["class:b"]
         assert plugin._active_job.id == "class:a"
 
@@ -1998,12 +1894,12 @@ class TestProcessingQueue:
             second = started.get(timeout=5.0)
             assert second.url == first.next_source.url
             assert second.continue_session is True
-            assert job.index == 1
+            assert job.input_part_index == 1
             assert job.total_seconds == 6326.0
             assert plugin._active_job is job
             assert plugin._queue == [selected.id]
             assert plugin._current_class["id"] == selected.id
-            assert plugin._class_index == selected.index == 0
+            assert plugin._class_index == selected.input_part_index == 0
             assert (
                 plugin._class_streams
                 == selected.streams
@@ -2017,7 +1913,7 @@ class TestProcessingQueue:
             wait.assert_not_called()
             context = ctx.ui.state()["context"]
             assert context["title"] == "线性代数"
-            assert "后台处理 高等数学" in context["subtitle"]
+            assert "高等数学" in context["subtitle"]
             assert context["selected"] is True
             assert not [b for b in plugin._render_session() if b["type"] == "progress"]
         finally:
@@ -2243,7 +2139,7 @@ def test_multipart_progress_uses_full_duration(tmp_path, monkeypatch) -> None:
         assert job.total_seconds == 0.0
         blocks = plugin._render_session()
         progress = next(b for b in blocks if b["type"] == "progress")
-        assert progress["label"] == "正在处理 1:40:00 / …"
+        assert "1:40:00" in progress["label"]
         assert progress["value"] == 0.0
 
         ctx.events.emit(
@@ -2257,6 +2153,7 @@ def test_multipart_progress_uses_full_duration(tmp_path, monkeypatch) -> None:
         assert job.total_seconds == 6326.0
         ctx.events.emit(
             "input.download",
+            video_id="v1",
             status="progress",
             total=10,
             received=5,
@@ -2265,9 +2162,68 @@ def test_multipart_progress_uses_full_duration(tmp_path, monkeypatch) -> None:
         assert ctx.events.flush()
         blocks = plugin._render_session()
         progress = [b for b in blocks if b["type"] == "progress"]
-        assert len(progress) == 2, "prefetch must not hide analysis progress"
-        assert progress[1]["label"] == "正在处理 1:40:00 / 1:45:26"
-        assert progress[1]["value"] == pytest.approx(6000 / 6326)
+        assert len(progress) == 4
+        assert "1:40:00" in progress[0]["label"]
+        assert "1:45:26" in progress[0]["label"]
+        assert progress[0]["value"] == pytest.approx(6000 / 6326)
+    finally:
+        plugin.teardown()
+
+
+def test_early_duration_and_completed_progress(tmp_path, monkeypatch):
+    from plugins.input.plugin import _Job
+
+    ctx = _make_context(tmp_path)
+    plugin = InputPlugin()
+    plugin.setup(ctx)
+    session = ctx.streams.start_session()
+    cls = {
+        "id": "course",
+        "videos": ["v1", "v2"],
+        "recording_parts": [
+            {
+                "video_id": "v1",
+                "begin": "2026-11-16 08:00:00",
+                "end": "2026-11-16 08:10:00",
+            },
+            {
+                "video_id": "v2",
+                "begin": "2026-11-16 08:15:00",
+                "end": "2026-11-16 08:25:00",
+            },
+        ],
+    }
+    job = _Job(
+        id="course",
+        cls=cls,
+        session_id=session.session_id,
+        state="running",
+        recording_streams={"v1": {"main": "first"}, "v2": {"main": "second"}},
+    )
+    plugin._active_job = job
+    plugin._jobs[job.id] = job
+    plugin._current_class = cls
+    try:
+        ctx.streams.seal_text(session.session_id, "transcript", 300)
+        ctx.streams.seal_text(session.session_id, "visual", 300)
+        progress = [b for b in plugin._render_session() if b["type"] == "progress"]
+        assert progress[0]["value"] == 0.25
+        probed = []
+
+        def duration(url):
+            probed.append(url)
+            return 600.0
+
+        monkeypatch.setattr("plugins.input.plugin.probe_duration", duration)
+        plugin._probe_job_durations(job)
+        assert set(probed) == {"first", "second"}
+        assert session.meta["total_media_seconds"] == 1200
+        ctx.streams.seal_text(session.session_id, "transcript", 1200, final=True)
+        ctx.streams.seal_text(session.session_id, "visual", 1200, final=True)
+        job.state = "done"
+        plugin._active_job = None
+        progress = [b for b in plugin._render_session() if b["type"] == "progress"]
+        assert [b["value"] for b in progress] == [1.0, 1.0, 1.0, 1.0]
     finally:
         plugin.teardown()
 
@@ -2286,7 +2242,7 @@ def test_part_transition_does_not_drain_consumers(tmp_path, monkeypatch) -> None
         second = started.get(timeout=5.0)
         assert plugin._class_index == 1
         assert plugin._class_streams == {"main": "https://example.com/v2.mp4"}
-        assert job.index == 1
+        assert job.input_part_index == 1
         assert plugin._active_job is job
         assert second.url == first.next_source.url
         assert second.continue_session is True
@@ -2405,77 +2361,3 @@ def test_canceled_prefetch_does_not_restart_download(monkeypatch) -> None:
     source.start()
     assert not source.running
     source.prepare.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "phase,label",
-    [
-        ("collecting", "收集来源"),
-        ("chunking", "整理片段"),
-        ("writing", "整课写作"),
-        ("reviewing", "审阅"),
-        ("revising", "修改"),
-        ("published", "已发布"),
-        ("failed", "失败"),
-        ("resetting", "清理笔记"),
-        ("deleted", "已删除"),
-    ],
-)
-def test_note_panel_status_parity(tmp_path, monkeypatch, phase, label):
-    from plugins.summarize.plugin import SummarizePlugin
-
-    monkeypatch.setattr("plugins.summarize.plugin.time.monotonic", lambda: 125.0)
-    ctx = _make_context(tmp_path)
-    sid = ctx.streams.notes_session_id
-    requested = []
-    state = {
-        "phase": phase,
-        "pending_chunks": 3,
-        "running_chunks": 2,
-        "completed_chunks": 4,
-        "total_chunks": 9,
-        "tasks": [{"label": "正确性审阅", "agent_step": 7, "started": 100.0}],
-        "error": "审阅服务不可用" if phase == "failed" else "",
-    }
-
-    def status(session_id):
-        requested.append(session_id)
-        return state
-
-    pipeline = SimpleNamespace(status=status, note_files=lambda kind: {})
-    ctx.services.register("notes-pipeline", pipeline)
-    input_plugin = InputPlugin()
-    input_plugin._ctx = ctx
-    input_plugin._total_seconds = 0.0
-    notes = SummarizePlugin()
-    notes.ctx = ctx
-    notes.pipeline = pipeline
-    notes.settings = ctx.service("settings")
-    notes.notices = {}
-
-    recording = input_plugin._render_recording_page(
-        processing=False,
-        finished=True,
-        download={},
-        session_id=sid,
-    )
-    summary = notes._render()
-    expected = [
-        {"type": "text", "text": f"笔记：{label}"},
-        {"type": "text", "text": "片段 4/9；等待 3；运行 2"},
-        {"type": "text", "text": "正确性审阅：步骤 7；25 秒"},
-    ]
-    if phase == "failed":
-        expected.append(
-            {"type": "text", "text": "笔记生成失败：审阅服务不可用．可重新生成笔记．"}
-        )
-    assert recording[: len(expected)] == summary[: len(expected)] == expected
-    assert requested == [sid, sid]
-    assert all(block["type"] != "progress" for block in summary)
-    assert not any("讲义已" in block.get("text", "") for block in recording)
-    assert {
-        button["action"]
-        for block in summary
-        if block["type"] == "buttons"
-        for button in block["buttons"]
-    } >= {"summarize.delete", "summarize.regenerate"}

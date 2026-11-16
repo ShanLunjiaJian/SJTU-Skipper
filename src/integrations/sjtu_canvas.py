@@ -1,9 +1,8 @@
 """SJTU Canvas & video portal integration.
 
 Wraps the vendored ``sjtu_canvas_assistant`` package into a catalog that the
-input plugin consumes.  Each Canvas course gets its own ``SJTUVideoClient`` to
-avoid auth crossover.  The old submodule is kept only in local ``legacy/`` and
-is not required at runtime.
+input plugin consumes. Each Canvas course gets its own ``SJTUVideoClient`` to
+avoid auth crossover.
 """
 
 from __future__ import annotations
@@ -45,7 +44,7 @@ class InputError(RuntimeError):
 
 
 def load_token_from_env() -> str:
-    """Read the Canvas token from the project or legacy .env file."""
+    """Read the Canvas token from the project .env file."""
 
     from dotenv import load_dotenv
 
@@ -58,31 +57,6 @@ def load_token_from_env() -> str:
 def _load_base_url(default: str = "https://oc.sjtu.edu.cn") -> str:
     raw = (os.getenv("CANVAS_BASE_URL") or default).strip()
     return _clean_base_url(raw)
-
-
-def _extract_stream_url(info: Any) -> str:
-    """Support both the user's enhanced VideoInfo and the stock submodule."""
-
-    getter = getattr(info, "get_stream_url", None)
-    if callable(getter):
-        try:
-            url = getter()
-            if url:
-                return str(url)
-        except Exception:  # noqa: BLE001 - fall through to play_items
-            pass
-    items = getattr(info, "play_items", None) or []
-    for item in items:
-        if isinstance(item, dict):
-            url = (
-                item.get("url")
-                or item.get("playUrl")
-                or item.get("videoUrl")
-                or item.get("hlsUrl")
-            )
-            if url:
-                return str(url)
-    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +233,7 @@ class SJTUCatalog:
         except (VideoIntegrationError, VideoNetworkError) as exc:
             raise InputError(f"获取视频信息失败：{exc}")
 
-        url = _extract_stream_url(info)
+        url = info.get_stream_url() or ""
         if not url:
             # Try to re-auth and retry once
             _log.info("No stream URL in first attempt, retrying auth for %s", video_id)
@@ -268,7 +242,7 @@ class SJTUCatalog:
             try:
                 vc2.resolve_course_video_auth(cid_int)
                 info2 = vc2.get_video_info(cid_int, video_id)
-                url = _extract_stream_url(info2)
+                url = info2.get_stream_url() or ""
             except Exception as exc:
                 raise InputError(f"重试获取视频 URL 失败：{exc}")
         if not url:
@@ -313,7 +287,7 @@ class SJTUCatalog:
                 view = 0
             views.setdefault(view, str(url))
         if not views:
-            url = _extract_stream_url(info)
+            url = info.get_stream_url() or ""
             if url:
                 views[0] = url
         return {str(key): value for key, value in views.items()}
@@ -339,7 +313,7 @@ class SJTUCatalog:
                 headers = self._live_headers(token)
                 return token, headers
 
-        # No cached token — iterate active courses
+        # No cached token. Iterate active courses.
         client = self._canvas_client()
         try:
             courses = client.list_courses(active_only=True)

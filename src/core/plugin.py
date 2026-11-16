@@ -237,9 +237,6 @@ class _ScopedServices(ServiceRegistry):
             return
         super().register(name, obj, plugin_id=plugin_id)
 
-    def _raw_register(self, name: str, obj: Any, *, plugin_id: str = "") -> None:
-        super().register(name, obj, plugin_id=plugin_id)
-
 
 def _scoped_ui(ui: Any, plugin_id: str) -> Any:
     if not plugin_id or ui is None or isinstance(ui, _ScopedUI):
@@ -297,9 +294,6 @@ class PluginContext:
             self.services = _ScopedServices(self.services, self)
 
     # -- capability access ---------------------------------------------
-    @property
-    def _declared_provides(self) -> tuple[str, ...]:
-        return self.declared_provides
 
     def _check_access(self, name: str) -> None:
         allowed = self.allowed_dependencies
@@ -521,16 +515,6 @@ class PluginManager:
     def register_all(self, plugins: Iterable[Plugin | type[Plugin]]) -> None:
         for plugin in plugins:
             self.register(plugin)
-
-    def register_specs(self, specs: Iterable[str]) -> list[str]:
-        """Register external plugin specs (``module:Class`` / path)."""
-
-        registered: list[str] = []
-        for spec in specs:
-            plugin, origin = resolve_plugin_spec(spec)
-            self.register(plugin, origin=origin)
-            registered.append(plugin.id)
-        return registered
 
     # -- context --------------------------------------------------------
     def _make_context(self, plugin: Plugin) -> PluginContext:

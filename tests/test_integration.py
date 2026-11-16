@@ -16,7 +16,27 @@ from plugins.settings.plugin import SettingsPlugin
 from plugins.summarize.plugin import SummarizePlugin
 from plugins.notes_pipeline import NotesPipelinePlugin
 
-from support import FakeLLM, FakeResponse, FakeToolCall
+from support import FakeLLM
+from tests.test_agent import ScriptedRuntime
+
+
+def _notes_llm(contents, role):
+    def script(sdk, params):
+        declaration = sdk.sessions[params["session_id"]]
+        assert declaration["role"] == role
+        assert set(declaration["tools"]) == {"read", "grep", "glob", "edit", "write"}
+        for name, content in contents.items():
+            assert name in declaration["files"]
+            yield {
+                "type": "event",
+                "name": "agent.file",
+                "data": {"file": name, "content": content},
+            }
+        yield {"type": "result", "result": {"final_message": "Saved", "steps": 2}}
+
+    llm = FakeLLM()
+    llm.runtime = ScriptedRuntime(script)
+    return llm
 
 
 class StubLLM(Plugin):
@@ -38,37 +58,16 @@ def _wait_until(predicate, timeout: float = 8.0, interval: float = 0.05) -> bool
     return False
 
 
-def test_instant_summarize_writes_three_files(tmp_path: Path, monkeypatch) -> None:
-    # Test the runtime consumers with FakeLLM. Worker IPC has separate HTTP tests.
-    monkeypatch.setattr(
-        NotesPipelinePlugin,
-        "_agent_run",
-        lambda self, sid, agent_id, instruction: self.agent.run(agent_id, instruction),
-    )
+def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
     cfg = load_config(data_dir=tmp_path)
-    script = [
-        FakeResponse(
-            tool_calls=[
-                FakeToolCall(
-                    "c1",
-                    "append",
-                    {"file": "note_knowledge.md", "text": "- 留数定理" * 5},
-                ),
-                FakeToolCall(
-                    "c2",
-                    "append",
-                    {"file": "note_gossip.md", "text": "- 老师聊到 AI" * 3},
-                ),
-                FakeToolCall(
-                    "c3",
-                    "append",
-                    {"file": "note_notice.md", "text": "- 作业 3.1" * 3},
-                ),
-            ]
-        ),
-        FakeResponse(content="done"),
-    ]
-    llm = FakeLLM(script)
+    llm = _notes_llm(
+        {
+            "note_knowledge.md": "# 知识\n\n" + "- 留数定理\n" * 5,
+            "note_gossip.md": "# 闲话\n\n" + "- 老师聊到 AI\n" * 3,
+            "note_notice.md": "# 通知\n\n" + "- 作业 3.1\n" * 3,
+        },
+        "note_chunk",
+    )
     runtime = build_runtime(
         cfg,
         plugins=[
@@ -110,47 +109,28 @@ def test_instant_summarize_writes_three_files(tmp_path: Path, monkeypatch) -> No
         ), "instant_note_knowledge.md was not written"
         assert "AI" in (notes / "instant_note_gossip.md").read_text(encoding="utf-8")
         assert "作业" in (notes / "instant_note_notice.md").read_text(encoding="utf-8")
-        assert llm.calls, "summarize never called the LLM"
+        assert llm.runtime.runs, "instant notes never started an SDK run"
     finally:
         runtime.stop()
 
 
-def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path, monkeypatch) -> None:
-    """The non-instant plugin lets the agent write the three notes."""
-    # Test the runtime consumers with FakeLLM. Worker IPC has separate HTTP tests.
-    monkeypatch.setattr(
-        NotesPipelinePlugin,
-        "_agent_run",
-        lambda self, sid, agent_id, instruction: self.agent.run(agent_id, instruction),
-    )
+def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
+    """Publish the three note files through the runtime bridge."""
     cfg = load_config(data_dir=tmp_path)
     outline = (
-        "# 课堂讲义：知识\n\n"
+        "# 笔记：知识\n\n"
         "## 留数定理\n\n"
         "### 定义\n\n"
         "设 $f$ 在 $D$ 内除有限个孤立奇点外解析……\n"
     )
-    script = [
-        FakeResponse(
-            tool_calls=[
-                FakeToolCall(
-                    "w1",
-                    "append",
-                    {"file": "note_knowledge.md", "text": outline},
-                ),
-                FakeToolCall(
-                    "w2",
-                    "append",
-                    {
-                        "file": "note_notice.md",
-                        "text": "# 通知\n\n## 作业\n\n- 习题 3.1\n",
-                    },
-                ),
-            ]
-        ),
-        FakeResponse(content="done"),
-    ]
-    llm = FakeLLM(script)
+    llm = _notes_llm(
+        {
+            "note_knowledge.md": outline,
+            "note_gossip.md": "# 闲话与分享\n\n",
+            "note_notice.md": "# 通知\n\n## 作业\n\n- 习题 3.1\n",
+        },
+        "note_writer",
+    )
     runtime = build_runtime(
         cfg,
         plugins=[
@@ -178,23 +158,25 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path, monkeypatch) -
         runtime.hub.end_session()
         assert runtime.bus.flush(1.0)
 
-        result = runtime.ui.dispatch_action("summarize.regenerate", {})
+        result = runtime.ui.dispatch_action("summarize.generate", {})
         assert result.ok
 
         notes = tmp_path / "sessions" / session.session_id / "notes"
         knowledge = notes / "note_knowledge.md"
         assert _wait_until(
             lambda: (
-                knowledge.exists()
-                and "### 定义" in knowledge.read_text(encoding="utf-8")
+                runtime.services.require("notes-pipeline").status(session.session_id)[
+                    "phase"
+                ]
+                == "published"
             )
-        ), "note_knowledge.md outline was not written"
+        ), "the whole lecture was not published"
 
         content = knowledge.read_text(encoding="utf-8")
         assert "## 留数定理" in content
         assert "[00:" not in content, "notes must not be timestamped logs"
         assert "习题 3.1" in (notes / "note_notice.md").read_text(encoding="utf-8")
-        assert llm.calls, "summarize never called the LLM"
+        assert llm.runtime.runs, "whole lecture never started an SDK run"
     finally:
         runtime.stop()
 
@@ -205,7 +187,20 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
     """The reader selection menu → ask.ask → deterministic note insert."""
 
     cfg = load_config(data_dir=tmp_path)
-    llm = FakeLLM([FakeResponse(content="**答**：第一段是在说定义。")])
+
+    def script(sdk, params):
+        yield {
+            "type": "event",
+            "name": "agent.delta",
+            "data": {"text": "**答**：第一段是在说定义．"},
+        }
+        yield {
+            "type": "result",
+            "result": {"final_message": "**答**：第一段是在说定义．", "steps": 1},
+        }
+
+    llm = FakeLLM()
+    llm.runtime = ScriptedRuntime(script)
     runtime = build_runtime(
         cfg,
         plugins=[
@@ -250,12 +245,14 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
         assert content.index("第一段是在说定义") < content.index("第二段笔记内容。")
         assert "这一段的定义是什么？" in content
 
-        call = llm.calls[-1]
-        prompt = "\n".join(str(m.get("content", "")) for m in call["messages"])
+        declaration = next(
+            params for method, params in llm.runtime.calls if method == "create_session"
+        )
+        prompt = llm.runtime.runs[-1]["instruction"]
         assert "这是第一段笔记内容。" in prompt
         assert "第二段笔记内容。" in prompt
         assert "这一段的定义是什么？" in prompt
-        names = [tool["function"]["name"] for tool in call["tools"] or []]
-        assert names == [], "instant asking must not expose tools"
+        assert declaration["role"] == "ask_instant"
+        assert declaration["tools"] == [], "instant asking must not expose tools"
     finally:
         runtime.stop()

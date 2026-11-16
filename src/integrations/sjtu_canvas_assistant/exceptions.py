@@ -33,10 +33,6 @@ class CanvasNetworkError(AssistantError):
     """Network or timeout failure while talking to Canvas."""
 
 
-class DownloadError(AssistantError):
-    """A file download failed."""
-
-
 class VideoIntegrationError(AssistantError):
     """SJTU video integration failed with a token-safe message."""
 
@@ -47,7 +43,3 @@ class VideoAuthError(VideoIntegrationError):
 
 class VideoNetworkError(VideoIntegrationError):
     """Network or timeout failure while talking to the SJTU video service."""
-
-
-class VideoIntegrationNotImplemented(VideoIntegrationError):
-    """A video feature is intentionally not implemented yet."""

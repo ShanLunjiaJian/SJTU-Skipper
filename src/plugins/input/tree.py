@@ -157,7 +157,7 @@ def _recording_overlaps(
     return False
 
 
-def _class_label(begin: datetime, end: datetime, parts: int) -> str:
+def _class_label(begin: datetime, end: datetime) -> str:
     return f"{begin:%m-%d} {begin:%H:%M}-{end:%H:%M}"
 
 
@@ -170,7 +170,7 @@ def _recording_child(
     classrooms = [str(p.get("classroom", "") or "") for p in parts]
     classroom = next((c for c in classrooms if c), "")
     video_ids = [str(p.get("video_id", "")) for p in parts if p.get("video_id")]
-    label = _class_label(group["begin"], group["end"], len(parts))
+    label = _class_label(group["begin"], group["end"])
     subtitle = ", ".join(
         part
         for part in (
@@ -310,27 +310,6 @@ def _live_group_child(
             },
         },
     }
-
-
-def _live_child(
-    course_id: str,
-    course_name: str,
-    live: dict[str, Any],
-    *,
-    now: datetime,
-) -> dict[str, Any] | None:
-    """Backwards-compatible single-period wrapper."""
-
-    begin = parse_time(live.get("begin"))
-    end = parse_time(live.get("end")) or begin
-    if begin is None or end is None:
-        return None
-    return _live_group_child(
-        course_id,
-        course_name,
-        {"parts": [live], "begin": begin, "end": end},
-        now=now,
-    )
 
 
 def build_tree(

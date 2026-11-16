@@ -1,6 +1,6 @@
 # 课堂总 Agent 架构设计
 
-> 状态：v1 设计稿（实现前冻结的接口契约）
+> 状态：课堂插件架构与 OMP SDK 运行时契约
 >
 > 目标：把课堂的音频、视频、语音识别、板书识别、LLM 调用、行为插件和 UI 拆成可独立演进的分层，行为层只通过「流 + 事件 + 服务接口」与底层交互。
 
@@ -33,10 +33,10 @@
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │
 ┌───────────────────────────────┴──────────────────────────────────────┐
-│ LLM 层（协议无关）                                                    │
-│  Provider 注册表：openai-compatible / 未来 anthropic 等                 │
-│  统一 ChatRequest / ChatResponse / StreamEvent                        │
-│  重试、超时、流式 SSE、工具调用、图片输入、用量统计                    │
+│ 项目 OMP SDK 运行时（Bun >=1.4.4）                                    │
+│  Python 私有 IPC -> createAgentSession / core 执行循环                 │
+│  models.yml / roles.yml / 提供方 AuthStorage                           │
+│  原生文件工具、模型请求、会话存储与上下文压缩                          │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -192,7 +192,6 @@ class EventBus:
     def once(...)
     def off(self, subscription) -> None: ...
     def emit(self, type: str, **payload) -> None: ...
-    def emit_event(self, event: Event) -> None: ...
     def flush(self, timeout: float = 5.0) -> bool: ...
     def start(self) / stop(self): ...
 ```
@@ -293,109 +292,116 @@ summarize
 
 拓扑序由 `requires` 决定，不依赖注册顺序．`llm-agent` 依赖 `llm` 和 `settings`；`summarize` 与 `instant-summarize` 依赖 `llm-agent`；`vlm` 依赖 `llm` 和 `settings`；`stt` 依赖 `settings`．
 
-## 5. LLM 层
+## 5. OMP SDK 运行时
 
-### 5.1 统一模型
+### 5.1 进程与依赖
 
-```python
-@dataclass(frozen=True)
-class TextPart: text: str
-@dataclass(frozen=True)
-class ImagePart:
-    url: str | None = None
-    data: bytes | None = None
-    mime_type: str = "image/jpeg"
-    detail: str = "auto"
+Python 保留课堂处理、任务队列和 Web 服务．应用管理一个常驻 Bun 子进程，多个 SDK 会话在同一进程内异步执行．
 
-@dataclass
-class Message:
-    role: str                 # system | user | assistant | tool
-    content: str | list[TextPart | ImagePart]
-    name: str | None = None
-    tool_calls: list[ToolCall] = field(default_factory=list)
-    tool_call_id: str | None = None
+依赖从项目 `node_modules` 加载．`package.json` 与 `bun.lock` 固定同组 OMP 包版本：
 
-@dataclass
-class ChatRequest:
-    model: str | None
-    messages: list[Message]
-    tools: list[ToolDef] = field(default_factory=list)
-    tool_choice: str | dict | None = None
-    temperature: float | None = None
-    max_tokens: int | None = None
-    response_format: dict | None = None
-    extra: dict = field(default_factory=dict)
-    stream: bool = False
+- `@oh-my-pi/pi-coding-agent`
+- `@oh-my-pi/pi-agent-core`
+- `@oh-my-pi/pi-ai`
+- `@oh-my-pi/pi-natives`
 
-@dataclass
-class ChatResponse:
-    content: str
-    tool_calls: list[ToolCall]
-    finish_reason: str | None
-    usage: Usage
-    raw: dict
-    model: str
+运行环境要求 Bun >=1.4.4．安装依赖执行 `bun install --frozen-lockfile`．生产运行不依赖临时目录中的 SDK 源码．
 
-@dataclass
-class StreamEvent:
-    type: str                 # "text" | "reasoning" | "tool_call" | "done" | "error"
-    text: str = ""
-    tool_call: ToolCall | None = None
-    response: ChatResponse | None = None
-    error: Exception | None = None
+Python 与 Bun 使用带请求 ID 的 JSON Lines 通信．stdout 只传 IPC 消息，日志写入 stderr．IPC 支持创建、运行、重置、关闭、取消会话和单次生成．返回流包含正文、思考、工具调用、工具结果、文件变更、用量和终态．
+
+`createAgentSession()` 管理文件工具、会话存储和上下文压缩．core 的 `Agent` 执行模型与工具循环．Python 只保留显示记录和任务状态，不维护第二套模型历史或工具输出截断．
+
+### 5.2 隔离与文件工具
+
+子进程在导入 SDK 前设置项目 agent 根目录，并移除继承的 OMP 配置覆盖变量．会话显式使用项目配置：
+
+- `Settings.isolated()`、项目 `AuthStorage`、`ModelRegistry` 和会话目录．
+- 明确的工作目录、角色模型、思考级别和工具名单．
+- `restrictToolNames: true`、空 skills、rules、contextFiles、promptTemplates 和 slashCommands．
+- 禁用全局配置发现、扩展发现、MCP、LSP 和 IRC．
+
+文件工具直接使用 OMP 的 `read`、`grep`、`glob`、`edit` 和 `write`．工具保留上游 schema、动态描述、错误和输出．Python 不定义 `info`、`search`、`replace`、`append` 工具或编辑 JSON 方言．
+
+每个会话持有独立的 `ToolConversationState` 和 `EditStore`．默认编辑模式为 hashline，模型策略可选择 replace 模式．实际模型同时决定工具描述、工具协议和提示模板．`tools.format=auto` 保留原生协议或 OMP dialect 的自动选择．
+
+模型模板由 OMP 的 `systemPromptTemplates` 规则选择．项目只追加课堂职责提示，不传绕过模板选择的 `customSystemPrompt`．模板与职责文本来自固定项目路径．
+
+工作区使用逻辑文件名映射．来源和参考底稿只读，指定文稿可写．应用检查每次调用涉及的全部路径，包括多文件编辑和移动目标．未授权绝对路径、父目录逃逸、符号链接逃逸和未开放 URI 均会报错．`grep/glob` 只能遍历授权文件．只读审阅者不注册写工具．
+
+同一模型消息中，连续只读调用按 shared 规则并行执行．写入调用按 exclusive 规则等待前面的调用完成．后面的读取等待写入完成，多次写入保持调用顺序．单个工具失败作为对应调用的错误结果返回．
+
+### 5.3 模型、角色与鉴权
+
+设置页提供 `models.yml` 和 `roles.yml` 两个编辑区．项目文件是唯一配置来源，路径为 `data_dir/llm_runtime/`．保存前同时检查两份 YAML．保存失败保留原配置，已运行会话保留创建时配置．
+
+`models.yml` 使用 OMP 的 `providers` 结构．提供方配置地址、API、鉴权与共享 headers．模型配置 ID、输入能力、上下文限制、思考能力与兼容参数．API 协议由已安装 OMP SDK 校验和执行．可调用模型仅限项目显式配置的提供方与模型．
+
+`roles.yml` 使用 `provider/model:level` 和 `@role` 选择器．未填写的角色继承 `default`．省略思考级别时使用 OMP 模型默认策略．无效选择器、角色循环、不支持的思考级别和无图像能力的板书模型均会阻止保存．
+
+以下配置展示两份编辑区的结构．模型 ID、地址与能力须使用提供方的实际值．示例模型声明图像输入，以满足板书角色要求：
+
+```yaml
+# models.yml
+providers:
+  lecture:
+    baseUrl: https://provider.example/v1
+    api: openai-completions
+    auth: apiKey
+    models:
+      - id: lecture-vision
+        name: Lecture Vision
+        input: [text, image]
 ```
 
-### 5.2 Provider 接口
-
-```python
-class Provider(Protocol):
-    name: str
-    def chat(self, request: ChatRequest) -> ChatResponse: ...
-    def stream(self, request: ChatRequest) -> Iterator[StreamEvent]: ...
-    def close(self) -> None: ...
+```yaml
+# roles.yml
+default: lecture/lecture-vision
+board_recognition: '@default'
+note_chunk: '@default'
+note_writer: '@default'
+note_review_coverage: '@default'
+note_review_correctness: '@default'
+ask_instant: '@default'
+ask_research: '@default'
+agent_chat: '@default'
+compaction: '@default'
 ```
 
-首版实现：
+提供方密钥通过设置页单独保存．需要独立思考级别时，角色可指定 `lecture/lecture-vision:high`，模型必须声明支持该级别．
 
-- `OpenAICompatibleProvider`
-  - 支持 `/chat/completions`、SSE 流式、工具调用、`image_url`（URL 或 data URL）。
-  - base URL 归一化：`.../v1`、`.../v1/`、完整 `.../chat/completions` 均可。
-  - 额外 header / body 可配置（如 `thinking: disabled`）。
+| 角色                      | 职责                         |
+| ------------------------- | ---------------------------- |
+| `board_recognition`       | 板书图像识别与增量提取       |
+| `note_chunk`              | 片段来源整理                 |
+| `note_writer`             | 整课写作与审阅后修订         |
+| `note_review_coverage`    | 独立审阅来源覆盖             |
+| `note_review_correctness` | 独立审阅公式、推导与一致性   |
+| `ask_instant`             | 选区即时回答，不注册文件工具 |
+| `ask_research`            | 读取授权材料后回答           |
+| `agent_chat`              | 交互式文件助手               |
+| `compaction`              | SDK 上下文压缩               |
 
-Provider 通过 `ProviderRegistry` 注册，后续可加 Anthropic、Gemini native、vLLM 等。
+项目共享一个提供方 `AuthStorage`，存储于 `data_dir/llm_runtime/credentials.db`．API key 在设置页按提供方保存．OpenCode 设备登录、刷新和登出使用同一凭据存储，OAuth 凭据保持 OAuth 类型．同一服务的独立账号使用不同 provider ID．无鉴权服务配置 `auth: none`．
 
-### 5.3 重试与错误
+`models.yml` 的显式 `apiKey` 按 OMP 规则覆盖存储凭据．设置页只显示凭据状态和来源，不回显密钥．Python 不随笔记任务传输提供方密钥．并发刷新共用提供方刷新锁，失败不会改用其他提供方凭据．
 
-```python
-@dataclass
-class RetryPolicy:
-    max_attempts: int = 3
-    base_delay: float = 1.0
-    max_delay: float = 20.0
-    jitter: float = 0.2
-    retry_statuses: tuple[int, ...] = (408, 409, 429, 500, 502, 503, 504)
-```
+首次使用时在设置页填写 YAML 和提供方凭据．SDK 历史保存在项目数据目录，任务从已保存文稿和来源位置恢复．
 
-- 连接错误、超时、上述 HTTP 状态自动重试。
-- `Retry-After` 优先；指数退避 + 抖动。
-- 流式请求：**在收到第一个有效增量之前**失败可重试；已开始输出后不再重试，抛 `LLMStreamError`。
-- 所有重试记录 `llm.error` 事件，最终失败抛 `LLMRetryExhausted`。
+### 5.4 取消、预览与恢复
 
-### 5.4 Profile 与配置
+Python 取消任务时，Bun 终止对应会话的模型流和工具执行．子进程意外退出会使受影响请求失败，未完成任务不得记为成功．SDK 会话存储保留模型消息，任务队列保留阶段与来源位置．显式停止输入时，应用取消该课程的 VLM SDK 请求和笔记会话．已保存文稿保留．
 
-- `LLMService.chat(profile="agent" | "vlm" | ..., ...)`。
-- Profile 从 settings 读取：
-  - `llm.base_url`, `llm.api_key`, `llm.timeout`, `llm.max_retries`, `llm.temperature`, `llm.max_tokens`。
-  - 模型不放在 LLM 连接分组：Agent 使用 `agent.model`，VLM 使用 `vlm.model`，Summarize 使用 `summarize.model`，Instant Summarize 使用 `instant-summarize.model`。
-  - `llm.extra_headers` / `llm.extra_body`（JSON 字符串）。
-- 环境变量 `LLM_BASE_URL` / `LLM_API_KEY` / `OPENAI_*` / `DEEPSEEK_API_KEY` 会在设置注册时写入 `settings.json`，UI 显示实际生效值（密钥掩码），运行时只读设置。
-- `llm.mode` 提供两种独立配置：
-  - `openai`：使用 `llm.base_url` + `llm.api_key` 的 OpenAI-compatible 接口；
-  - `opencode`：在设置页通过 OAuth device flow 关联 OpenCode 套餐，token 只保存在本应用 settings（不读取本机 OpenCode），自动刷新并附加 `x-opencode-org-id`；OpenAI-compatible 端点是 `https://opencode.ai/inference/go/openai/v1`（模型目录里声明的 chat-completions 地址）。
-  - **会话亲和**：OpenCode 网关按 conversation id 把请求钉到同一后端，上游 prompt cache 才能命中。agent 每次调用都带自己的会话 id（子会话沿用父会话的根 id），请求头为 `x-opencode-session` / `x-session-affinity` / `X-Session-Id` / `x-opencode-session-id`（+ 父 id）；没有会话 id 的调用（VLM 等）退回 settings 里的固定 id。
-- 用量统计：每次响应把 `usage` 记到 `LLMService.usage_by_model`（`requests` / `input_tokens` / `output_tokens` / `cache_read_tokens`），`llm.response` 事件带本次用量与累计值，`usage_snapshot()` 可给 UI 读。缓存命中数兼容三种形状：OpenAI `prompt_tokens_details.cached_tokens`、DeepSeek `prompt_cache_hit_tokens`、OpenCode `opencode.tokens.cache_read`；流式请求会自动加 `stream_options.include_usage`，否则最后一帧不带 usage。
-- 思考内容：流式响应里的 `reasoning_content` / `reasoning` 以 `StreamEvent(type="reasoning")` 转发并拼进 `ChatResponse.raw`，正文与思考分开处理。
-- 每次请求读取一次配置，设置变更后无需重启。
+每次成功 `edit/write` 后，运行时发送文件变更事件．Python 在 publication lock 内更新可预览文稿并刷新浏览器．生成失败保留已保存文稿和用户问答．
+
+上下文管理沿用 SDK 的令牌估算、缓存、重复工具结果处理与压缩．完整来源始终保存在授权文件中，压缩后仍可读取．分页输出保留继续读取入口，不把截断内容标为完整来源．
+
+整课写作与修订共用一个 SDK 会话．`review_notes` 为两位只读审阅者创建相同来源和文稿快照．报告包含 P0-P3 findings 与 `overall_correctness`、`explanation`、`confidence`．两项整体判断均为 `correct` 才通过；非阻断建议不要求清空．宿主将通过结果绑定到文稿摘要，修改后必须复审．会话提前停止时，宿主拒绝完成并要求继续；取消、错误或达到配置上限不得发布．Python 负责输入调度、预览和发布，不再维护独立修订循环．
+
+笔记操作分为生成、停止、删除．没开始时仅可生成，正在生成时仅可停止，生成结束时仅可删除．停止保留输出，删除后回到没开始．全局任务队列汇总内存中的排队与运行任务，支持停止笔记任务；重启不恢复任务．
+
+笔记执行视图顶部为紧凑状态栏，下拉选择主写作、覆盖审阅或正确性审阅．右侧显示模型与思考深度、SDK 上下文用量、LLM 耗时、工具耗时及输出速率．下方按顺序显示可折叠的模型思考、正文、工具调用与结构化审阅报告．工具参数生成期间同步显示已有参数，write/edit 折叠预览修改内容，grep/glob 折叠预览结果，展开后显示完整内容；read 只显示路径与行范围，不显示读取正文．模型思考默认压缩为一行，展开显示服务商提供的完整思考内容．
+
+日志记录 role、provider、model 与思考级别．用量按 `provider/model` 统计，避免相同模型 ID 在不同提供方之间混合．日志与 UI 隐藏密钥、敏感 headers、Authorization 和 OAuth token．
 
 ## 6. UI 层
 
@@ -476,8 +482,7 @@ POST /api/ui/action
 
 - `core/streams.py` 的 `BacklogGate` 给 `audio`/`video` 各挂一道闸门：reader 在 append 前 `wait(已摄录时长)`，消费者提交窗口后 `release(窗口结束时间)`。录播全速解码时，未处理媒体被限制在 `窗口 × (并发 + 4)` 以内（1.5h 课程不再把 5GB 帧塞进内存）；直播闸门 limit=0，不生效。
 - 闸门有 stall 看门狗（默认 300 s）：消费者挂死时自动放行并告警，避免 reader 永久阻塞。
-- `core/pipeline.py` 的 `OrderedWindowPool`：线程池并发执行窗口，按窗口序号有序提交；单窗异常封装为 `WindowError` 交给提交回调决定重试/记录。
-- 结束屏障：两个 ffmpeg reader 都 EOF（`session.input_done`）→ input 等待 `stt.busy()`/`vlm.busy()` 变 False → 才 `end_session`；`summarize` 在 `session.stopped` 上跑一次全量讲义。录播不触发 instant-summarize。
+- 结束屏障：两个 ffmpeg reader 都 EOF（`session.input_done`）→ input 等待 `stt.busy()`/`vlm.busy()` 变 False → 才 `end_session`；`summarize` 在 `session.stopped` 上请求完整笔记．直播与录播均支持分段笔记．
 
 ### 6.5 Web 服务
 
@@ -500,11 +505,11 @@ POST /api/ui/action
 
 ```python
 SettingsSpec(
-    key="llm.api_key",
-    label="LLM API Key",
+    key="my.api_key",
+    label="API Key",
     type="secret",
     default="",
-    group="LLM",
+    group="My Plugin",
     description="...",
 )
 ```
@@ -515,12 +520,12 @@ SettingsSpec(
 - 变更时发 `settings.changed`。
 - UI：没有侧边栏 tab，只有一个设置 page（`settings:main`），从菜单栏 / 命令面板（Ctrl+P）打开；page 内按 group 分 tab 渲染表单，action `settings.save`。只有满足 `visible_when` 的字段才会出现。
 
-### 7.2 llm（底层 LLM 插件）
+### 7.2 llm（运行时宿主插件）
 
-- 服务名：`llm`（`LLMService`）。
-- 注册 settings（见 5.4）。
-- 注册 `openai` provider。
-- 不注册 UI page；设置由 settings 插件统一渲染。
+- 服务名为 `llm`，Python `LLMService` 将角色请求转发给项目 Bun 运行时．
+- 设置页显示两份 YAML、有效角色配置和提供方凭据状态．
+- 负责运行时生命周期、配置保存、凭据保存、OpenCode 登录与登出．
+- Python 不注册 provider，也不执行模型工具循环．单次生成与会话共用角色解析和鉴权．
 
 ### 7.3 input（输入插件）
 
@@ -549,10 +554,12 @@ SettingsSpec(
     - 相邻的连续 2–3 节录播自动合并成一节，节点上标注「2 节」；同一门课连排的多节直播也按同样规则合并（间隔不超过 `input.max_gap_minutes`、同日、最多 3 节），展开时跳到「正在直播 / 下一节 / 最后一节」那一节的地址；
     - 正在直播的课程/节次带 `直播中` 徽章并默认展开，一键进入直播；每节课的状态由 begin/end 推导，树里记录最近的边界时刻，到点在时钟 tick 上自动重取课程树（不用手点「刷新」）；
     - 展开状态保存在插件内存，`input.toggle_course` 切换。
+    - 课程名先显示，各课程回放列表完成后分别更新；直播查询复用回放授权．同次课的多节视频地址并行解析．
   - 右侧 tab「本节课」：toolbox「处理控制」。
   - 页面 `input:session`（标题「课堂」）：标题带 `直播`/`录播` 徽章。
     - **直播**：`player` block 并排播放两路视频——「课堂」（`viewNum=1`，黑板/讲台）与「屏幕」（`viewNum=2`，大屏共享）；没有第二路时显示占位。
     - **录播**：不渲染播放器，只显示下载/处理进度卡片（`progress` block）与「打开录像」链接（本地 mp4，新窗口播放），避免每秒进度刷新重建 `<video>` 打断播放。
+    - 下载进度按整次课汇总各段字节数，包含预下载．全部下载完成后保留完成状态．输入段索引用于顺序连接媒体时间轴．
     - 前端按 URL 后缀选择播放器：`.m3u8` → hls.js（Safari 用原生 HLS），`.flv` → mpegts.js，其余交给原生 `<video>`。
     - 除 `.m3u8` 外的媒体地址一律改写成 `/api/media?src=...`，由服务端转发；浏览器直连失败时 pane 里会显示红色提示。
     - 屏幕流默认静音，避免两路音频叠加。
@@ -560,7 +567,7 @@ SettingsSpec(
   - 「开始处理」按钮（`input.start_processing`）才开始摄取与会话；默认暂停。启动在后台线程里完成，下载几分钟也不会阻塞 HTTP 请求。
   - 「暂停处理」（`input.pause_processing`）：录播暂停 reader（管道反压让 ffmpeg 自动停下）；直播停止摄取但页面继续播放直播画面，恢复时从直播边缘继续。
   - 录播自然播完由 `input.ended` 驱动：先等待 STT/VLM 把队列排空（`_wait_for_consumers`），再切下一节或 `end_session("playback finished")`，保证总结时所有窗口都已提交。
-  - 处理完成后按 `input.keep_recordings` 只保留最近 N 节的 `media/` 目录，其余删除（讲义不受影响）。
+  - 处理完成后按 `input.keep_recordings` 只保留最近 N 节的 `media/` 目录，其余删除（笔记不受影响）．
   - 页面 `input:manual`：手动 URL（调试，仅从命令面板打开）。
 - 行为层只看到 `hub.current.audio/video`，看不到 Canvas/SJTU/ffmpeg 对象。
 
@@ -570,11 +577,11 @@ SettingsSpec(
 - 协议：自动转写统一使用 WebSocket `/v1/stream`，录播选择 offline 模式，直播选择 live 模式．手动范围转写可使用 HTTP．服务端独占声学切分、上下文和文本合并．
 - 设置：`enabled=true`、`server_url=http://127.0.0.1:8766`、`language=Chinese`、`context=''`、`timeout=60`、`batch_seconds=120`、`concurrency=1`．地址可由 `STT_SERVER_URL` 初始化．
 - 直播持续发送最多 200 ms PCM，发送与接收独立运行．partial 替换临时文字，final 才写入永久转写．结束和 reset 完成不足 1 秒的尾音．
-- 录播连续发送 PCM．服务端有界并发识别并按时间顺序提交；应用负责传输背压、覆盖与持久化．
-- accepted 只释放传输背压；成功 final/progress 才更新覆盖并释放已处理音频．发送、接收和成功处理位置分别记录．
+- 录播连续发送 PCM．服务端有界并发识别并按时间顺序提交；应用限制未确认的发送量，并负责覆盖记录与持久化．
+- accepted 允许继续发送音频；成功 final/progress 才更新覆盖并释放已处理音频．发送、接收和成功处理位置分别记录．
 - 覆盖空洞按精确区间补录．断线重传未提交范围，重试耗尽的范围保持未覆盖并报告错误．异常重复标记不终止整课．
 - 禁用 STT 时输入只推进逻辑音频时间，不保留 PCM 或插入静音．重新启用后从真实 PCM 范围恢复．
-- **持久化**：定稿追加到 `sessions/<sid>/transcript.jsonl`（`start`、`end`、`text`），summarize 读取该文件重建讲义材料．
+- **持久化**：定稿追加到 `sessions/<sid>/transcript.jsonl`（`start`、`end`、`text`），summarize 读取该文件重建笔记材料．
 - **覆盖记录**：每次处理完一个区间就往 `sessions/<sid>/coverage.json` 记一段已处理音频；再次跑同一节课时这些区间会被跳过，直播结束后补跑录播也只会补缺口。
 - 事件：`stt.partial`、`stt.segment`、`stt.error`．
 - UI：仅调试 page（`stt:*`），不出现在侧边栏，只能从命令面板（调试 → 语音转写）打开；page 显示状态、模型、音频时长、已转写段数/字数与最近转写文本。
@@ -582,7 +589,7 @@ SettingsSpec(
 ### 7.5 vlm（板书识别插件）
 
 - 服务名：`vlm`。
-- 设置项：enabled（默认 true）、model、window_seconds（默认 20，窗口以采样点为中心，前后各 10 s）、cadence_live_seconds（直播采样间隔，默认 180）、cadence_recording_seconds（录播采样间隔，默认 300）、history_windows（默认 3）、fps、max_frames（默认 12）、fusion、dedupe_threshold、完整提示词 prompt。VLM 连接与 API Key 复用 LLM 分组。
+- 设置项：enabled（默认 true）、window_seconds（默认 20，窗口以采样点为中心，前后各 10 s）、cadence_live_seconds（直播采样间隔，默认 180）、cadence_recording_seconds（录播采样间隔，默认 300）、history_windows（默认 3）、fps、max_frames（默认 12）、fusion、dedupe_threshold、完整提示词 prompt．模型与思考级别由 `board_recognition` 角色选择，凭据由提供方 `AuthStorage` 管理．
 - 工作线程：读 `video`，窗口内取帧 -> 融合 -> VLM -> 追加 `visual`。
 - **采样节奏**：直播每 3 分钟取一个 20 秒窗口，录播每 5 分钟取一个 20 秒窗口；窗口之间的视频帧不再需要，工作线程会边等边 `trim`，避免把整堂课解码后的 MJPEG 留在内存里。
 - **顺序**：识别请求按窗口顺序执行，前一个窗口提交后再读取历史．`vlm.prepare_ahead=1` 在识别期间准备下一个窗口的图像；设为 0 则顺序准备．
@@ -603,52 +610,38 @@ SettingsSpec(
 
 ### 7.6 llm-agent
 
-- 服务名：`agent`（`AgentService`）。
-- 设置项：默认模型、最大步数、工具输出上限、系统提示词。
-- 工具（每个工具由 `plugins/agent/tools.py` 的具名工厂构建，参数随调用方声明）：
-  - `info`：课程信息、日期、会话、流长度、可操作文件列表。
-  - `read(file, l, r)`：1-based 行号，`-1` 表示该侧无界；可配置 `max_lines`，单次超出会被截断。
-  - `search(keywords, file=?)`：传入若干关键字，返回命中的 `(行号, 该行内容)` 列表；`file` 省略时查全部可读文件。
-  - `replace(file, old_str, new_str)`：唯一替换；0 次或多次都报错，多次时返回出现次数和行号。
-  - `append(file, text)`：在文件末尾新行追加。
-  - `write(file, text)`：整文件覆盖（可选，默认不提供）。
-- **Agent 注册接口**：行为插件用 `register_agent(AgentProfile)` 声明一个具名 agent，profile 里包含系统提示、模型、步数 / token / 工具输出上限、`llm_extra`、是否流式，以及**工具声明**（`AgentTool(name, params)`）。`create_session(agent="名字", ...)` 从 profile 创建会话；也可以直接传 `tools=[("read", {"max_lines": 50}), ...]` 在创建时声明。工具参数（例如 read 行数、search 命中上限）只出现在调用方的声明里，不散落在工具实现中。
-- 文件：`FileWorkspace`，逻辑名 -> 路径；工具只允许访问会话注册的文件。
-- 会话：
-  - `AgentSession`：独立消息历史、系统提示、文件、工具、模型、最大步数、锁、是否流式。
-  - 可同时运行多个；`create_session` / `create_subsession` / `reset` / `close`。
-  - `final_answer_on_limit=True` 时，最后一步会撤掉工具并要求模型直接作答（只读问答用；写作 agent 不启用）。
-- 扩展点：
-  - `register_agent` / `get_agent` / `unregister_agent`；
-  - `register_tool(ToolSpec)` / `unregister_tool`；
-  - `add_prompt_contributor(callable)` / 会话级 `extra_instructions` / `set_system_prompt`；
-  - `run(session_id, input, on_event=..., stream=?)` 同步；`run_async` 后台线程。
-- REPL 循环：messages -> LLM -> tool calls -> tool results -> LLM -> ... -> final。`stream=True` 时走 provider 的流式接口，边生成边发 `agent.delta`（正文）和 `agent.reasoning`（隐藏思考），结束后仍拿到完整的 tool calls。
-- 事件：`agent.run.started`、`agent.delta`、`agent.reasoning`、`agent.message`、`agent.tool_call`、`agent.tool_result`、`agent.run.finished`、`agent.error`。
-- UI：没有侧边栏 tab，只有 Agent page（`agent:chat`），从菜单栏 / 命令面板打开；page 显示会话列表、对话记录、输入框；action `agent.chat` 后台执行。
+- 服务名为 `agent`（`AgentService`）．Python 管理应用会话标识、文件授权、任务状态和 UI 事件．
+- `AgentProfile` 声明职责提示、角色、允许的工具与步数．`AgentTool` 只选择工具名，不修改上游参数 schema．
+- `create_session` 接受 profile 或直接声明 `role`、`system_prompt`、`files/workspace`、`tools` 和 `meta`．默认交互角色为 `agent_chat`．
+- `FileWorkspace` 将逻辑文件名映射到实际路径，并声明 `readonly` 文件．SDK 工具只接触会话的授权工作区．
+- `run(session_id, input, on_event=...)` 将任务转发给 SDK．`cancel`、`reset` 和 `close` 管理实际运行时会话．每个会话独立加锁，禁止同一会话并发运行．
+- SDK 保留完整模型历史和工具状态．Python 显示记录不作为后续模型请求的历史来源．
+- 事件包含 `agent.run.started`、`agent.delta`、`agent.reasoning`、`agent.message`、`agent.tool_call`、`agent.tool_result`、`agent.file`、`agent.run.finished` 和 `agent.error`．
+- Agent 页面 `agent:chat` 从菜单栏或命令面板打开．`agent.chat` 在后台转发请求，页面显示流式内容与工具结果．
 
 ### 7.7 notes-pipeline 与 summarize
 
 - `notes-pipeline` 依赖 `settings`、`llm-agent`，可选依赖 `stt`、`vlm`．统一管理所有课程的片段、统稿、修改和审阅任务．
 - `notes.chunk_seconds` 设置核心区间长度，`notes.overlap_seconds` 设置左侧原文上下文，`notes.concurrency` 限制同时运行的笔记 agent 数量．
 - 来源通过 `stream.sealed` 报告完成位置．所有启用来源完成核心区间后，才能冻结材料并整理片段．按记录起点归属核心区间，跨边界记录完整保留．
-- 每个片段保存只读来源、上下文、板书历史及 3 份私有底稿．只有连续完成的片段可以发布未审阅预览．失败片段保留范围错误，完整原文仍交给整课写作者．
+- 每个片段保存只读来源、上下文、板书历史及 3 份私有底稿．每次成功写入都更新生成预览，连续完成的片段发布为未审阅笔记．失败片段保留范围错误，完整原文仍交给整课写作者．
+- 片段任务失败后记录错误，不创建重试任务或 attempt 目录．整课写作失败后结束任务．
 - 来源终止后，整课写作者读取完整来源和成功底稿，统一结构、符号与跨段推导．随后来源覆盖和正确性审阅者并发只读审阅．任一失败则由同一写作者修改，再执行两项审阅．
-- 审阅全部通过才标记通过．关闭审阅时标记未审阅．生成失败保留已有公开讲义．来源缺口与审阅结果分别记录．
+- 审阅全部通过才标记通过．关闭审阅时标记未审阅．生成失败保留已有公开笔记．来源缺口与审阅结果分别记录．
 - 公开文件为 `notes/note_knowledge.md`、`notes/note_gossip.md`、`notes/note_notice.md`，对应来源为会话目录的 `lecture_source.md`．发布锁保护整组文稿与来源快照．用户问答保留原始块内容和顺序．
-- `summarize` 依赖 `settings`、`notes-pipeline`、`reader`，负责讲义页面和课后策略．`direct` 登记整课请求，`fill` 查询录播并请求补录，`skip` 不自动生成整课讲义．手动请求会等待来源终止．
-- 保留写作、审阅模型及 token、步数、轮数配置．`review_max_rounds=0` 不设轮数上限，重复意见或无修改时结束并标记未通过．
+- `summarize` 依赖 `settings`、`notes-pipeline`、`reader`，负责笔记页面和课后策略．`direct` 登记生成请求，`fill` 查询录播并请求补录，`skip` 不自动生成完整笔记．手动请求会等待来源终止．
+- 各阶段通过 `note_chunk`、`note_writer` 和两项 `note_review_*` 角色选择模型与思考级别．Python 队列保留阶段和来源位置，任务直接使用常驻 Bun 服务，不启动独立 Python 模型 worker．
 
 ### 7.8 ask（笔记内问答）
 
 - 依赖：`settings`、`llm-agent`、`reader`；服务名 `ask`。
 - 选中菜单：向 reader 注册**全局**菜单项「💬 提问」（不绑定单个页面 / owner，任何笔记页都能用）；弹窗里选择强度：**快速**（instant）或**研究**（research）。
-- 两种强度都自动塞入选中位置前后各 2000 词（`ask.before_words` / `ask.after_words`，可配），并把选中片段、历史问答一起组成提示词。模型 `reasoning_effort=max`。
-  - **快速**：不注册任何工具，`max_steps=1`，一步直接出结果；输出上限 `ask.instant_max_tokens`（默认 16000）。
-  - **研究**：注册 `search` + `read(max_lines=ask.read_max_lines)`（默认 50 行）；提示词要求先 `search` 再针对性 `read`，并写明单次 read 行数上限。输出上限 `ask.research_max_tokens`（默认 131072），步数上限 `ask.research_max_steps`（默认 24，最后一步强制直接作答）。
+- 两种强度都包含选中位置前后上下文、选中片段与历史问答．模型和思考级别分别由 `ask_instant` 与 `ask_research` 选择．
+  - **快速**：不注册文件工具，直接生成回答．
+  - **研究**：只注册原生 `read`、`grep` 和 `glob`，可读取完整授权材料．不强制固定搜索顺序，不使用 Python 行数截断．
 - 流程：
   - reader 的确定性写入器先在选中段落下方插入 `pending` 问答块（meta 里带 `intensity`），用户立即看到「思考中」；
-  - 后台线程通过 agent 插件注册 profile（`ask.instant` / `ask.research`）并创建流式会话；`agent.delta` / `agent.reasoning` / 工具调用被转发成 `ui.notify` 的 `qa.live` 消息，前端在问答块内实时展示思考、工具调用和正文，**全程不触发整页刷新**；
+  - 后台线程通过 agent 插件创建职责会话；`agent.delta`、`agent.reasoning` 和工具调用转发为 `qa.live` 通知．前端在问答块内更新内容，不刷新整页．
   - 结束时 reader 把最终回答写回问答块，meta 里带 `collapsed=true`（自动折叠）与 `status`；前端收到最终 `qa.live` 后原地替换为渲染好的 HTML 并折叠；
   - 失败时 `status=error`，块保持展开显示原因。
 - **折叠持久化**：折叠状态记录在问答块 meta 的 `collapsed` 字段里；前端点折叠按钮时本地切换并调用 `reader.qa_collapse`（`refresh=false`，不触发重渲染），状态随笔记文件保存。
@@ -659,16 +652,16 @@ SettingsSpec(
 
 - 依赖 `settings`、`notes-pipeline`、`reader`，负责分段预览页面和开关．直播与录播均支持分段整理．
 - `instant-summarize.enabled=false` 关闭主动片段整理与预览发布，来源日志继续保存．整课请求仍使用完整来源．
-- 保留 `model`、`max_steps`、`max_tool_output`、`retry_max` 设置．每次重试使用独立私有输出，成功后才提交．
+- 分段整理使用 `note_chunk` 角色．任务失败保留私有输出、来源位置与错误，恢复时继续使用完整来源．
 - 公开文件为 `notes/instant_note_knowledge.md`、`notes/instant_note_gossip.md`、`notes/instant_note_notice.md`．页面标记未审阅并显示缺口．
-- reader 页面键为 `<sid>:instant-summarize`，课堂讲义页面键为 `<sid>:summarize`．两类页面可以同时打开．
+- reader 页面键为 `<sid>:instant-summarize`，完整笔记页面键为 `<sid>:summarize`．两类页面可以同时打开．
 
 ### 7.10 reader（文稿阅读）
 
 - 依赖：无（内置插件，始终加载）。
 - 服务：`reader.show(title, docs=[{key,label,path}], active=...)`。
-- 页面：每个笔记会话一个独立页 `reader:notes:<session_id>`（`reader:main` 作为无会话时的兜底），按文档分 tab 渲染 Markdown（`split_markdown` 分块 + KaTeX）。多门课的讲义可以同时打开、各自独立。
-- 实时刷新：agent 每次 `write` / `append` / `replace` 成功后都会 `ui.refresh`，前端通过 WebSocket 立刻重取状态，正在阅读的笔记随写随更新。
+- 页面：每个笔记会话一个独立页 `reader:notes:<session_id>`（`reader:main` 作为无会话时的兜底），按文档分 tab 渲染 Markdown（`split_markdown` 分块 + KaTeX）．多门课的笔记可以同时打开、各自独立．
+- 实时刷新：成功 `edit/write` 发出 `agent.file` 事件．应用在发布锁内更新预览并刷新 UI，浏览器在生成期间可读取已保存内容．
 - summarize / instant-summarize 的「笔记」工具箱按钮调用各自 action → `reader.show(..., page_key=<notes session>, owner=<plugin id>)`，每门课一个页；不再所有课程共用一页。
 - **选中菜单**：用户选中页面正文后会浮出一个小菜单，项由 `reader.register_selection_action(page, item, owner=...)` 注册。`page` 可以是页面 id / page key（按 owner 过滤，只在对应插件提供的文档上出现），也可以是空串 / `"*"`（全局项，任何笔记页都出现）。`ask` 用全局注册提供「💬 提问」。item 形如 `{id,label,icon,kind:"prompt",action,placeholder,intensities}`；`kind="prompt"` 时前端先弹输入框（含强度选择）再连同选中文本一起 post 给插件 action。
 - **内联问答块（qa）**：问答对直接写进笔记文件，用一对 HTML 注释包住：`<!-- qa:begin {"id","ts","status","intensity","collapsed"} -->` … `<!-- qa:end -->`，中间是 `**❓ 提问（时间）**`、问题、`**🤖 回答**`、回答（都是 Markdown）。普通 Markdown 阅读器里问题和回答照常可见，只是标记隐藏；reader 把它从 Markdown 流里摘出来渲染成独立组件（两侧不同配色、可折叠、一键删除）。`collapsed` 就是折叠状态的持久化位置（`reader.qa_collapse` 负责改它，`refresh=false`，不触发重渲染）；删除由 `reader.qa_delete` 做确定性的文本切除。reader 还负责把浏览器选中的渲染文本定位回原始 Markdown 段落（精确 → 去空白/去标记 → 行前缀逐级回退），定位失败才附到文末并提示。
@@ -678,6 +671,12 @@ SettingsSpec(
 data/agent/
 ├── settings.json                 # 设置（0600）
 ├── auth.json                     # 登录账号 + 会话签名密钥（0600）
+├── llm_runtime/
+│   ├── models.yml                # 提供方与模型目录
+│   ├── roles.yml                 # 职责选择器
+│   ├── credentials.db            # OMP AuthStorage
+│   ├── sessions/                 # SDK 持久会话
+│   └── workspaces/               # 会话授权文件
 ├── sessions/
 │   └── 20261101-101500-ab12/
 │       ├── session.json          # 元信息
@@ -692,7 +691,7 @@ data/agent/
 │       │   ├── instant_note_knowledge.md
 │       │   ├── instant_note_gossip.md
 │       │   ├── instant_note_notice.md
-│       │   └── lecture_source.md      # 讲义材料（按时间合并的转写 + 板书）
+│       │   └── lecture_source.md      # 笔记材料（按时间合并的转写 + 板书）
 │       ├── vlm/
 │       │   └── 000030-000060.jpg
 │       ├── stt/
@@ -702,7 +701,7 @@ data/agent/
     └── courses.json
 ```
 
-- 流本身默认不落盘；`transcript.jsonl` / `visual.jsonl` 是转写与板书的持久化副本，进程崩溃或提前结束后重新生成讲义仍然有材料可用。
+- 流本身默认不落盘；`transcript.jsonl` / `visual.jsonl` 是转写与板书的持久化副本，进程崩溃或提前结束后重新生成笔记仍然有材料可用．
 - 每次会话目录由 `SessionStore` 创建；插件通过 `ctx.data_dir / "sessions" / session_id` 写入自己的产物。
 - 旧 `data/outputs`、`data/notes` 保留，不被新架构修改。
 
@@ -712,11 +711,11 @@ data/agent/
 - 时钟：独立线程，每秒 emit。
 - 输入源：每个源两个 ffmpeg 子进程 + 两个读线程（音频/视频）。
 - STT/VLM：各自一个 worker 线程，按游标消费流。
-- Agent：调用方线程 / 后台线程执行；每个会话有锁，防止并发 run。
-- Summarize：独立 worker 线程，串行执行 agent。
+- Agent：Python 转发线程连接同一常驻 Bun 进程．多个 SDK 会话异步运行，每个会话有独立锁和工具状态．
+- 笔记：Python 队列按 `notes.concurrency` 分派任务．core 按 shared/exclusive 规则执行同轮工具．
 - Web：FastAPI/uvicorn 线程池处理 action；UI 状态有锁。
 - 所有跨线程共享状态用 `threading.RLock`；流读写用锁 + 不可变 chunk 列表。
-- 退出：先停输入源，再停 STT/VLM/Summarize worker，再停插件，最后停时钟/事件总线。
+- 退出：先停输入源，再取消分析和笔记任务．随后关闭 SDK 会话与 Bun 子进程，最后停止时钟和事件总线．
 
 ## 10. 错误处理与可观测性
 
@@ -725,12 +724,11 @@ data/agent/
 - 事件 `*.error` 可在 UI 状态栏查看。
 - LLM 错误分类：认证、限流、超时、服务端、协议解析、流中断。
 - 输入源断开：直播自动重连（指数退避，最大次数可配）；录播结束发 `input.status`。
-- STT/VLM 单窗口失败：保留游标并指数退避重试同一窗口，同时发出 `*.error` 并在 UI 显示；不跳过窗口、不静默回退。
-- Agent 工具异常：作为 tool 结果返回给模型，不中断循环；连续工具错误超过阈值则终止。
+- Agent 工具错误由 SDK 作为对应调用的结果返回，模型可据此恢复．运行时退出与取消均向调用方返回失败终态．
 
 ## 11. 安全与隐私
 
-- Token/API key 只存 `settings.json`（0600），UI 掩码显示。
+- Canvas 等插件密钥保存在 `settings.json`（0600）．模型提供方凭据保存在项目 `AuthStorage`，UI 只显示状态．
 - 日志不打印 token、URL query 中的签名；使用 vendored `integrations/sjtu_canvas_assistant` 的脱敏工具。
 - 文件工具限制在会话 workspace，拒绝 `..` 和绝对路径。
 - artifact 路由只允许 `data_dir` 下的路径。
@@ -754,12 +752,16 @@ src/                       # 新架构直接位于 src 下，不再有 lecture_a
 │   ├── ui.py
 │   ├── meta.py
 │   └── runtime.py
+├── agent_runtime/
+│   ├── client.py           # 私有 JSON Lines IPC
+│   ├── main.ts             # Bun 入口与项目隔离
+│   ├── runtime.ts          # SDK 会话、角色与鉴权
+│   ├── workspace.ts        # 文件授权
+│   ├── generate.ts         # 单次生成
+│   └── opencode.ts         # AuthStorage OAuth 接入
 ├── llm/
-│   ├── types.py
-│   ├── errors.py
-│   ├── provider.py
-│   ├── openai_compat.py
-│   └── service.py
+│   ├── types.py            # Python 应用响应类型
+│   └── service.py          # 角色生成与用量适配
 ├── plugins/
 │   ├── builtin.py
 │   ├── settings/
@@ -771,7 +773,7 @@ src/                       # 新架构直接位于 src 下，不再有 lecture_a
 │   ├── summarize/          # 非即时：整堂课一次性整理
 │   ├── instant_summarize/  # 即时：增量合并
 ├── integrations/
-│   ├── opencode_go.py     # OpenCode 套餐 OAuth device flow / token 刷新
+│   ├── opencode_go.py     # OpenCode 套餐设备登录
 │   ├── sjtu_canvas.py     # 客户端池 + 目录封装
 │   └── sjtu_canvas_assistant/  # vendored SJTU Canvas/视频客户端
 ├── ui/
@@ -787,9 +789,9 @@ docs/
 ## 13. 实施顺序
 
 1. **P0 基础**：streams / events / services / plugin / ui / runtime / config / logging。
-2. **P1 LLM**：types / provider / openai-compatible / retry / service / tests。
-3. **P2 行为基础**：settings / llm-core / llm-agent（含工具与会话）/ tests。
-4. **P3 总结**：summarize + scripted LLM 集成测试。
+2. **P1 运行时**：安装锁定的 OMP SDK，接入 Bun IPC、角色请求与会话生命周期．
+3. **P2 行为基础**：settings、模型角色 YAML、提供方 AuthStorage 与授权文件工具．
+4. **P3 总结**：片段、整课写作、两项审阅与修订共用 SDK，保留生成期间预览．
 5. **P4 输入**：SJTU catalog（VOD + live）/ ffmpeg source / UI pages / tests。
 6. **P5 STT/VLM**：兼容 STT 服务接入与音频生命周期；VLM picture_parser 融合、prompt、tests．
 7. **P6 UI**：FastAPI + 静态前端 + WebSocket + 端到端演示。
@@ -806,8 +808,10 @@ docs/
 
 ## 15. 验收标准
 
-- `pytest` 全绿；核心模块单测覆盖流、事件、插件、设置、LLM 重试、Agent 工具、总结、UI、VLM 融合。
+- 确定性测试覆盖流、事件、插件、配置保存、角色解析、鉴权、IPC、工具授权、取消、恢复和预览．
 - `sjtu-skipper check` 输出正确的拓扑加载顺序。
 - `sjtu-skipper serve` 能加载真实 settings；输入插件能列出 Canvas 课程与 SJTU 录播/直播（有 token 时）。
 - 输入、STT、VLM 三个模块除流接口外没有互相 import；行为插件没有 import 输入/STT/VLM 实现。
-- 所有 LLM 请求经过 `LLMService`；STT 只访问配置的兼容 HTTP/WebSocket 服务．
+- 所有 LLM 请求通过项目 OMP 运行时；STT 只访问配置的兼容 HTTP/WebSocket 服务．
+- 实际请求和工具执行验证用户全局配置隔离、同轮读读写读顺序与独立提供方凭据．
+- 真实模型记录完整来源访问、工具错误恢复、生成期间预览、审阅修订和最终文稿．

@@ -168,7 +168,7 @@ def _apply_crop(arr: np.ndarray, crop: tuple[float, float, float, float]) -> np.
     cx1 = min(w, int(round(x1 * w)))
     cy1 = min(h, int(round(y1 * h)))
     if cx0 >= cx1 or cy0 >= cy1:
-        return arr  # degenerate crop – keep full frame
+        return arr  # Keep the full frame for a degenerate crop.
     return arr[cy0:cy1, cx0:cx1]
 
 

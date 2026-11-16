@@ -2,38 +2,34 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import math
 import os
-import subprocess
-import sys
 import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Any
-from pathlib import Path
 
 from core.file_access import publication_lock
-from core.agent_types import AgentRunResult
 from core.plugin import Plugin
 from core.settings_spec import SettingsSpec
 from plugins.agent.workspace import FileWorkspace
-from .prompts import (
-    WRITER,
-    COVERAGE,
-    CORRECTNESS,
-    REVIEW_SYSTEM,
-    RETRY,
-    REVISION,
-    REVIEW_FORMAT,
-)
 from plugins.reader.qa import parse_blocks, strip_blocks
+
 from .material import chunk_material, collect_material, digest, render
-from .prompts import CHUNK, KINDS, LABELS, NOTE_HEADERS, SOURCE_FILENAME, SYSTEM
-from .worker import session_state, restore_workspace
+from .prompts import (
+    CHUNK,
+    REVIEW,
+    KINDS,
+    LABELS,
+    NOTE_HEADERS,
+    REVIEW_SYSTEM,
+    SOURCE_FILENAME,
+    SYSTEM,
+    WRITER,
+)
 
 
 class NotesPipelineService:
@@ -43,11 +39,17 @@ class NotesPipelineService:
     def start(self, session_id=""):
         return self._pipeline.start(session_id)
 
+    def finalize(self, session_id=""):
+        return self._pipeline.finalize(session_id)
+
     def status(self, session_id=""):
         return self._pipeline.status(session_id)
 
-    def reset(self, session_id="", regenerate=False):
-        return self._pipeline.reset(session_id, regenerate)
+    def stop(self, session_id=""):
+        return self._pipeline.stop(session_id)
+
+    def delete(self, session_id=""):
+        return self._pipeline.delete(session_id)
 
     def draft_paths(self, session_id=""):
         return self._pipeline.draft_paths(session_id)
@@ -91,8 +93,6 @@ class NotesPipelinePlugin(Plugin):
         self.queue = deque()
         self.active = {}
         self.agent_tasks = {}
-        self.workers = {}
-        self.reset_locks = {}
         self.closed = False
         self.limit = max(1, int(self.setting("notes.concurrency", 8)))
         self.pool = ThreadPoolExecutor(
@@ -103,9 +103,26 @@ class NotesPipelinePlugin(Plugin):
             self._state(path.parent.parent.name)
         ctx.register_service(self.id, NotesPipelineService(self))
         ctx.ui.register_task_provider(self.running_tasks, plugin_id=self.id)
-        for event in ("stream.sealed", "stream.appended", "session.stopped"):
+        ctx.ui.register_action(
+            "notes-pipeline.stop",
+            lambda payload: {
+                "ok": self.stop(str(payload.get("session_id", ""))),
+                "refresh": True,
+            },
+            plugin_id=self.id,
+        )
+        for event in (
+            "session.started",
+            "stream.sealed",
+            "stream.appended",
+            "session.stopped",
+        ):
             ctx.events.on(event, self._event, plugin_id=self.id)
-        for event in ("agent.message", "agent.tool_call", "agent.tool_result"):
+        for event in (
+            "agent.execution",
+            "agent.file",
+            "agent.reviewer",
+        ):
             ctx.events.on(event, self._agent_event, plugin_id=self.id)
         self.coordinator = threading.Thread(
             target=self._coordinate, name="notes-coordinator", daemon=True
@@ -141,9 +158,10 @@ class NotesPipelinePlugin(Plugin):
                     "error": "",
                 }
             )
+            restored = path.exists()
             for chunk in state["chunks"]:
-                if chunk["state"] == "running":
-                    chunk["state"] = "pending"
+                if chunk["state"] in ("running", "pending") and restored:
+                    chunk["state"] = "cancelled"
                 if chunk["state"] == "done":
                     root = self._directory(sid) / "chunks" / str(chunk["index"])
                     if not all((root / name).exists() for name in NOTE_HEADERS):
@@ -155,6 +173,16 @@ class NotesPipelinePlugin(Plugin):
                 for chunk in state["chunks"]
                 if chunk["state"] == "failed"
             ]
+            if restored:
+                state["finalize_requested"] = False
+                if state["phase"] not in ("published", "deleted"):
+                    state["phase"] = "cancelled"
+                state["restart_cancelled"] = True
+            state["generation_state"] = (
+                "finished"
+                if restored and state["phase"] != "deleted"
+                else "not_started"
+            )
             self.sessions[sid] = state
         return self.sessions[sid]
 
@@ -186,6 +214,8 @@ class NotesPipelinePlugin(Plugin):
             return
         with self.condition:
             state = self._state(sid)
+            if getattr(event, "type", "") == "session.started":
+                state.pop("restart_cancelled", None)
             if event.get("error"):
                 state["errors"].append(
                     {"source": event.get("stream"), **event.get("error")}
@@ -205,75 +235,115 @@ class NotesPipelinePlugin(Plugin):
             if self.closed:
                 return False
             state = self._state(sid)
-            if state["phase"] == "resetting":
+            if state["generation_state"] != "not_started":
                 return False
+            state["generation_state"] = "generating"
             state["deleted"] = False
-            if state["phase"] in ("published", "failed", "deleted"):
-                state["phase"] = "collecting"
+            state.pop("restart_cancelled", None)
+            state["phase"] = "collecting"
             state["finalize_requested"] = True
             self._save(state)
             self.condition.notify_all()
         return True
 
-    def reset(self, session_id="", regenerate=False):
+    def finalize(self, session_id=""):
         sid = self._sid(session_id)
         with self.condition:
-            reset_lock = self.reset_locks.setdefault(sid, threading.Lock())
-        with reset_lock:
-            with self.condition:
-                state = self._state(sid)
-                state["deleted"] = True
-                state["phase"] = "resetting"
-                state["finalize_requested"] = False
-                self.queue = deque(task for task in self.queue if task[0] != sid)
-                workers = [
-                    process for owner, process in self.workers.values() if owner == sid
-                ]
-                for process in workers:
-                    if process.poll() is None:
-                        process.kill()
-                self._save(state)
-                self.condition.notify_all()
-            for process in workers:
-                process.wait()
-            with self.condition:
-                self.condition.wait_for(
-                    lambda: (
-                        not any(
-                            task["session_id"] == sid for task in self.active.values()
-                        )
-                        and not any(owner == sid for owner, _ in self.workers.values())
+            state = self._state(sid)
+            if (
+                state.get("restart_cancelled")
+                or state["generation_state"] == "finished"
+                or state.get("deleted")
+            ):
+                return False
+            state["generation_state"] = "generating"
+            state["finalize_requested"] = True
+            self.condition.notify_all()
+        return True
+
+    def stop(self, session_id=""):
+        sid = self._sid(session_id)
+        with self.condition:
+            state = self._state(sid)
+            if state["generation_state"] != "generating":
+                return False
+            state["restart_cancelled"] = True
+            state["finalize_requested"] = False
+            self.queue = deque(task for task in self.queue if task[0] != sid)
+            for chunk in state["chunks"]:
+                if chunk["state"] in ("pending", "running"):
+                    chunk["state"] = "cancelled"
+            running = [
+                key
+                for key, task in self.agent_tasks.items()
+                if task["session_id"] == sid
+            ]
+            self.condition.notify_all()
+        for key in running:
+            self.agent.cancel(key)
+        with self.condition:
+            self.condition.wait_for(
+                lambda: (
+                    not any(task["session_id"] == sid for task in self.active.values())
+                    and not any(
+                        task["session_id"] == sid for task in self.agent_tasks.values()
                     )
                 )
-                notes = self.ctx.data_dir / "sessions" / sid / "notes"
-                with publication_lock(notes):
-                    for kind in ("instant", "final"):
-                        for name, _ in self.note_files(kind).values():
-                            (notes / name).unlink(missing_ok=True)
-                    (notes.parent / SOURCE_FILENAME).unlink(missing_ok=True)
-                state.update(
-                    chunks=[],
-                    source_digest="",
-                    published_end=0.0,
-                    phase="collecting" if regenerate else "deleted",
-                    error="",
-                    errors=[],
-                    review_status="pending",
-                    deleted=not regenerate,
-                )
-                self._save(state)
-                if regenerate:
-                    self.start(sid)
-                self.condition.notify_all()
-            self.ctx.ui.refresh("notes.reset")
+            )
+            state["generation_state"] = "finished"
+            state["phase"] = "cancelled"
+            self._save(state)
+        self.ctx.ui.refresh("notes.stopped")
+        return True
+
+    def delete(self, session_id=""):
+        sid = self._sid(session_id)
+        with self.condition:
+            state = self._state(sid)
+            if state["generation_state"] != "finished":
+                return False
+            notes = self.ctx.data_dir / "sessions" / sid / "notes"
+            with publication_lock(notes):
+                for kind in ("instant", "final"):
+                    for name, _ in self.note_files(kind).values():
+                        (notes / name).unlink(missing_ok=True)
+                (notes.parent / SOURCE_FILENAME).unlink(missing_ok=True)
+            state.update(
+                chunks=[],
+                source_digest="",
+                published_end=0.0,
+                phase="deleted",
+                error="",
+                errors=[],
+                review_status="pending",
+                deleted=True,
+                finalize_requested=False,
+                last_agent_tasks=[],
+                generation_state="not_started",
+            )
+            self._save(state)
+        self.ctx.ui.refresh("notes.deleted")
         return True
 
     def status(self, session_id=""):
         sid = self._sid(session_id)
         with self.condition:
             state = self._state(sid)
+            session = self.ctx.streams.get_session(sid)
+            duration = (
+                float(session.meta.get("total_media_seconds") or 0) if session else 0
+            )
+            chunk_enabled = bool(self.setting("instant-summarize.enabled", True))
+            expected_chunks = (
+                math.ceil(
+                    duration / max(1, float(self.setting("notes.chunk_seconds", 600)))
+                )
+                if duration > 0 and chunk_enabled
+                else (0 if not chunk_enabled else None)
+            )
             return {
                 "session_id": sid,
+                "generation_state": state["generation_state"],
                 "phase": state["phase"],
                 "pending_chunks": sum(c["state"] == "pending" for c in state["chunks"]),
                 "running_chunks": sum(c["state"] == "running" for c in state["chunks"]),
@@ -283,11 +353,19 @@ class NotesPipelinePlugin(Plugin):
                     c["state"] in ("done", "empty") for c in state["chunks"]
                 ),
                 "total_chunks": len(state["chunks"]),
-                "tasks": [
-                    dict(task)
-                    for task in self.agent_tasks.values()
-                    if sid == task["session_id"]
-                ],
+                "expected_chunks": expected_chunks,
+                "chunk_enabled": chunk_enabled,
+                "tasks": sorted(
+                    [
+                        *state.get("last_agent_tasks", []),
+                        *(
+                            dict(task)
+                            for task in self.agent_tasks.values()
+                            if sid == task["session_id"]
+                        ),
+                    ],
+                    key=lambda task: task["started"],
+                ),
                 "error": state["error"],
                 "errors": list(state["errors"]),
             }
@@ -325,8 +403,17 @@ class NotesPipelinePlugin(Plugin):
                     {
                         **task,
                         "phase": phase,
+                        "state": "running",
+                        "cancel": {
+                            "action": "notes-pipeline.stop",
+                            "payload": {"session_id": sid},
+                        },
                         "label": f"笔记 {sid}",
-                        "detail": f"{phase}；片段 {task['chunk']}；{elapsed} 秒；审阅 {self._state(sid)['review_status']}",
+                        "detail": (
+                            f"分段整理；片段 {task['chunk']}；{elapsed} 秒"
+                            if phase == "chunking"
+                            else f"整课写作；{elapsed} 秒"
+                        ),
                     }
                 )
             tasks.extend(
@@ -336,16 +423,14 @@ class NotesPipelinePlugin(Plugin):
                     "label": f"笔记 {sid}",
                     "detail": f"排队；{kind}；片段 {index}",
                     "phase": kind,
+                    "state": "pending",
+                    "cancel": {
+                        "action": "notes-pipeline.stop",
+                        "payload": {"session_id": sid},
+                    },
                     "chunk": index,
                 }
                 for sid, kind, index in self.queue
-            )
-            tasks.extend(
-                {
-                    **task,
-                    "detail": f"步骤 {task['agent_step']}；{max(0, int(time.monotonic() - task['started']))} 秒",
-                }
-                for task in self.agent_tasks.values()
             )
             return tasks
 
@@ -373,7 +458,14 @@ class NotesPipelinePlugin(Plugin):
 
     def _schedule(self, sid):
         state = self._state(sid)
-        if state.get("deleted"):
+        if state.get("deleted") or state.get("restart_cancelled"):
+            return
+        if state["generation_state"] == "finished":
+            return
+        session = self.ctx.streams.get_session(sid)
+        if session is not None and (
+            session.meta.get("input_failed") or session.meta.get("processing_cancelled")
+        ):
             return
         records = collect_material(self.ctx, sid)
         before, final = self._readiness(sid, records)
@@ -385,7 +477,6 @@ class NotesPipelinePlugin(Plugin):
             ),
             default=0,
         )
-        session = self.ctx.streams.get_session(sid)
         if session is not None:
             end = max(end, session.duration)
         enabled = bool(self.setting("instant-summarize.enabled", True))
@@ -437,7 +528,6 @@ class NotesPipelinePlugin(Plugin):
                         "end": finish,
                         "input_digest": input_digest,
                         "state": "pending",
-                        "attempts": 0,
                         "error": "",
                         "manual_start": manual_start,
                         "manual_end": manual_end,
@@ -457,10 +547,7 @@ class NotesPipelinePlugin(Plugin):
             if (
                 records
                 and task not in self.queue
-                and not any(
-                    t["session_id"] == sid and t["phase"] != "chunking"
-                    for t in self.active.values()
-                )
+                and not any(t["session_id"] == sid for t in self.active.values())
                 and state["phase"] not in ("published", "failed")
             ):
                 self.queue.appendleft(task)
@@ -484,8 +571,9 @@ class NotesPipelinePlugin(Plugin):
                     sid, kind, index = self.queue.popleft()
                     token = f"{sid}:{kind}:{index}"
                     state = self._state(sid)
-                    if state.get("deleted"):
+                    if state.get("deleted") or state.get("restart_cancelled"):
                         continue
+                    state["generation_state"] = "generating"
                     if kind == "chunk":
                         state["chunks"][index]["state"] = "running"
                         state["phase"] = "chunking"
@@ -511,7 +599,9 @@ class NotesPipelinePlugin(Plugin):
                 self._final(sid, records)
         except Exception as exc:
             with self.condition:
-                if self._state(sid).get("deleted"):
+                if self._state(sid).get("deleted") or self._state(sid).get(
+                    "restart_cancelled"
+                ):
                     return
                 if self.closed:
                     if kind == "chunk":
@@ -520,25 +610,116 @@ class NotesPipelinePlugin(Plugin):
                     return
                 state = self._state(sid)
                 state["errors"].append({"chunk": index, "error": str(exc)})
-                state["error"] = str(exc)
                 if kind == "chunk":
                     state["chunks"][index].update(state="failed", error=str(exc))
                 else:
+                    state["error"] = str(exc)
                     state["phase"] = "failed"
+                    state["generation_state"] = "finished"
                 self._save(state)
         finally:
             with self.condition:
                 self.active.pop(token, None)
                 self.condition.notify_all()
 
+    @staticmethod
+    def _execution_agent(key, role, label, model=""):
+        return {
+            "id": key,
+            "role": role,
+            "label": label,
+            "status": "running",
+            "model": model,
+            "thinking": "",
+            "context_tokens": 0,
+            "context_window": 0,
+            "llm_seconds": 0,
+            "tool_seconds": 0,
+            "output_tokens": 0,
+            "tokens_per_second": 0,
+            "blocks": [],
+        }
+
+    @staticmethod
+    def _merge_execution_block(agent, block):
+        for index, existing in enumerate(agent["blocks"]):
+            if existing["id"] == block["id"]:
+                agent["blocks"][index] = dict(block)
+                return
+        agent["blocks"].append(dict(block))
+
     def _agent_event(self, event):
         with self.condition:
             task = self.agent_tasks.get(str(event.get("session_id", "")))
-            if task is not None:
-                task["agent_step"] = int(event.get("step", 0))
+            if task is None:
+                return
+            task["agent_step"] = int(event.get("step", task.get("agent_step", 0)))
+            agents = task["agents"]
+            reviewer = event.get("reviewer_id")
+            key = reviewer or "main"
+            name = event.get("event") if reviewer else event.type
+            if key not in agents:
+                agents[key] = self._execution_agent(
+                    key,
+                    event.get("role") if reviewer else "main",
+                    {
+                        "note_review": "笔记审阅",
+                    }.get(event.get("role"), task.get("label", "主写作")),
+                )
+            agent = agents[key]
+            now = time.monotonic()
+            if name == "agent.execution":
+                agent.update(event.get("metrics") or {})
+                if event.get("block") is not None:
+                    self._merge_execution_block(agent, event.get("block"))
+            elif name == "agent.file":
+                for child in agents.values():
+                    if child["status"] in ("passed", "needs_revision"):
+                        child["status"] = "stale"
+            elif name == "finished":
+                report = json.loads(event.get("content"))
+                agent["status"] = (
+                    "passed"
+                    if report["overall_correctness"] == "correct"
+                    else "needs_revision"
+                )
+                self._merge_execution_block(
+                    agent,
+                    {
+                        "id": f"{key}:review",
+                        "kind": "review",
+                        "text": event.get("content"),
+                        "report": report,
+                        "status": "completed",
+                    },
+                )
+            elif name == "failed":
+                agent["status"] = "failed"
+                self._merge_execution_block(
+                    agent,
+                    {
+                        "id": f"{key}:review",
+                        "kind": "review",
+                        "text": str(event.get("error", "审阅失败")),
+                        "status": "failed",
+                    },
+                )
+            refresh = now - task.get("last_refresh", 0) >= 1 or name in (
+                "started",
+                "finished",
+                "failed",
+                "agent.file",
+            )
+            if refresh:
+                task["last_refresh"] = now
+                self.ctx.ui.refresh("notes.activity")
 
     def _check_running(self, sid):
-        if self.closed or self._state(sid).get("deleted"):
+        if (
+            self.closed
+            or self._state(sid).get("deleted")
+            or self._state(sid).get("restart_cancelled")
+        ):
             raise RuntimeError("Note generation cancelled")
 
     @contextmanager
@@ -548,6 +729,7 @@ class NotesPipelinePlugin(Plugin):
                 lambda: (
                     self.closed
                     or self._state(sid).get("deleted")
+                    or self._state(sid).get("restart_cancelled")
                     or self.agent_running < self.limit
                 )
             )
@@ -581,34 +763,9 @@ class NotesPipelinePlugin(Plugin):
     def _agent_run(self, sid, session_id, instruction):
         with self._agent_slot(sid):
             session = self.agent.get_session(session_id)
-            payload = {
-                "state": session_state(session),
-                "provider": dataclasses.asdict(self.ctx.llm.config_for("agent")),
-                "system_prompt": self.agent._build_system_prompt(session),
-                "metadata": self._lecture_context(sid),
-                "trace_dir": str(self.ctx.data_dir / "llm"),
-                "instruction": self._lecture_context(sid) + "\n" + instruction,
-            }
-            source_root = str(Path(__file__).resolve().parents[2])
-            environment = dict(os.environ)
-            environment["PYTHONPATH"] = os.pathsep.join(
-                [source_root, environment.get("PYTHONPATH", "")]
-            )
             with self.condition:
                 self._check_running(sid)
-                process = subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-c",
-                        "from plugins.notes_pipeline.worker import main; main()",
-                    ],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    env=environment,
-                )
-                self.workers[session_id] = (sid, process)
+                self._state(sid)["generation_state"] = "generating"
                 self.agent_tasks[session_id] = {
                     "id": f"notes-agent:{session_id}",
                     "session_id": sid,
@@ -616,89 +773,55 @@ class NotesPipelinePlugin(Plugin):
                     "detail": "执行中",
                     "agent_step": 0,
                     "started": time.monotonic(),
+                    "agents": {
+                        "main": self._execution_agent(
+                            "main",
+                            "main"
+                            if session.meta.get("role") == "writer"
+                            else f"chunk:{session_id}",
+                            session.name,
+                            session.model,
+                        )
+                    },
                 }
-            try:
-                json.dump(payload, process.stdin, ensure_ascii=False)
-                process.stdin.close()
-                process.stdin = None
-                completed = None
-                failure = ""
-                for line in process.stdout:
-                    message = json.loads(line)
+
+            def on_event(event):
+                if event.type == "agent.file":
                     with self.condition:
                         self._check_running(sid)
-                        if message["type"] == "event":
-                            data = message["data"]
-                            if message["name"] == "llm.response":
-                                from llm.types import Usage
+                        if session.meta.get("role") == "writer":
+                            self._publish_lecture(sid, session.workspace, draft=True)
+                            self.ctx.ui.refresh("notes.preview")
 
-                                llm = self.ctx.service("llm")
-                                data["usage_totals"] = llm._record_usage(
-                                    data["model"] or session.model,
-                                    Usage(**data["usage"]),
-                                )
-                            self.ctx.events.emit(message["name"], **data)
-                        elif message["type"] == "refresh":
-                            if session.meta.get("role") == "writer" and message["reason"].startswith("agent.file:"):
-                                self._publish_lecture(sid, session.workspace, draft=True)
-                            self.ctx.ui.refresh(message["reason"])
-                        elif message["type"] == "result":
-                            completed = message
-                        elif message["type"] == "error":
-                            failure = message["error"]
-                return_code = process.wait()
+            try:
+                result = self.agent.run(
+                    session_id,
+                    self._lecture_context(sid) + "\n" + instruction,
+                    on_event=on_event,
+                )
                 with self.condition:
                     self._check_running(sid)
-                    if return_code or completed is None:
-                        raise RuntimeError(
-                            failure or f"Note worker exited with status {return_code}"
-                        )
-                    values = completed["state"]
-                    for name, value in values["session"].items():
-                        setattr(
-                            session,
-                            name,
-                            tuple(value) if name == "extra_instructions" else value,
-                        )
-                    session.workspace = restore_workspace(values["workspace"])
-                    return AgentRunResult(**completed["result"])
+                    task = self.agent_tasks[session_id]
+                    task["agents"]["main"]["status"] = (
+                        "failed" if result.error else "completed"
+                    )
+                return result
             finally:
-                if process.poll() is None:
-                    process.kill()
-                process.wait()
-                if process.stdin is not None:
-                    process.stdin.close()
-                process.stdout.close()
                 with self.condition:
-                    self.workers.pop(session_id, None)
-                    self.agent_tasks.pop(session_id, None)
+                    task = self.agent_tasks.pop(session_id, None)
+                    if task is not None:
+                        if task["agents"]["main"]["status"] == "running":
+                            task["agents"]["main"]["status"] = "failed"
+                        self._state(sid).setdefault("last_agent_tasks", []).append(task)
                     self.condition.notify_all()
 
-    def _run_agent(
-        self,
-        sid,
-        name,
-        workspace,
-        instruction,
-        *,
-        prefix="instant-summarize",
-        readonly=False,
-    ):
+    def _run_agent(self, sid, name, workspace, instruction):
         session = self.agent.create_session(
             name,
             workspace=workspace,
-            system_prompt=self.setting(f"{prefix}.system_prompt", "") or SYSTEM,
-            tools=[
-                (tool, {})
-                for tool in (
-                    ("info", "read", "search")
-                    if readonly
-                    else ("info", "read", "search", "write", "replace", "append")
-                )
-            ],
-            model=self.setting(f"{prefix}.model", "") or None,
-            max_steps=int(self.setting(f"{prefix}.max_steps", 40)),
-            max_tool_output=int(self.setting(f"{prefix}.max_tool_output", 200000)),
+            system_prompt=self.setting("instant-summarize.system_prompt", "") or SYSTEM,
+            role="note_chunk",
+            tools=["read", "grep", "glob", "edit", "write"],
             meta={"internal": True, "role": "notes", "lecture_session": sid},
         )
         try:
@@ -731,6 +854,7 @@ class NotesPipelinePlugin(Plugin):
         root.mkdir(parents=True, exist_ok=True)
         (root / "source.md").write_text(render(core), encoding="utf-8")
         (root / "context.md").write_text(render(context), encoding="utf-8")
+        (root / SOURCE_FILENAME).write_text(render(records), encoding="utf-8")
         (root / "visual_history.md").write_text(
             render(
                 [
@@ -742,43 +866,27 @@ class NotesPipelinePlugin(Plugin):
             ),
             encoding="utf-8",
         )
-        attempts = max(1, int(self.setting("instant-summarize.retry_max", 2)) + 1)
-        last_error = None
-        for attempt in range(attempts):
-            directory = root / f"attempt-{attempt}"
-            directory.mkdir(exist_ok=True)
-            files = {
-                name: root / name
-                for name in ("source.md", "context.md", "visual_history.md")
-            }
-            for name, header in NOTE_HEADERS.items():
-                files[name] = directory / name
-                files[name].write_text(header, encoding="utf-8")
-            workspace = FileWorkspace(
-                files, readonly=("source.md", "context.md", "visual_history.md")
+        files = {
+            name: root / name
+            for name in (
+                "source.md",
+                "context.md",
+                "visual_history.md",
+                SOURCE_FILENAME,
             )
-            try:
-                self._run_agent(
-                    sid,
-                    f"{sid} 片段 {index}",
-                    workspace,
-                    CHUNK + ("\n" + RETRY if attempt else ""),
-                )
-                self._validate_outputs(directory)
-                last_error = None
-                break
-            except Exception as exc:
-                last_error = exc
-                with self.condition:
-                    self._check_running(sid)
-        if last_error:
-            raise last_error
+        }
+        for name, header in NOTE_HEADERS.items():
+            files[name] = root / name
+            files[name].write_text(header, encoding="utf-8")
+        workspace = FileWorkspace(
+            files,
+            readonly=("source.md", "context.md", "visual_history.md", SOURCE_FILENAME),
+        )
+        self._run_agent(sid, f"{sid} 片段 {index}", workspace, CHUNK)
+        self._validate_outputs(root)
         with self.condition:
             self._check_running(sid)
-            target = self._state(sid)["chunks"][index]
-            target.update(state="done", attempts=attempt + 1)
-            for name in NOTE_HEADERS:
-                os.replace(directory / name, root / name)
+            self._state(sid)["chunks"][index]["state"] = "done"
             self._publish_preview(sid)
             self._save(self._state(sid))
 
@@ -855,13 +963,17 @@ class NotesPipelinePlugin(Plugin):
             self._check_running(sid)
             for name in NOTE_HEADERS:
                 destination = notes / name
-                latest = destination.read_text(encoding="utf-8") if destination.exists() else ""
+                latest = (
+                    destination.read_text(encoding="utf-8")
+                    if destination.exists()
+                    else ""
+                )
                 seen = set()
                 blocks = []
                 for block in parse_blocks(latest):
                     if block.id not in seen:
                         seen.add(block.id)
-                        blocks.append(latest[block.start:block.end])
+                        blocks.append(latest[block.start : block.end])
                 body = strip_blocks(workspace.path(name).read_text(encoding="utf-8"))
                 if draft:
                     body = "> 生成中，未审阅\n\n" + body
@@ -917,136 +1029,37 @@ class NotesPipelinePlugin(Plugin):
         readonly = list(files)
         for name, header in NOTE_HEADERS.items():
             files[name] = directory / name
-            files[name].write_text(header, encoding="utf-8")
+            if not files[name].exists():
+                files[name].write_text(header, encoding="utf-8")
         workspace = FileWorkspace(files, readonly=readonly)
+        review_enabled = bool(self.setting("summarize.review_enabled", True))
+        review = {
+            "prompt": REVIEW,
+            "system": self.setting("summarize.reviewer_prompt", "") or REVIEW_SYSTEM,
+            "maxRounds": int(self.setting("summarize.review_max_rounds", 0)),
+        }
         writer = self.agent.create_session(
             f"{sid} 整课写作",
             workspace=workspace,
             system_prompt=self.setting("summarize.system_prompt", "") or SYSTEM,
-            tools=[
-                (tool, {})
-                for tool in ("info", "read", "search", "write", "replace", "append")
-            ],
-            model=self.setting("summarize.model", "") or None,
-            max_steps=int(self.setting("summarize.max_steps", 0)),
-            max_tokens=int(self.setting("summarize.max_tokens", 32000)),
-            max_tool_output=int(self.setting("summarize.max_tool_output", 200000)),
-            max_history_chars=int(self.setting("summarize.max_history_chars", 0)),
-            meta={"internal": True, "role": "writer", "lecture_session": sid},
+            role="note_writer",
+            tools=["read", "grep", "glob", "edit", "write"],
+            meta={
+                "internal": True,
+                "role": "writer",
+                "lecture_session": sid,
+                **({"review": review} if review_enabled else {}),
+            },
         )
-        reviewers = []
+        review_status = "passed" if review_enabled else "disabled"
         try:
-            result = self._agent_run(sid, writer.id, WRITER)
+            instruction = WRITER
+            if review_enabled:
+                instruction += "\n保存文稿后调用 review_notes．核对审阅依据后修订，每次修改后必须再次调用，直到审阅通过．"
+            result = self._agent_run(sid, writer.id, instruction)
             if result.error:
                 raise RuntimeError(result.error)
-            try:
-                self._validate_outputs(directory)
-            except RuntimeError:
-                result = self._agent_run(sid, writer.id, RETRY)
-                if result.error:
-                    raise RuntimeError(result.error)
-                self._validate_outputs(directory)
-            review_enabled = bool(self.setting("summarize.review_enabled", True))
-            review_status = "disabled"
-            if review_enabled:
-                review_files = {
-                    name: files[name] for name in (SOURCE_FILENAME, *NOTE_HEADERS)
-                }
-                for label in ("coverage", "correctness"):
-                    reviewers.append(
-                        self.agent.create_session(
-                            f"{sid} {label}",
-                            workspace=FileWorkspace(
-                                review_files, readonly=review_files
-                            ),
-                            system_prompt=self.setting("summarize.reviewer_prompt", "")
-                            or REVIEW_SYSTEM,
-                            tools=[(tool, {}) for tool in ("info", "read", "search")],
-                            model=self.setting("summarize.review_model", "")
-                            or self.setting("summarize.model", "")
-                            or None,
-                            max_steps=int(
-                                self.setting("summarize.review_max_steps", 0)
-                            ),
-                            final_answer_on_limit=True,
-                            max_tokens=int(
-                                self.setting("summarize.review_max_tokens", 32000)
-                            ),
-                            max_tool_output=int(
-                                self.setting("summarize.max_tool_output", 200000)
-                            ),
-                            max_history_chars=int(
-                                self.setting("summarize.max_history_chars", 0)
-                            ),
-                            meta={
-                                "internal": True,
-                                "role": label,
-                                "lecture_session": sid,
-                            },
-                        )
-                    )
-                previous = None
-                max_rounds = int(self.setting("summarize.review_max_rounds", 0))
-                round_index = 0
-                while not max_rounds or round_index < max_rounds:
-                    round_index += 1
-                    with self.condition:
-                        self._check_running(sid)
-                        self._state(sid)["phase"] = "reviewing"
-                    with ThreadPoolExecutor(
-                        max_workers=min(2, self.limit),
-                        thread_name_prefix="notes-review",
-                    ) as reviews:
-                        futures = [
-                            reviews.submit(self._agent_run, sid, reviewer.id, prompt)
-                            for reviewer, prompt in zip(
-                                reviewers, (COVERAGE, CORRECTNESS)
-                            )
-                        ]
-                        results = [future.result() for future in futures]
-                    for result in results:
-                        if result.error:
-                            raise RuntimeError(result.error)
-                    for index, result in enumerate(results):
-                        if (
-                            "REVIEW: PASS" not in result.final_message
-                            and "REVIEW: FAIL" not in result.final_message
-                        ):
-                            results[index] = self._agent_run(
-                                sid, reviewers[index].id, REVIEW_FORMAT
-                            )
-                            if results[index].error:
-                                raise RuntimeError(results[index].error)
-                    if all(
-                        "REVIEW: PASS" in result.final_message
-                        and "REVIEW: FAIL" not in result.final_message
-                        for result in results
-                    ):
-                        review_status = "passed"
-                        break
-                    feedback = "\n\n".join(result.final_message for result in results)
-                    if feedback == previous:
-                        break
-                    if max_rounds and round_index >= max_rounds:
-                        break
-                    previous = feedback
-                    before = [files[name].read_bytes() for name in NOTE_HEADERS]
-                    with self.condition:
-                        self._check_running(sid)
-                        self._state(sid)["phase"] = "revising"
-                    result = self._agent_run(
-                        sid,
-                        writer.id,
-                        REVISION.format(review=feedback),
-                    )
-                    if result.error:
-                        raise RuntimeError(result.error)
-                    if before == [files[name].read_bytes() for name in NOTE_HEADERS]:
-                        break
-                if review_status != "passed":
-                    with self.condition:
-                        self._state(sid)["review_status"] = "failed"
-                    raise RuntimeError("Lecture review did not pass")
+            self._validate_outputs(directory)
             self._publish_lecture(sid, workspace)
             with self.condition:
                 self._check_running(sid)
@@ -1055,24 +1068,19 @@ class NotesPipelinePlugin(Plugin):
                     phase="published",
                     review_status=review_status,
                     finalize_requested=False,
+                    generation_state="finished",
                 )
                 self._save(state)
                 self.ctx.ui.refresh("notes.published")
         finally:
             self.agent.close(writer.id)
-            for reviewer in reviewers:
-                self.agent.close(reviewer.id)
 
     def teardown(self):
         with self.condition:
             self.closed = True
             self.queue.clear()
-            workers = [process for _, process in self.workers.values()]
-            for process in workers:
-                if process.poll() is None:
-                    process.kill()
+            for session_id in tuple(self.agent_tasks):
+                self.agent.cancel(session_id)
             self.condition.notify_all()
-        for process in workers:
-            process.wait()
         self.coordinator.join()
         self.pool.shutdown(wait=True, cancel_futures=True)

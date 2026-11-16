@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable
 
-from plugins.settings.spec import SettingsSpec
+from core.settings_spec import SettingsSpec
 
 
 @dataclass
@@ -72,16 +72,6 @@ class FakeLLM:
         )
         yield SimpleNamespace(
             type="done", text="", tool_call=None, response=response, error=None
-        )
-
-    def config_for(self, profile: str) -> SimpleNamespace:
-        return SimpleNamespace(
-            profile=profile,
-            base_url="http://fake",
-            api_key="fake",
-            model="fake",
-            timeout=10,
-            max_retries=0,
         )
 
     def info(self) -> dict[str, Any]:

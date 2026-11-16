@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -143,6 +144,18 @@ class ReaderService:
             after_words=after_words,
             history_words=history_words,
         )
+
+    def navigation(self, page_id):
+        with self._plugin._lock:
+            return str(self._plugin._states.get(page_id, {}).get("active", ""))
+
+    def select_document(self, page_id, key):
+        with self._plugin._lock:
+            state = self._plugin._states[page_id]
+            if key not in {doc["key"] for doc in state["docs"]}:
+                raise KeyError("Unknown note document")
+            state["active"] = key
+            state["sequence"] = int(state.get("sequence", 0)) + 1
 
 
 class ReaderPlugin(Plugin):
@@ -327,7 +340,7 @@ class ReaderPlugin(Plugin):
     def unregister_selection_action(
         self, page: str = "", item_id: str = "", *, owner: str = ""
     ) -> None:
-        """Remove one menu item — or every item registered by *owner*.
+        """Remove one menu item or every item registered by *owner*.
 
         With an empty *item_id* and a non-empty *owner* this purges that
         plugin's items from every page and from the global bucket, which is
@@ -648,45 +661,60 @@ class ReaderPlugin(Plugin):
 
 
 def _document_blocks(text: str, path: str) -> list[dict[str, Any]]:
-    """Render one document: markdown chunks plus custom Q&A components."""
+    """Parse the whole note before separating its Q&A components."""
 
     if not text.strip():
         return [{"type": "text", "text": "（暂无内容）"}]
 
+    segments = qa.segments(text)
+    prefix = f"<!--reader-qa-{sha256(text.encode()).hexdigest()}-"
+    source = []
+    for index, (kind, payload) in enumerate(segments):
+        source.append(str(payload) if kind == "markdown" else f"{prefix}{index}-->")
+    # Footnote definitions must remain visible to references across Q&A boundaries.
+    remaining_html = render_markdown("\n\n".join(source), document_id=path)
     blocks: list[dict[str, Any]] = []
-    for kind, payload in qa.segments(text):
-        if kind == "qa":
-            block = payload
-            assert isinstance(block, qa.QABlock)
-            blocks.append(
-                {
-                    "type": "qa",
-                    "id": block.id,
-                    "path": path,
-                    "ts": block.ts,
-                    "status": block.status,
-                    "intensity": block.intensity,
-                    "collapsed": block.collapsed,
-                    "question": block.question,
-                    "answer": block.answer,
-                    "question_html": render_markdown(block.question),
-                    "answer_html": render_markdown(block.answer)
+    markdown_text = ""
+    for index, (kind, payload) in enumerate(segments):
+        if kind == "markdown":
+            markdown_text += str(payload)
+            continue
+        html, _, remaining_html = remaining_html.partition(f"{prefix}{index}-->")
+        if html.strip():
+            blocks.append({"type": "markdown", "text": markdown_text, "html": html})
+        markdown_text = ""
+        block = payload
+        assert isinstance(block, qa.QABlock)
+        blocks.append(
+            {
+                "type": "qa",
+                "id": block.id,
+                "path": path,
+                "ts": block.ts,
+                "status": block.status,
+                "intensity": block.intensity,
+                "collapsed": block.collapsed,
+                "question": block.question,
+                "answer": block.answer,
+                "question_html": render_markdown(
+                    block.question, document_id=f"{path}:{block.id}:question"
+                ),
+                "answer_html": (
+                    render_markdown(
+                        block.answer, document_id=f"{path}:{block.id}:answer"
+                    )
                     if block.answer
-                    else "",
-                    "delete_action": DELETE_QA_ACTION,
-                    "collapse_action": COLLAPSE_QA_ACTION,
-                }
-            )
-            continue
-        chunk_text = str(payload)
-        if not chunk_text.strip():
-            continue
-        blocks.extend(
-            {"type": "markdown", "text": chunk} for chunk in split_markdown(chunk_text)
+                    else ""
+                ),
+                "delete_action": DELETE_QA_ACTION,
+                "collapse_action": COLLAPSE_QA_ACTION,
+            }
         )
-    if not blocks:
-        return [{"type": "text", "text": "（暂无内容）"}]
-    return blocks
+    if remaining_html.strip():
+        blocks.append(
+            {"type": "markdown", "text": markdown_text, "html": remaining_html}
+        )
+    return blocks or [{"type": "text", "text": "（暂无内容）"}]
 
 
 def _read_text(path: str) -> str:
@@ -694,28 +722,3 @@ def _read_text(path: str) -> str:
         return Path(path).read_text("utf-8")
     except OSError:
         return ""
-
-
-def split_markdown(text: str, max_chars: int = 4000) -> list[str]:
-    """Split a document into paragraph-aligned chunks for KaTeX rendering."""
-
-    paragraphs = text.split("\n\n")
-    chunks: list[str] = []
-    current: list[str] = []
-    size = 0
-    in_display = False
-    in_fence = False
-    for para in paragraphs:
-        if current and size >= max_chars and not in_display and not in_fence:
-            chunks.append("\n\n".join(current))
-            current = []
-            size = 0
-        current.append(para)
-        size += len(para) + 2
-        if para.count("$$") % 2:
-            in_display = not in_display
-        if para.count("```") % 2:
-            in_fence = not in_fence
-    if current:
-        chunks.append("\n\n".join(current))
-    return chunks or [text]

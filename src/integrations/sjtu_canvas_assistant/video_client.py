@@ -9,11 +9,8 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 
 import httpx
@@ -25,9 +22,6 @@ from .models import (
     CanvasVideo,
     VideoAuth,
     VideoInfo,
-    VideoPPTSlice,
-    VideoSubtitleBody,
-    VideoSubtitleItem,
 )
 
 VIDEO_SERVICE_ROOT = "https://v.sjtu.edu.cn/jy-application-canvas-sjtu"
@@ -38,10 +32,6 @@ VIDEO_LTI_AUTH_ACTION = f"{VIDEO_SERVICE_ROOT}/lti3/lti3Auth/ivs"
 VIDEO_TOKEN_BY_ID_URL = f"{VIDEO_SERVICE_ROOT}/lti3/getAccessTokenByTokenId"
 VIDEO_LIST_URL = f"{VIDEO_SERVICE_ROOT}/directOnDemandPlay/findVodVideoList"
 VIDEO_INFO_URL = f"{VIDEO_SERVICE_ROOT}/directOnDemandPlay/getVodVideoInfos"
-SUBTITLE_URL = f"{VIDEO_SERVICE_ROOT}/transfer/translate/detail"
-PPT_SLICE_URL = (
-    f"{VIDEO_SERVICE_ROOT}/directOnDemandPlay/vod-analysis/query-ppt-slice-es"
-)
 
 NEW_VIDEO_SERVICE_ROOT = "https://v.sjtu.edu.cn/jy-application-resourcemanage"
 NEW_VIDEO_UI_REFERER = "https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/"
@@ -76,73 +66,11 @@ def _redact_sensitive_text(text: str) -> str:
     return redacted
 
 
-def redact_video_payload(value: Any) -> Any:
-    """Return a token-safe representation of video payloads for CLI/MCP output."""
-
-    if hasattr(value, "model_dump"):
-        value = value.model_dump(mode="json")  # type: ignore[attr-defined]
-    if isinstance(value, Mapping):
-        redacted: Dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            normalized_key = re.sub(r"[^a-z0-9]", "", key_text.lower())
-            if re.search(
-                r"(token|cookie|authorization|secret|session)", key_text, re.IGNORECASE
-            ):
-                redacted[key_text] = "<redacted>" if item else item
-            elif "url" in normalized_key and normalized_key not in {
-                "pptimgurl",
-                "pptimageurl",
-                "imgurl",
-                "imageurl",
-            }:
-                redacted[key_text] = "<redacted-url>" if item else item
-            else:
-                redacted[key_text] = redact_video_payload(item)
-        return redacted
-    if isinstance(value, list):
-        return [redact_video_payload(item) for item in value]
-    if isinstance(value, str):
-        return _redact_sensitive_text(value)
-    return value
-
-
 def _safe_url_label(url: object) -> str:
     parsed = urlparse(str(url))
     if not parsed.scheme or not parsed.netloc:
         return str(url).split("?", 1)[0]
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-
-
-def _format_srt_ms(milliseconds: int) -> str:
-    total = max(0, int(milliseconds))
-    hours, remainder = divmod(total, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    seconds, millis = divmod(remainder, 1_000)
-    return f"{hours:02}:{minutes:02}:{seconds:02},{millis:03}"
-
-
-def subtitle_items_to_srt(items: Iterable[VideoSubtitleItem]) -> str:
-    """Convert SJTU subtitle rows into SRT text."""
-
-    usable = [item for item in items if (item.res or "").strip()]
-    lines: List[str] = []
-    for index, item in enumerate(usable, start=1):
-        next_item = usable[index] if index < len(usable) else None
-        start_ms = int(item.bg or 0)
-        end_ms = int(next_item.bg) if next_item is not None else int(item.ed or 0)
-        if end_ms <= start_ms:
-            end_ms = max(int(item.ed or 0), start_ms + 1_000)
-        text = "\n".join(line.strip() for line in item.res.splitlines() if line.strip())
-        lines.extend(
-            [
-                str(index),
-                f"{_format_srt_ms(start_ms)} --> {_format_srt_ms(end_ms)}",
-                text,
-                "",
-            ]
-        )
-    return "\n".join(lines).rstrip() + ("\n" if lines else "")
 
 
 class SJTUVideoClient:
@@ -683,197 +611,3 @@ class SJTUVideoClient:
             raise VideoIntegrationError(
                 "SJTU video info response shape is not supported yet."
             ) from exc
-
-    def download_video_stream(
-        self,
-        url: str,
-        destination: Path,
-        *,
-        force: bool = False,
-        use_aria2: bool = True,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
-    ) -> Path:
-        destination = Path(destination)
-        if destination.exists() and not force and destination.stat().st_size > 0:
-            return destination
-
-        destination.parent.mkdir(parents=True, exist_ok=True)
-
-        if use_aria2 and shutil.which("aria2c"):
-            cmd = [
-                "aria2c",
-                "-x",
-                "16",
-                "-s",
-                "16",
-                "-k",
-                "1M",
-                "--check-certificate=false",
-                "--allow-overwrite=true",
-                "--auto-file-renaming=false",
-                "-d",
-                str(destination.parent),
-                "-o",
-                destination.name,
-                url,
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if (
-                result.returncode == 0
-                and destination.exists()
-                and destination.stat().st_size > 0
-            ):
-                return destination
-
-        part_path = destination.with_suffix(destination.suffix + ".part")
-        try:
-            with httpx.Client(
-                timeout=httpx.Timeout(120.0), follow_redirects=True, verify=False
-            ) as dl_client:
-                with dl_client.stream("GET", url, follow_redirects=True) as response:
-                    response.raise_for_status()
-                    total = int(response.headers.get("content-length", 0))
-                    downloaded = 0
-                    with part_path.open("wb") as f:
-                        for chunk in response.iter_bytes(chunk_size=1024 * 1024):
-                            if chunk:
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                if progress_callback:
-                                    progress_callback(downloaded, total)
-            part_path.replace(destination)
-        finally:
-            if part_path.exists():
-                part_path.unlink(missing_ok=True)
-
-        return destination
-
-    @staticmethod
-    def _video_course_id_from_info(info: VideoInfo) -> str:
-        candidates = [
-            info.cour_id,
-            str(info.model_extra.get("courId", "")) if info.model_extra else "",
-            str(info.model_extra.get("courseId", "")) if info.model_extra else "",
-            info.id,
-        ]
-        for value in candidates:
-            if str(value or "").strip():
-                return str(value).strip()
-        raise VideoIntegrationError(
-            "Video info did not include the course id required for subtitles/PPT."
-        )
-
-    def get_subtitle(
-        self, course_id: Optional[int], video_course_id: str
-    ) -> VideoSubtitleBody:
-        self._ensure_auth(course_id)
-        data = self._video_api_json(
-            "POST",
-            SUBTITLE_URL,
-            json_body={"courseId": str(video_course_id)},
-        )
-        if not isinstance(data, Mapping):
-            raise VideoIntegrationError(
-                "SJTU subtitle response did not contain an object."
-            )
-        try:
-            return VideoSubtitleBody.model_validate(data)
-        except ValidationError as exc:
-            raise VideoIntegrationError(
-                "SJTU subtitle response shape is not supported yet."
-            ) from exc
-
-    def get_video_subtitle(self, course_id: int, video_id: str) -> VideoSubtitleBody:
-        info = self.get_video_info(course_id, video_id)
-        return self.get_subtitle(course_id, self._video_course_id_from_info(info))
-
-    def get_ppt_slices(
-        self, course_id: Optional[int], video_course_id: str
-    ) -> List[VideoPPTSlice]:
-        self._ensure_auth(course_id)
-        query = urlencode({"ivsVideoId": str(video_course_id)})
-        data = self._video_api_json("GET", f"{PPT_SLICE_URL}?{query}")
-        if not isinstance(data, list):
-            raise VideoIntegrationError(
-                "SJTU PPT slice response did not contain a list."
-            )
-        try:
-            return [VideoPPTSlice.model_validate(item) for item in data]
-        except ValidationError as exc:
-            raise VideoIntegrationError(
-                "SJTU PPT slice response shape is not supported yet."
-            ) from exc
-
-    def get_video_ppt_slices(
-        self, course_id: int, video_id: str
-    ) -> List[VideoPPTSlice]:
-        info = self.get_video_info(course_id, video_id)
-        return self.get_ppt_slices(course_id, self._video_course_id_from_info(info))
-
-    def download_ppt_image(self, image_url: str) -> Tuple[bytes, str]:
-        """Download one PPT replay image without exposing signed URL details."""
-
-        if not image_url.startswith(("http://", "https://")):
-            raise VideoIntegrationError("PPT image URL is not usable.")
-        headers = {
-            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-            "Referer": VIDEO_UI_REFERER,
-        }
-        if self.video_token:
-            headers["token"] = self.video_token
-        response = self._request(
-            "GET",
-            image_url,
-            headers=headers,
-            follow_redirects=True,
-            service="PPT image",
-        )
-        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
-        if not response.content:
-            raise VideoIntegrationError("PPT image response was empty.")
-        if (
-            content_type
-            and not content_type.startswith("image/")
-            and content_type != "application/octet-stream"
-        ):
-            raise VideoIntegrationError(
-                f"PPT image response was not an image: {content_type}"
-            )
-        return response.content, content_type
-
-
-def video_index_status() -> Dict[str, Any]:
-    return {
-        "status": "implemented-with-local-export",
-        "auth": (
-            "Canvas Access Token -> Canvas sessionless_launch -> SJTU video LTI "
-            "tokenId -> SJTU video API token"
-        ),
-        "read_only_features": [
-            "list course videos",
-            "read video playback metadata",
-            "read subtitles and export SRT",
-            "read PPT replay slice metadata",
-        ],
-        "local_export_features": [
-            "download PPT replay images",
-            "assemble PPT replay images into PDF",
-        ],
-        "subtitle_source": (
-            "Subtitles are fetched from SJTU video API transfer/translate/detail; "
-            "the CLI only converts returned subtitle rows to SRT."
-        ),
-        "not_implemented": [
-            "video binary download",
-            "any assignment submission workflow",
-        ],
-        "endpoints": {
-            "canvas_sessionless_launch": (
-                f"/api/v1/courses/{{course_id}}/external_tools/sessionless_launch?id={VIDEO_LTI_TOOL_ID}"
-            ),
-            "video_list": VIDEO_LIST_URL,
-            "video_info": VIDEO_INFO_URL,
-            "subtitle": SUBTITLE_URL,
-            "ppt_slice": PPT_SLICE_URL,
-        },
-    }

@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from .spec import SECRET_MASK, SettingsSpec
+from core.settings_spec import SECRET_MASK, SettingsSpec
 
 logger = logging.getLogger("lecture_agent.plugins.settings")
 
@@ -186,7 +186,7 @@ class SettingsService:
     the store or the listener list.  ``get`` returns real values (including
     secrets); ``all(public=True)`` masks them.  Every accepted change emits
     ``settings.changed`` with ``key`` / ``old`` / ``new`` when an ``emit``
-    callable was supplied — external plugins observe changes through that
+    callable was supplied. External plugins observe changes through that
     event, never by registering listeners here.
     """
 
@@ -205,6 +205,7 @@ class SettingsService:
         self._owners: dict[str, str] = {}
         self._listeners: list[Listener] = []
         self._lock = threading.RLock()
+        self._sections: dict[str, tuple[str, Callable[[], list[dict[str, Any]]]]] = {}
 
     # ------------------------------------------------------------------
     # Introspection
@@ -223,6 +224,24 @@ class SettingsService:
         with self._lock:
             declared = list(self._specs)
         return list(dict.fromkeys([*sorted(declared), *self._store.keys()]))
+
+    def register_section(
+        self, section_id: str, title: str, render: Callable[[], list[dict[str, Any]]]
+    ) -> None:
+        """Register a settings section whose service owns its persistence."""
+
+        with self._lock:
+            self._sections[section_id] = (title, render)
+        self._notify(f"section:{section_id}")
+
+    def unregister_section(self, section_id: str) -> None:
+        with self._lock:
+            self._sections.pop(section_id, None)
+        self._notify(f"section:{section_id}")
+
+    def sections(self) -> list[tuple[str, Callable[[], list[dict[str, Any]]]]]:
+        with self._lock:
+            return list(self._sections.values())
 
     # ------------------------------------------------------------------
     # Listener plumbing (plugin-internal: UI refresh, toolbox sync, ...)

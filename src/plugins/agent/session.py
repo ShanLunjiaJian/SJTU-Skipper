@@ -1,4 +1,4 @@
-"""AgentSession: per-conversation state with thread-safe message history."""
+"""Application metadata for a conversation owned by the SDK."""
 
 from __future__ import annotations
 
@@ -8,153 +8,46 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from .tools import ToolSpec
 from .workspace import FileWorkspace
 
 
 @dataclass(slots=True)
 class AgentSession:
-    """A single agent conversation: its own history, tools, workspace and lock.
-
-    Messages are stored as plain dicts compatible with the LLM layer's
-    ``Message`` and ``ChatRequest.messages``.  The lock prevents concurrent
-    ``run`` calls on the same session.
-    """
+    """Keep display messages and task metadata outside the SDK context."""
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    """Unique session identifier (12 hex chars)."""
-
     name: str = "default"
-    """Human-readable label shown in the session list."""
-
-    system_prompt: str = ""
-    """Effective system prompt used at the start of every ``run``."""
-
-    messages: list[dict[str, Any]] = field(default_factory=list)
-    """Thread-safe message history (role/content/tool_calls/tool_call_id/…)."""
-
-    workspace: FileWorkspace = field(default_factory=FileWorkspace)
-    """Files the agent tools are allowed to read/write."""
-
-    tools: dict[str, ToolSpec] = field(default_factory=dict)
-    """Tool name → ToolSpec mapping."""
-
-    model: str = ""
-    """LLM model name for this session."""
-
-    max_steps: int = 12
-    """Maximum REPL iterations; ``0`` means unlimited (run until the model stops)."""
-
-    final_answer_on_limit: bool = False
-    """When True, the last allowed iteration runs without tools and must answer.
-
-    Used by read-only Q&A sessions: reading is a means to an end, so a model
-    that keeps calling tools should still produce an answer instead of dying
-    with ``max_steps exceeded``.  Writing agents leave it off (their last step
-    is better spent editing a file).
-    """
-
+    role: str = "agent_chat"
     agent: str = ""
-    """Name of the registered agent profile this session was created from."""
-
-    stream: bool = False
-    """When True, runs use the provider's streaming API and emit deltas."""
-
-    max_tool_output: int = 8000
-    """Tool output longer than this is truncated before being sent to the LLM."""
-
-    max_history_chars: int = 0
-    """Cap (characters) on tool results kept in the LLM payload.
-
-    Older tool results are spilled to hidden workspace files and replaced by a
-    pointer, so a long ``read``-driven run does not blow the context window.
-    ``0`` keeps everything.  Assistant/user messages are always kept.
-    """
-
-    max_tokens: int = 0
-    """Per-call output token cap (0 = provider default)."""
-
-    llm_extra: dict[str, Any] = field(default_factory=dict)
-    """Extra request-body fields (e.g. ``{"reasoning_effort": "max"}``)."""
-
-    extra_instructions: tuple[str, ...] = ()
-    """Per-session instructions appended to the system prompt on every run."""
-
-    parent_id: str | None = None
-    """Session id this session was forked from (or None)."""
-
+    system_prompt: str = ""
+    workspace: FileWorkspace = field(default_factory=FileWorkspace)
+    tools: tuple[str, ...] = ()
+    model: str = ""
+    messages: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
-    """Unix timestamp when the session was created."""
-
     lock: threading.RLock = field(default_factory=threading.RLock)
-    """Acquired during ``run``; prevents concurrent execution."""
-
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    runtime_ready: bool = False
     meta: dict[str, Any] = field(default_factory=dict)
-    """Arbitrary caller metadata (not used by the agent core)."""
-
-    # ------------------------------------------------------------------
-    # Message helpers
-    # ------------------------------------------------------------------
-    def add_message(self, role: str, content: str, **kwargs: Any) -> dict[str, Any]:
-        """Append a message to the history (thread-safe).
-
-        Returns the new message dict so callers can mutate it in-place
-        (e.g. adding ``tool_calls`` after the assistant message is created).
-        """
-        msg: dict[str, Any] = {"role": role, "content": content}
-        msg.update(kwargs)
-        with self.lock:
-            self.messages.append(msg)
-        return msg
-
-    def last_assistant(self) -> dict[str, Any] | None:
-        """Return the most recent assistant message, or None."""
-        with self.lock:
-            for msg in reversed(self.messages):
-                if msg.get("role") == "assistant":
-                    return msg
-        return None
-
-    def spill_tool_output(self, content: str) -> str:
-        """Write a tool result to a hidden workspace file; return its name."""
-
-        return self.workspace.spill(content, prefix="tool-output")
-
-    def clear_messages(self) -> None:
-        """Drop all messages (used by ``reset``)."""
-        with self.lock:
-            self.messages.clear()
 
     def to_dict(self) -> dict[str, Any]:
-        """Summary for the session list UI.
-
-        Must never block: a running session holds its lock for the whole run,
-        and this is called from the UI render path.  A plain list snapshot is
-        enough — ``messages`` is only appended to.
-        """
-        if self.lock.acquire(timeout=0.05):
-            try:
-                messages = list(self.messages)
-            finally:
-                self.lock.release()
-        else:
-            messages = list(self.messages)
-        msg_count = len(messages)
-        last_content = ""
-        for m in reversed(messages):
-            if m.get("role") == "assistant" and m.get("content"):
-                last_content = str(m["content"])[:120]
-                break
+        # This snapshot must not wait for a running model request.
+        messages = list(self.messages)
+        last = next(
+            (
+                str(message["content"])[:120]
+                for message in reversed(messages)
+                if message.get("role") == "assistant" and message.get("content")
+            ),
+            "",
+        )
         return {
             "id": self.id,
             "name": self.name,
+            "role": self.role,
             "model": self.model,
-            "max_steps": self.max_steps,
-            "message_count": msg_count,
-            "parent_id": self.parent_id,
+            "message_count": len(messages),
             "created_at": self.created_at,
-            "last_message": last_content,
-            # Background workers (summarize / instant-summarize / ask) mark
-            # their sessions; the UI hides them without knowing any names.
+            "last_message": last,
             "internal": bool(self.meta.get("internal")),
         }

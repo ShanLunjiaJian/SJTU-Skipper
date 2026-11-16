@@ -31,10 +31,6 @@ class InstantSummarizePlugin(Plugin):
         for key, default, kind, label in (
             ("system_prompt", SYSTEM, "string", "系统提示词"),
             ("enabled", True, "bool", "分段笔记"),
-            ("model", "", "string", "模型"),
-            ("max_steps", 12, "int", "最大步数"),
-            ("max_tool_output", 24000, "int", "工具输出上限"),
-            ("retry_max", 2, "int", "最大重试次数"),
         ):
             self.settings.register(
                 SettingsSpec(
@@ -69,11 +65,10 @@ class InstantSummarizePlugin(Plugin):
                 "label": "分段笔记",
                 "checked": bool(self.settings.get("instant-summarize.enabled", True)),
                 "action": "instant-summarize.toggle",
-                "hint": "直播和录播均可生成未审阅预览",
             },
             {
                 "type": "text",
-                "text": f"未审阅；已发布至 {status['published_end']:.0f} 秒；缺口 {len(status['errors'])} 项",
+                "text": f"已发布至 {status['published_end']:.0f} 秒；缺口 {len(status['errors'])} 项",
             },
             {
                 "type": "buttons",

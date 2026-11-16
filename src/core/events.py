@@ -100,9 +100,6 @@ class EventBus:
             self._types[name] = event_type
             return event_type
 
-    #: Alias matching the "create event" wording in the plugin API.
-    create = define
-
     def on(
         self,
         event_type: str | EventType,
@@ -216,11 +213,6 @@ class EventBus:
                 return event
             self._queue.put(event)
             return event
-
-    def emit_event(self, event: Event) -> None:
-        with self._lock:
-            self._pending += 1
-            self._queue.put(event)
 
     def flush(self, timeout: float | None = 10.0) -> bool:
         """Wait until every emitted event has been dispatched."""

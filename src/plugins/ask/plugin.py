@@ -30,11 +30,6 @@ SELECTION_ID = "ask.ask"
 INSTANT = "instant"
 RESEARCH = "research"
 
-# Tool parameters for the research intensity; the read line cap lives here,
-# not inside the tool implementation.
-READ_MAX_LINES_DEFAULT = 50
-SEARCH_MAX_HITS_DEFAULT = 200
-
 
 class AskService:
     """Narrow public ``ask`` service (1 method)."""
@@ -63,6 +58,9 @@ class AskPlugin(Plugin):
         self._settings = ctx.require("settings")
         self._agent = ctx.require("agent")
         self._reader = ctx.require("reader")
+        self._active: set[str] = set()
+        self._active_lock = threading.Lock()
+        self._closed = False
 
         for spec in _SETTING_SPECS:
             self._settings.register(spec)
@@ -91,6 +89,10 @@ class AskPlugin(Plugin):
     def teardown(self) -> None:
         """Drop the UI action and the selection-menu item this plugin added."""
 
+        with self._active_lock:
+            self._closed = True
+            for session_id in tuple(self._active):
+                self._agent.cancel(session_id)
         ctx = getattr(self, "ctx", None)
         if ctx is not None:
             try:
@@ -111,22 +113,6 @@ class AskPlugin(Plugin):
         return self._settings.get(f"ask.{key}", default)
 
     @property
-    def _model(self) -> str:
-        return str(self._setting("model", "") or "")
-
-    @property
-    def _instant_max_tokens(self) -> int:
-        return max(1000, int(self._setting("instant_max_tokens", 16000)))
-
-    @property
-    def _research_max_tokens(self) -> int:
-        return max(1000, int(self._setting("research_max_tokens", 131072)))
-
-    @property
-    def _research_max_steps(self) -> int:
-        return max(1, int(self._setting("research_max_steps", 24)))
-
-    @property
     def _before_words(self) -> int:
         return max(0, int(self._setting("before_words", 2000)))
 
@@ -141,14 +127,6 @@ class AskPlugin(Plugin):
     @property
     def _selection_words(self) -> int:
         return max(50, int(self._setting("selection_words", 800)))
-
-    @property
-    def _read_max_lines(self) -> int:
-        return max(1, int(self._setting("read_max_lines", READ_MAX_LINES_DEFAULT)))
-
-    @property
-    def _search_max_hits(self) -> int:
-        return max(1, int(self._setting("search_max_hits", SEARCH_MAX_HITS_DEFAULT)))
 
     @property
     def _instant_prompt(self) -> str:
@@ -234,35 +212,39 @@ class AskPlugin(Plugin):
         )
         prompt = self._build_prompt(path, context, selection, intensity)
         files = self._workspace_files(path) if intensity == RESEARCH else {}
-        snapshot = tempfile.TemporaryDirectory(prefix="notes-ask-")
-        frozen = {}
-        with publication_lock(Path(path).parent):
-            for name, original in files.items():
-                destination = Path(snapshot.name) / name
-                destination.write_bytes(Path(original).read_bytes())
-                frozen[name] = destination
-        workspace = FileWorkspace(frozen, readonly=frozen)
-
-        profile = self._profile(intensity)
-        self._agent.register_agent(profile)
-        session = self._agent.create_session(
-            name=f"ask-{qa_id}",
-            agent=profile.name,
-            workspace=workspace,
-            meta={
-                "internal": True,
-                "role": "ask",
-                "qa_id": qa_id,
-                "intensity": intensity,
-            },
-        )
-
         started = time.time()
-        try:
-            result = self._agent.run(session.id, prompt, on_event=live.on_event)
-        finally:
-            self._agent.close(session.id)
-            snapshot.cleanup()
+        with tempfile.TemporaryDirectory(prefix="notes-ask-") as snapshot:
+            frozen = {}
+            with publication_lock(Path(path).parent):
+                for name, original in files.items():
+                    destination = Path(snapshot) / name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(Path(original).read_bytes())
+                    frozen[name] = destination
+            profile = self._profile(intensity)
+            with self._active_lock:
+                if self._closed:
+                    raise RuntimeError("Ask service is closed")
+                session = self._agent.create_session(
+                    name=f"ask-{qa_id}",
+                    agent=profile,
+                    workspace=FileWorkspace(frozen, readonly=frozen),
+                    meta={
+                        "internal": True,
+                        "role": "ask",
+                        "qa_id": qa_id,
+                        "intensity": intensity,
+                    },
+                )
+                self._active.add(session.id)
+            try:
+                result = self._agent.run(session.id, prompt, on_event=live.on_event)
+            finally:
+                try:
+                    self._agent.close(session.id)
+                finally:
+                    with self._active_lock:
+                        self._active.discard(session.id)
 
         self.ctx.logger.info(
             "ask %s finished in %.1fs: intensity=%s steps=%s tokens=%s error=%s",
@@ -278,33 +260,15 @@ class AskPlugin(Plugin):
         return result.final_message.strip() or "（模型没有返回内容）"
 
     def _profile(self, intensity: str) -> AgentProfile:
-        if intensity == INSTANT:
-            return AgentProfile(
-                name="ask.instant",
-                system_prompt=self._instant_prompt,
-                tools=[],
-                model=self._model or None,
-                max_steps=1,
-                max_tokens=self._instant_max_tokens,
-                stream=True,
-            )
-        research_prompt = self._research_prompt
-        if "{read_max_lines}" in research_prompt:
-            research_prompt = research_prompt.format(
-                read_max_lines=self._read_max_lines
-            )
         return AgentProfile(
-            name="ask.research",
-            system_prompt=research_prompt,
-            tools=[
-                AgentTool("read", {"max_lines": self._read_max_lines}),
-                AgentTool("search", {"max_hits": self._search_max_hits}),
-            ],
-            model=self._model or None,
-            max_steps=self._research_max_steps,
-            max_tokens=self._research_max_tokens,
-            final_answer_on_limit=True,
-            stream=True,
+            name=f"ask.{intensity}",
+            role="ask_instant" if intensity == INSTANT else "ask_research",
+            system_prompt=self._instant_prompt
+            if intensity == INSTANT
+            else self._research_prompt,
+            tools=[]
+            if intensity == INSTANT
+            else [AgentTool(name) for name in ("read", "grep", "glob")],
         )
 
     def _build_prompt(
@@ -318,8 +282,7 @@ class AskPlugin(Plugin):
         if intensity == RESEARCH:
             readable = "、".join(f"`{item}`" for item in self._workspace_files(path))
             instructions = (
-                f"可以先 `search` 再用 `read` 核对材料；`read` 单次最多 {self._read_max_lines} 行。\n"
-                f"可读文件：{readable}。"
+                f"可用 read、grep、glob 核对完整授权材料．可读文件：{readable}．"
             )
         else:
             instructions = "材料已经足够，直接回答；本题没有工具可用。"
@@ -342,6 +305,7 @@ class AskPlugin(Plugin):
     def _workspace_files(self, path: str) -> dict[str, str]:
         note = Path(path)
         names = set()
+        names.add(note.name)
         for owner in ("summarize", "instant-summarize"):
             service = self.ctx.service(owner)
             if service is not None:
@@ -454,6 +418,7 @@ class _Live:
                 self._tools.append(
                     {
                         "name": name,
+                        "id": data.get("id", data.get("tool_call_id")),
                         "detail": _tool_detail(name, arguments),
                         "done": False,
                     }
@@ -469,8 +434,11 @@ class _Live:
                 str(data.get("result", ""))[:500],
             )
             with self._lock:
-                for tool in reversed(self._tools):
-                    if not tool["done"]:
+                call_id = data.get("id", data.get("tool_call_id"))
+                for tool in self._tools:
+                    if not tool["done"] and (
+                        call_id is None or tool.get("id") == call_id
+                    ):
                         tool["done"] = True
                         break
             self.publish(force=True)
@@ -537,15 +505,11 @@ class _Live:
 
 def _tool_detail(name: str, arguments: Mapping[str, Any]) -> str:
     if name == "read":
-        file = arguments.get("file", "?")
-        left = arguments.get("l", 1)
-        right = arguments.get("r", -1)
-        return f"{file} {left}-{right}"
-    if name == "search":
-        keywords = arguments.get("keywords") or []
-        file = arguments.get("file")
-        text = "、".join(str(item) for item in keywords)
-        return f"{text} @ {file}" if file else text
+        return str(arguments.get("path", "?"))
+    if name == "grep":
+        return f"{arguments.get('pattern', '')} @ {arguments.get('path', '*')}"
+    if name == "glob":
+        return str(arguments.get("pattern", arguments.get("path", "*")))
     return json.dumps(arguments, ensure_ascii=False)[:120]
 
 
@@ -590,38 +554,6 @@ def _format_history(entries: list[dict[str, str]]) -> str:
 # ---------------------------------------------------------------------------
 _SETTING_SPECS: list[SettingsSpec] = [
     SettingsSpec(
-        key="ask.model",
-        label="提问模型",
-        type="string",
-        default="",
-        group="提问",
-        description="回答提问使用的模型（空=agent 默认）",
-    ),
-    SettingsSpec(
-        key="ask.instant_max_tokens",
-        label="快速模式输出上限",
-        type="int",
-        default=16000,
-        group="提问",
-        description="快速模式单次调用的输出 token 上限（含思考 token）",
-    ),
-    SettingsSpec(
-        key="ask.research_max_tokens",
-        label="研究模式输出上限",
-        type="int",
-        default=131072,
-        group="提问",
-        description="研究模式单次调用的输出 token 上限（含思考 token）",
-    ),
-    SettingsSpec(
-        key="ask.research_max_steps",
-        label="研究模式步数上限",
-        type="int",
-        default=24,
-        group="提问",
-        description="研究模式最多几轮工具调用；最后一步强制直接回答",
-    ),
-    SettingsSpec(
         key="ask.before_words",
         label="选中前文词数",
         type="int",
@@ -654,22 +586,6 @@ _SETTING_SPECS: list[SettingsSpec] = [
         description="选中片段送入模型的上限，超出部分截断",
     ),
     SettingsSpec(
-        key="ask.read_max_lines",
-        label="研究模式 read 行数",
-        type="int",
-        default=50,
-        group="提问",
-        description="研究模式单次 read 最多返回的行数",
-    ),
-    SettingsSpec(
-        key="ask.search_max_hits",
-        label="search 命中上限",
-        type="int",
-        default=200,
-        group="提问",
-        description="search 工具最多返回的命中行数",
-    ),
-    SettingsSpec(
         key="ask.instant_prompt",
         label="快速模式提示词",
         type="text",
@@ -683,7 +599,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         type="text",
         default=RESEARCH_SYSTEM_PROMPT,
         group="提问",
-        description="研究模式（search + read）的系统提示词；支持 {read_max_lines}",
+        description="研究模式只读答疑的系统提示词",
     ),
 ]
 

@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
@@ -27,7 +28,6 @@ from PIL import Image
 
 from core.coverage import CoverageStore, skip_coverage
 from core.events import Event
-from core.pipeline import WindowError
 from core.plugin import Plugin, PluginContext
 from core.settings_spec import SettingsSpec
 from core.streams import VideoFrame
@@ -78,6 +78,9 @@ class VLMService:
 
         return self._plugin.flushing()
 
+    def cancel(self, session_id: str) -> None:
+        self._plugin.cancel(session_id)
+
     def process_window(self, start: float, end: float) -> list[dict[str, Any]]:
         """Force-process one window of the current video stream."""
 
@@ -114,6 +117,7 @@ class VlmPlugin(Plugin):
         self._page_added = False
         self._command_added = False
         self._consumer_registered = False
+        self._cancelled_sessions: set[str] = set()
 
     # ----------------------------------------------------------------
     # Lifecycle
@@ -143,6 +147,9 @@ class VlmPlugin(Plugin):
         self._history: deque[str] = deque(maxlen=3)
         self._next_center: float = 10.0
         self._sessions: dict[str, Any] = {}
+        self._cancelled_sessions: set[str] = set()
+        self._submitted_requests: set[str] = set()
+        self._requests: dict[str, str] = {}
         self._session_history: dict[str, deque[str]] = {}
         self._disabled_at: dict[str, float] = {}
         self._prepare_pool = ThreadPoolExecutor(
@@ -157,7 +164,6 @@ class VlmPlugin(Plugin):
         self._register_consumer(ctx)
 
         ctx.events.on("session.started", self._on_session_started, plugin_id=self.id)
-        ctx.events.on("session.stopped", self._on_session_stopped, plugin_id=self.id)
         ctx.events.on("settings.changed", self._on_settings_changed, plugin_id=self.id)
 
         enabled = self._setting("vlm.enabled", True)
@@ -170,6 +176,9 @@ class VlmPlugin(Plugin):
             self._stop_event.set()
             worker = self._worker
             self._worker = None
+            requests = set(self._requests.values())
+        for sid in requests:
+            self.cancel(sid)
         if worker is not None and worker.is_alive():
             worker.join(timeout=3.0)
         self._prepare_pool.shutdown(wait=True, cancel_futures=True)
@@ -238,15 +247,7 @@ class VlmPlugin(Plugin):
                 default=True,
                 group="VLM",
                 description="是否启动 VLM 板书识别工作线程",
-                group_note="VLM 复用「LLM」分组中的 Base URL / API Key；本组只配置板书识别模型与处理参数。",
-            ),
-            SettingsSpec(
-                key="vlm.model",
-                label="VLM 模型",
-                type="string",
-                default="deepseek-flash",
-                group="VLM",
-                description="视觉语言模型；连接与 API Key 使用「LLM」分组。",
+                group_note="识别模型在 LLM 的 roles.yml 中由 board_recognition 配置．",
             ),
             SettingsSpec(
                 key="vlm.window_seconds",
@@ -345,6 +346,20 @@ class VlmPlugin(Plugin):
         service = VLMService(self)
         self._service = service
         self._ctx.register_service("vlm", service)
+
+    def cancel(self, session_id: str) -> None:
+        with self._lock:
+            self._cancelled_sessions.add(session_id)
+            requests = [
+                key
+                for key, sid in self._requests.items()
+                if sid == session_id and key in self._submitted_requests
+            ]
+            session = self._ctx.streams.get_session(session_id)
+        if session is not None:
+            session.video_gate.close()
+        for key in requests:
+            self._ctx.llm.runtime.cancel(key)
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -542,18 +557,39 @@ class VlmPlugin(Plugin):
                 ),
             },
         ]
-        response = ctx.llm.chat(
-            profile="vlm",
-            model=str(self._setting("vlm.model", "") or "") or None,
-            messages=messages,
-            temperature=0.1,
-            max_tokens=2048,
-            extra={
-                "thinking": {"type": "disabled"},
-                "frequency_penalty": 0.2,
-                "presence_penalty": 0.2,
-            },
-        )
+        session = self._processing_session or ctx.streams.current
+        sid = session.session_id
+        request_id = f"vlm_{sid}_{time.monotonic_ns()}"
+        with self._lock:
+            if sid in self._cancelled_sessions:
+                raise RuntimeError("VLM session cancelled")
+            self._requests[request_id] = sid
+
+        def sent():
+            with self._lock:
+                self._submitted_requests.add(request_id)
+                cancelled = sid in self._cancelled_sessions
+            if cancelled:
+                ctx.llm.runtime.cancel(request_id)
+
+        try:
+            response = ctx.llm.chat(
+                role="board_recognition",
+                messages=messages,
+                temperature=0.1,
+                session_id=request_id,
+                on_sent=sent,
+            )
+        finally:
+            with self._lock:
+                self._requests.pop(request_id, None)
+                self._submitted_requests.discard(request_id)
+        if sid in self._cancelled_sessions:
+            raise RuntimeError("VLM session cancelled")
+        if response.finish_reason == "length":
+            raise RuntimeError(
+                "VLM output reached the model token limit; transcription is incomplete"
+            )
         text = getattr(response, "content", str(response)).strip()
         return collapse_repetitions(text)
 
@@ -622,6 +658,11 @@ class VlmPlugin(Plugin):
                 else:
                     self._process_next_window()
             except Exception as exc:
+                if (
+                    session is not None
+                    and session.session_id in self._cancelled_sessions
+                ):
+                    continue
                 logger.exception("VLM worker iteration failed")
                 self._last_error = f"{type(exc).__name__}: {exc}"
                 self._consecutive_errors += 1
@@ -629,12 +670,17 @@ class VlmPlugin(Plugin):
                 if ctx is not None:
                     ctx.events.emit(
                         "vlm.error",
-                        session_id=ctx.streams.current.session_id,
+                        session_id=session.session_id,
                         error=self._last_error,
                     )
                     ctx.ui.refresh("vlm.error")
-                backoff = min(10.0, 0.5 * (2 ** min(self._consecutive_errors, 5)))
-                self._stop_event.wait(backoff)
+                if session is not None:
+                    self.cancel(session.session_id)
+                    ctx.events.emit(
+                        "input.error",
+                        session_id=session.session_id,
+                        message=f"VLM failed: {self._last_error}",
+                    )
             else:
                 self._consecutive_errors = 0
                 self._last_error = ""
@@ -728,6 +774,8 @@ class VlmPlugin(Plugin):
         if ctx is None:
             return
         session = self._processing_session or ctx.streams.current
+        if session.session_id in self._cancelled_sessions:
+            return
         dur = session.video.duration
         window = self._window_seconds()
         with self._lock:
@@ -849,18 +897,6 @@ class VlmPlugin(Plugin):
 
         ctx = self._ctx
         session = self._processing_session or ctx.streams.current
-        if isinstance(result, WindowError):
-            session.video_gate.release(end)
-            session.video.trim(max(0.0, float(end) - 30.0))
-            ctx.events.emit(
-                "vlm.error",
-                session_id=session.session_id,
-                start=start,
-                end=end,
-                error=f"{type(result.error).__name__}: {result.error}",
-            )
-            ctx.ui.refresh("vlm.error")
-            return {"ok": False, "start": start, "end": end, "error": str(result.error)}
 
         text = str(result.get("text", "") or "")
         image_path = str(result.get("image_path", "") or "")
@@ -874,7 +910,7 @@ class VlmPlugin(Plugin):
             start=start,
             end=end,
             chars=len(text),
-            model=self._setting("vlm.model", "deepseek-flash"),
+            role="board_recognition",
         )
 
         threshold = self._setting("vlm.dedupe_threshold", 0.92)
@@ -904,7 +940,7 @@ class VlmPlugin(Plugin):
                 "text": text[:400],
             }
         logger.info(
-            "VLM window %s–%s: %s (%d chars)",
+            "VLM window %s-%s: %s (%d chars)",
             _fmt_time(start),
             _fmt_time(end),
             note,
@@ -1004,6 +1040,8 @@ class VlmPlugin(Plugin):
                 return True
             ctx = self._ctx
             session = ctx.streams.current if ctx is not None else None
+            if session is not None and session.session_id in self._cancelled_sessions:
+                return False
             if session is None or not session.input_done:
                 return False
             if str(session.meta.get("mode", "")) != "fast":
@@ -1053,6 +1091,8 @@ class VlmPlugin(Plugin):
 
         try:
             while not self._stop_event.is_set():
+                if sid in self._cancelled_sessions:
+                    return
                 available = session.video.duration
                 # Frames between sampling windows are never used; keep the
                 # last window so the end-of-media flush still has data.
@@ -1124,13 +1164,14 @@ class VlmPlugin(Plugin):
                 session.session_id, "visual", self.enabled()
             )
 
-    def _on_session_stopped(self, event: Event) -> None:
-        return
-
     def _select_session(self):
         current = self._ctx.streams.current
         self._sessions[current.session_id] = current
         for session in list(self._sessions.values()):
+            if session.session_id in self._cancelled_sessions or session.meta.get(
+                "input_failed"
+            ):
+                continue
             if self._ctx.streams.text_progress(session.session_id, "visual").final:
                 continue
             cursor = self._recording_cursor.get(session.session_id, 0.0)

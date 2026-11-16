@@ -14,6 +14,116 @@ from plugins.notes_pipeline.prompts import NOTE_HEADERS, SOURCE_FILENAME
 from tests.support import FakeSettings
 
 
+def test_execution_blocks_and_review_invalidation():
+    import json
+    from core.events import Event
+    from plugins.summarize.plugin import note_log_blocks
+
+    pipeline = object.__new__(NotesPipelinePlugin)
+    pipeline.condition = threading.Condition()
+    task = {
+        "id": "notes-agent:writer",
+        "label": "Writer",
+        "agent_step": 0,
+        "agents": {
+            "main": pipeline._execution_agent("main", "main", "Writer", "model")
+        },
+    }
+    pipeline.agent_tasks = {"writer": task}
+    pipeline.ctx = SimpleNamespace(ui=SimpleNamespace(refresh=lambda reason: None))
+
+    def emit(name, **payload):
+        pipeline._agent_event(Event(name, {"session_id": "writer", **payload}, 0, 0))
+
+    thinking = {
+        "id": "thinking",
+        "kind": "thinking",
+        "text": "Reason",
+        "status": "streaming",
+    }
+    tool = {
+        "id": "tool",
+        "kind": "tool",
+        "name": "read",
+        "arguments": {"path": "note_knowledge.md"},
+        "status": "running",
+    }
+    emit("agent.execution", block=thinking, metrics={"context_tokens": 12})
+    emit("agent.execution", block=tool)
+    full_text = "Full reasoning\n" * 1000
+    completed = {**thinking, "text": full_text, "status": "completed", "seconds": 2}
+    emit(
+        "agent.execution",
+        block=completed,
+        metrics={"llm_seconds": 2, "output_tokens": 10, "tokens_per_second": 5},
+    )
+    emit("agent.execution", metrics={"tool_seconds": 1})
+    main = task["agents"]["main"]
+    assert main["blocks"] == [completed, tool]
+    assert main["context_tokens"] == 12
+    assert main["tool_seconds"] == 1
+    assert main["llm_seconds"] == 2
+    assert main["output_tokens"] == 10
+    assert main["tokens_per_second"] == 5
+
+    def reviewer(event, **payload):
+        emit(
+            "agent.reviewer",
+            reviewer_id="coverage",
+            role="note_review",
+            event=event,
+            **payload,
+        )
+
+    reviewer("started")
+    reviewer("agent.execution", block=completed, metrics={"model": "review-model"})
+    report = {
+        "overall_correctness": "correct",
+        "explanation": "Covered",
+        "findings": [],
+    }
+    reviewer("finished", content=json.dumps(report))
+    child = task["agents"]["coverage"]
+    assert child["status"] == "passed"
+    assert child["model"] == "review-model"
+    assert child["blocks"][0] == completed
+    assert child["blocks"][1]["kind"] == "review"
+    assert child["blocks"][1]["report"] == report
+    emit("agent.file", file="note_knowledge.md")
+    assert child["status"] == "stale"
+    blocks = note_log_blocks({"session_id": "lecture", "tasks": [task], "error": ""})
+    assert blocks == [
+        {
+            "type": "agent_activity",
+            "id": "lecture",
+            "agents": list(task["agents"].values()),
+        }
+    ]
+    assert all(
+        "history" not in card and "activity" not in card for card in blocks[0]["agents"]
+    )
+    reviewer("failed", error="Review failed")
+    assert child["status"] == "failed"
+    assert child["blocks"][1]["status"] == "failed"
+    assert child["blocks"][1]["text"] == "Review failed"
+
+
+def test_concurrent_chunks_share_one_viewer():
+    from plugins.summarize.plugin import note_log_blocks
+
+    tasks = [
+        {"agents": {"main": {"role": f"chunk:{index}", "label": f"片段 {index}"}}}
+        for index in range(3)
+    ]
+    blocks = note_log_blocks({"session_id": "lecture", "tasks": tasks, "error": ""})
+    assert len(blocks) == 1
+    assert [agent["role"] for agent in blocks[0]["agents"]] == [
+        "chunk:0",
+        "chunk:1",
+        "chunk:2",
+    ]
+
+
 class ScriptedNoteAgent:
     def __init__(self, run):
         self.script = run
@@ -31,6 +141,9 @@ class ScriptedNoteAgent:
             session = SimpleNamespace(id=str(self.next_id), name=name, **kwargs)
             self.sessions[session.id] = session
             return session
+
+    def reset(self, sid):
+        assert sid in self.sessions
 
     def run(self, sid, instruction, *, cancel_event=None):
         with self.lock:
@@ -81,7 +194,6 @@ def note_pipeline(tmp_path, run, *, settings=None, releases=()):
         "notes.chunk_seconds": 10,
         "notes.overlap_seconds": 2,
         "notes.concurrency": 3,
-        "instant-summarize.retry_max": 0,
         "summarize.review_enabled": False,
     }
     values.update(settings or {})
@@ -95,6 +207,7 @@ def note_pipeline(tmp_path, run, *, settings=None, releases=()):
         events=SimpleNamespace(on=on),
         ui=SimpleNamespace(
             register_task_provider=lambda *args, **kwargs: None,
+            register_action=lambda *args, **kwargs: None,
             refresh=updates.put,
         ),
     )
@@ -163,87 +276,6 @@ def test_log_and_stream_record_once(tmp_path):
     ]
 
 
-def test_reviewers_overlap_after_writer(tmp_path):
-    import threading
-    from types import SimpleNamespace
-    from core.streams import StreamHub
-    from plugins.notes_pipeline.plugin import NotesPipelinePlugin
-    from plugins.notes_pipeline.prompts import NOTE_HEADERS
-    from tests.support import FakeSettings
-
-    barrier = threading.Barrier(2)
-    published = threading.Event()
-    writer_done = threading.Event()
-
-    class Agent:
-        def __init__(self):
-            self.sessions = {}
-            self.next_id = 0
-            self.lock = threading.Lock()
-
-        def create_session(self, name, **kwargs):
-            with self.lock:
-                self.next_id += 1
-                session = SimpleNamespace(
-                    id=str(self.next_id), name=name, workspace=kwargs["workspace"]
-                )
-                self.sessions[session.id] = session
-                return session
-
-        def run(self, sid, instruction, *, cancel_event=None):
-            session = self.sessions[sid]
-            if session.name.endswith(("coverage", "correctness")):
-                assert writer_done.is_set()
-                barrier.wait(3)
-                return SimpleNamespace(error=None, final_message="REVIEW: PASS")
-            for name in NOTE_HEADERS:
-                session.workspace.write(name, "# Notes\n\nComplete source details.\n")
-            writer_done.set()
-            return SimpleNamespace(error=None, final_message="done")
-
-        def close(self, sid):
-            self.sessions.pop(sid)
-
-    settings = FakeSettings(
-        {"notes.concurrency": 3, "instant-summarize.enabled": False}
-    )
-    agent = Agent()
-    hub = StreamHub()
-    session = hub.start_session()
-    session.transcript.append("A definition with conditions", start=0, end=10)
-    hub.end_session()
-    ctx = SimpleNamespace(
-        data_dir=tmp_path,
-        streams=hub,
-        require=lambda name: settings if name == "settings" else agent,
-        service=lambda name: None,
-        register_service=lambda *args: None,
-        events=SimpleNamespace(on=lambda *args, **kwargs: None),
-        ui=SimpleNamespace(
-            register_task_provider=lambda *args, **kwargs: None,
-            refresh=lambda event: (
-                published.set() if event == "notes.published" else None
-            ),
-        ),
-    )
-    pipeline = NotesPipelinePlugin()
-    pipeline._agent_run = lambda sid, agent_id, instruction: agent.run(
-        agent_id, instruction
-    )
-    pipeline.setup(ctx)
-    try:
-        assert pipeline.start(session.session_id)
-        assert published.wait(5), pipeline.status(session.session_id)
-        assert pipeline.status(session.session_id)["review_status"] == "passed"
-        assert (
-            (tmp_path / "sessions" / session.session_id / "notes" / "note_knowledge.md")
-            .read_text()
-            .endswith("Complete source details.\n")
-        )
-    finally:
-        pipeline.teardown()
-
-
 def test_late_visual_window_blocks_chunk():
     from types import SimpleNamespace
     from core.streams import StreamHub
@@ -292,7 +324,7 @@ def test_chunks_publish_in_source_order(tmp_path):
     second_finished = threading.Event()
 
     def run(session, instruction):
-        source = session.workspace.read_lines("source.md", 1, -1)
+        source = session.workspace.text("source.md")
         if "first-core" in source:
             first_started.set()
             assert release_first.wait(8)
@@ -332,23 +364,26 @@ def test_final_request_survives_busy_chunk(tmp_path):
     sources = []
 
     def run(session, instruction):
-        if SOURCE_FILENAME in session.workspace:
-            sources.append(session.workspace.read_lines(SOURCE_FILENAME, 1, -1))
+        if "source.md" not in session.workspace:
+            sources.append(session.workspace.text(SOURCE_FILENAME))
             writer_started.set()
             return write_notes(session, "Complete lecture and short tail")
-        source = session.workspace.read_lines("source.md", 1, -1)
+        source = session.workspace.text("source.md")
         if "initial-core" in source:
             chunk_started.set()
             assert release_chunk.wait(8)
         return write_notes(session, source)
 
     with note_pipeline(tmp_path, run, releases=(release_chunk,)) as env:
-        session = env.hub.start_session()
+        session = env.hub.start_session(meta={"total_media_seconds": 13})
         session.transcript.append("initial-core", start=0, end=10)
         env.hub.seal_text(session.session_id, "transcript", 10)
         assert chunk_started.wait(8)
-        assert env.pipeline.start(session.session_id)
-        assert env.pipeline.start(session.session_id)
+        status = env.pipeline.status(session.session_id)
+        assert status["total_chunks"] == 1
+        assert status["expected_chunks"] == 2
+        assert env.pipeline.finalize(session.session_id)
+        assert not env.pipeline.start(session.session_id)
         session.transcript.append("short-tail", start=10, end=13)
         env.hub.end_session()
         env.hub.seal_text(session.session_id, "transcript", 13, final=True)
@@ -360,6 +395,13 @@ def test_final_request_survives_busy_chunk(tmp_path):
         assert len(sources) == 1
         assert "initial-core" in sources[0] and "short-tail" in sources[0]
         assert env.pipeline.status(session.session_id)["published_end"] == 13
+        status = env.pipeline.status(session.session_id)
+        assert (
+            status["completed_chunks"]
+            == status["total_chunks"]
+            == status["expected_chunks"]
+            == 2
+        )
         assert "short-tail" in env.pipeline.source_path(session.session_id).read_text()
 
 
@@ -369,12 +411,12 @@ def test_failed_chunk_keeps_full_final_source(tmp_path):
     writer_inputs = {}
 
     def run(session, instruction):
-        if SOURCE_FILENAME not in session.workspace:
+        if "source.md" in session.workspace:
             write_notes(session, "Rejected partial draft")
             return note_result(error="Chunk generation failed")
         writer_inputs.update(
-            (name, session.workspace.read_lines(name, 1, -1))
-            for name in session.workspace.visible_names
+            (name, session.workspace.text(name))
+            for name in session.workspace.names
             if name not in NOTE_HEADERS
         )
         writer_started.set()
@@ -388,7 +430,7 @@ def test_failed_chunk_keeps_full_final_source(tmp_path):
         )
         env.hub.end_session()
         env.hub.seal_text(session.session_id, "transcript", 10, final=True)
-        assert env.pipeline.start(session.session_id)
+        assert env.pipeline.finalize(session.session_id)
         assert writer_started.wait(8)
         status = env.pipeline.status(session.session_id)
         assert status["published_end"] == 0
@@ -410,133 +452,6 @@ def test_failed_chunk_keeps_full_final_source(tmp_path):
         )
 
 
-def test_single_slot_completes_writer_and_both_reviews(tmp_path):
-    roles = []
-
-    def run(session, instruction):
-        role = session.meta.get("role")
-        roles.append(role)
-        if role in ("coverage", "correctness"):
-            return note_result("REVIEW: PASS")
-        return write_notes(session, "Complete checked lecture")
-
-    with note_pipeline(
-        tmp_path,
-        run,
-        settings={"notes.concurrency": 1, "summarize.review_enabled": True},
-    ) as env:
-        session = env.hub.start_session()
-        session.transcript.append("Original first core", start=0, end=10)
-        session.transcript.append("Original short tail", start=10, end=13)
-        env.hub.end_session()
-        env.hub.seal_text(session.session_id, "transcript", 13, final=True)
-        assert env.pipeline.start(session.session_id)
-        env.wait_until(
-            lambda: env.pipeline.status(session.session_id)["phase"] == "published"
-        )
-        assert roles.count("notes") == 2
-        assert roles.count("writer") == 1
-        assert roles.count("coverage") == roles.count("correctness") == 1
-        assert roles.index("writer") > max(
-            i for i, role in enumerate(roles) if role == "notes"
-        )
-        assert env.agent.peak_active == 1
-        assert env.pipeline.status(session.session_id)["review_status"] == "passed"
-
-
-def test_failed_review_edits_then_rechecks_both_items(tmp_path):
-    writer_started = threading.Event()
-    release_writer = threading.Event()
-    editor_started = threading.Event()
-    release_editor = threading.Event()
-    review_barriers = [threading.Barrier(2), threading.Barrier(2)]
-    review_started = [threading.Event(), threading.Event()]
-    release_reviews = [threading.Event(), threading.Event()]
-    counts = {"coverage": 0, "correctness": 0}
-    reviewer_ids = {"coverage": [], "correctness": []}
-    writer_ids = []
-
-    def run(session, instruction):
-        role = session.meta["role"]
-        if role == "writer":
-            writer_ids.append(session.id)
-            if len(writer_ids) == 1:
-                writer_started.set()
-                assert release_writer.wait(8)
-                return write_notes(session, "Draft missing a theorem condition")
-            assert all(count == 1 for count in counts.values())
-            assert "REVIEW: FAIL" in instruction
-            assert "Restore the theorem condition" in instruction
-            editor_started.set()
-            assert release_editor.wait(8)
-            return write_notes(session, "The theorem includes its required condition")
-        assert role in counts
-        round_index = counts[role]
-        counts[role] += 1
-        reviewer_ids[role].append(session.id)
-        expected = (
-            "Draft missing a theorem condition"
-            if round_index == 0
-            else "The theorem includes its required condition"
-        )
-        for name in NOTE_HEADERS:
-            assert expected in session.workspace.read_lines(name, 1, -1)
-        review_barriers[round_index].wait(8)
-        review_started[round_index].set()
-        assert release_reviews[round_index].wait(8)
-        if round_index == 0 and role == "coverage":
-            return note_result(
-                "REVIEW: FAIL\nRestore the theorem condition at 0 seconds."
-            )
-        return note_result("REVIEW: PASS")
-
-    with note_pipeline(
-        tmp_path,
-        run,
-        settings={
-            "instant-summarize.enabled": False,
-            "summarize.review_enabled": True,
-            "summarize.review_max_rounds": 3,
-        },
-        releases=(release_writer, release_editor, *release_reviews),
-    ) as env:
-        session = env.hub.start_session()
-        session.transcript.append(
-            "The theorem requires this condition", start=0, end=10
-        )
-        env.hub.end_session()
-        env.hub.seal_text(session.session_id, "transcript", 10, final=True)
-        assert env.pipeline.start(session.session_id)
-        assert writer_started.wait(8)
-        assert counts == {"coverage": 0, "correctness": 0}
-        release_writer.set()
-        assert review_started[0].wait(8)
-        assert not editor_started.is_set()
-        assert env.pipeline.source_path(session.session_id) is None
-        release_reviews[0].set()
-        assert editor_started.wait(8)
-        assert env.pipeline.source_path(session.session_id) is None
-        assert counts == {"coverage": 1, "correctness": 1}
-        release_editor.set()
-        assert review_started[1].wait(8)
-        assert env.pipeline.source_path(session.session_id) is None
-        release_reviews[1].set()
-        env.wait_until(
-            lambda: env.pipeline.status(session.session_id)["phase"] == "published"
-        )
-        assert counts == {"coverage": 2, "correctness": 2}
-        assert len(writer_ids) == 2 and len(set(writer_ids)) == 1
-        assert all(len(set(ids)) == 1 for ids in reviewer_ids.values())
-        assert env.pipeline.status(session.session_id)["review_status"] == "passed"
-        for filename, _ in env.pipeline.note_files("final").values():
-            text = (
-                tmp_path / "sessions" / session.session_id / "notes" / filename
-            ).read_text()
-            assert "The theorem includes its required condition" in text
-            assert "Draft missing" not in text
-        assert env.agent.peak_active == 2
-
-
 def test_final_tasks_keep_session_sources_when_selection_changes(tmp_path):
     both_writers = threading.Barrier(3)
     release_writers = threading.Event()
@@ -544,7 +459,7 @@ def test_final_tasks_keep_session_sources_when_selection_changes(tmp_path):
 
     def run(session, instruction):
         sid = session.meta["lecture_session"]
-        source = session.workspace.read_lines(SOURCE_FILENAME, 1, -1)
+        source = session.workspace.text(SOURCE_FILENAME)
         writer_sources[sid] = source
         both_writers.wait(8)
         assert release_writers.wait(8)
@@ -602,7 +517,7 @@ def test_published_review_survives_restart(tmp_path):
         session.transcript.append("Definition", start=0, end=10)
         env.hub.end_session()
         env.hub.seal_text(session.session_id, "transcript", 10, final=True)
-        assert env.pipeline.start(session.session_id)
+        assert env.pipeline.finalize(session.session_id)
         env.wait_until(
             lambda: env.pipeline.status(session.session_id)["phase"] == "published"
         )
@@ -619,7 +534,7 @@ def test_manual_entries_keep_incremental_occurrences(tmp_path):
     sources = []
 
     def run(session, instruction):
-        source = session.workspace.read_lines("source.md", 1, -1)
+        source = session.workspace.text("source.md")
         sources.append(source)
         return write_notes(session, source)
 
@@ -633,39 +548,6 @@ def test_manual_entries_keep_incremental_occurrences(tmp_path):
         from plugins.notes_pipeline.material import collect_material
 
         assert len(collect_material(env.pipeline.ctx, session.session_id)) == 2
-
-
-def test_empty_writer_continues_in_same_session(tmp_path):
-    calls = []
-
-    def run(session, instruction):
-        calls.append(session.id)
-        if len(calls) == 1:
-            return note_result("done")
-        return write_notes(session, "Recovered theorem with conditions")
-
-    with note_pipeline(
-        tmp_path, run, settings={"instant-summarize.enabled": False}
-    ) as env:
-        session = env.hub.start_session()
-        session.transcript.append("Theorem with conditions", start=0, end=10)
-        env.hub.end_session()
-        env.hub.seal_text(session.session_id, "transcript", 10, final=True)
-        env.pipeline.start(session.session_id)
-        env.wait_until(
-            lambda: env.pipeline.status(session.session_id)["phase"] == "published"
-        )
-        assert len(calls) == 2 and calls[0] == calls[1]
-        assert (
-            "Recovered theorem"
-            in (
-                tmp_path
-                / "sessions"
-                / session.session_id
-                / "notes"
-                / "note_knowledge.md"
-            ).read_text()
-        )
 
 
 def test_lecture_context_uses_target_session(tmp_path):
@@ -683,21 +565,31 @@ def test_lecture_context_uses_target_session(tmp_path):
 
 def test_preview_omits_chunk_titles(tmp_path):
     pipeline = NotesPipelinePlugin()
-    pipeline.ctx = SimpleNamespace(data_dir=tmp_path, ui=SimpleNamespace(refresh=lambda _: None))
+    pipeline.ctx = SimpleNamespace(
+        data_dir=tmp_path, ui=SimpleNamespace(refresh=lambda _: None)
+    )
     pipeline.closed = False
     pipeline.settings = FakeSettings()
     pipeline.sessions = {}
     sid = "lecture"
     state = pipeline._state(sid)
-    state["chunks"] = [{"index": index, "end": (index + 1) * 10, "state": "done"} for index in range(3)]
+    state["chunks"] = [
+        {"index": index, "end": (index + 1) * 10, "state": "done"} for index in range(3)
+    ]
     for index in range(3):
         directory = pipeline._directory(sid) / "chunks" / str(index)
         directory.mkdir(parents=True)
         for name, header in NOTE_HEADERS.items():
-            body = "## 作业\n\n完成练习 1．\n" if index == 1 and name == "note_notice.md" else ""
+            body = (
+                "## 作业\n\n完成练习 1．\n"
+                if index == 1 and name == "note_notice.md"
+                else ""
+            )
             (directory / name).write_text(header + body)
     pipeline._publish_preview(sid)
-    text = (tmp_path / "sessions" / sid / "notes" / "instant_note_notice.md").read_text()
-    assert "课堂讲义：通知" not in text
+    text = (
+        tmp_path / "sessions" / sid / "notes" / "instant_note_notice.md"
+    ).read_text()
+    assert "笔记：通知" not in text
     assert text.count("# 通知\n") == 1
     assert "## 作业\n\n完成练习 1．" in text

@@ -21,6 +21,8 @@
           ".git/**"
           ".venv/**"
           "data/**"
+          "node_modules/**"
+          "bun.lock"
           "src/ui/static/vendor/**"
           "**/*.min.js"
           "**/*.min.css"
@@ -42,6 +44,26 @@
           "*.png"
           "*.gif"
           "*.ico"
+        ];
+        settings.formatter.biome = {
+          command = "${pkgs.biome}/bin/biome";
+          options = [
+            "format"
+            "--write"
+            "--no-errors-on-unmatched"
+          ];
+          includes = [
+            "*.ts"
+            "*.tsx"
+            "*.mts"
+            "*.cts"
+          ];
+        };
+        settings.formatter.prettier.excludes = [
+          "*.ts"
+          "*.tsx"
+          "*.mts"
+          "*.cts"
         ];
         settings.formatter.prettier.options = [
           "--prose-wrap"
@@ -70,7 +92,10 @@
           ffmpeg
           pkg-config
           ty
+          typescript
           ruff
+          bun
+          biome
           formatter
         ];
         UV_PYTHON = "${pkgs.python313}/bin/python3";

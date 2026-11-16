@@ -15,7 +15,7 @@ class MyPlugin(Plugin):
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
         self.settings = ctx.require("settings")
-        self.llm = ctx.llm            # LLMProxy，调用时解析 "llm" 服务
+        self.llm = ctx.llm            # 角色请求代理，由项目 Bun 运行时执行
 
         ctx.ui.add_tab("right", "my-tab", "我的工具", icon="✦")
         ctx.ui.add_toolbox_item(
@@ -101,7 +101,7 @@ ctx.events.emit("my.event", value=1)
 ```python
 service = ctx.require("settings")
 service.register(spec)
-service.get("agent.model")
+service.get("my.enabled")
 
 ctx.register_service("my.service", my_object)
 other = ctx.require("summarize")
@@ -119,26 +119,23 @@ ctx.services.call("summarize", "trigger_now", reason="manual")
 
 ```python
 response = ctx.llm.chat(
-    profile="agent",                 # agent | vlm | stt
-    messages=[{"role": "user", "content": "hello"}],
-    tools=[...],                     # OpenAI tool schema
-    temperature=0.2,
+    role="board_recognition",
+    messages=[{"role": "user", "content": "描述图中板书"}],
     max_tokens=1024,
 )
 response.content
-response.tool_calls[0].name
-response.tool_calls[0].arguments
 response.usage
 
-for event in ctx.llm.stream(profile="agent", messages=[...]):
+for event in ctx.llm.stream(role="board_recognition", messages=[...]):
     if event.type == "text":
         print(event.text)
 ```
 
-- 所有 LLM 请求必须走 `ctx.llm`；不要自己 `httpx.post`。
+- 单次生成使用 `ctx.llm.chat/stream(role=...)`，文件任务使用 `agent` 服务．两者共用项目 Bun 运行时、角色解析和提供方鉴权．
+- Python 不注册 provider，不传输 API key，不实现模型工具循环．`ChatResponse/StreamEvent` 仅作为应用响应类型．
+- 模型和思考级别来自 `roles.yml`．提供方、模型能力与兼容参数来自 `models.yml`．`api` 的可选值由已安装 OMP SDK 决定．
+- 会话创建时固定配置，后续保存只影响新会话．`ctx.llm.info()` 返回有效角色与提供方状态，`usage_snapshot()` 按 `provider/model` 返回用量．
 - `stt` 使用独立 HTTP/WebSocket 服务协议．
-- 重试/超时/流式解析由 LLM 层负责。
-- 配置由 settings 插件持久化，profile 在每次请求时解析。
 
 ## 6. UI
 
@@ -219,7 +216,7 @@ def handler(payload: dict):
 reader = ctx.require("reader")
 
 # owner 标记“这一页的文档是我给的”，决定选中菜单里出现谁注册的页面级项
-page_id = reader.show(title="课堂讲义", docs=docs, active="knowledge",
+page_id = reader.show(title="笔记", docs=docs, active="knowledge",
                       page_key=session_id, owner="my-plugin")
 
 # 页面级菜单项：只在“这一页 + 这个 owner”的文档上出现
@@ -292,56 +289,65 @@ settings.set("my.api_key", "new")
 - `type="action", action="..."`：渲染为按钮，点击调用对应 UI action。
 - 设置变化发 `settings.changed`。
 
+LLM 设置使用独立的 `models.yml` 与 `roles.yml` 编辑区，不注册模型、密钥或 YAML 字符串的标量设置．两份文件保存在 `data_dir/llm_runtime/`，保存前一起检查．角色支持 `provider/model:level`、`@role` 和缺省继承 `default`．
+
+API key 按提供方写入项目 OMP `AuthStorage`（`llm_runtime/credentials.db`）．OpenCode 登录、刷新和登出也使用同一凭据存储．无鉴权服务明确设置 `auth: none`．设置页不回显凭据，普通插件 secret 仍按上述接口管理．
+
 ## 8. Agent
 
 ```python
-agent = ctx.require("agent")          # llm-agent 插件注册的服务
+from core.agent_types import AgentProfile, AgentTool
+from plugins.agent import FileWorkspace
 
-# 方式一：先注册具名 profile，再从 profile 创建会话
-from plugins.agent import AgentProfile, AgentTool
-
+agent = ctx.require("agent")
 agent.register_agent(AgentProfile(
     name="my.reader",
-    system_prompt="你是课堂助手。",
-    tools=[AgentTool("read", {"max_lines": 50}), AgentTool("search", {"max_hits": 100})],
-    max_steps=8,
-    max_tokens=32000,
-    final_answer_on_limit=True,
-    stream=True,                       # 边走流边发 agent.delta / agent.reasoning
+    role="ask_research",
+    system_prompt="根据授权文件回答课堂问题．",
+    tools=[AgentTool("read"), AgentTool("grep"), AgentTool("glob")],
 ))
 
-session = agent.create_session(
-    name="my-agent",
-    agent="my.reader",
-    files={"notes.md": "/path/notes.md"},
-    extra_instructions=["只修改 notes.md"],
+workspace = FileWorkspace(
+    {"notes.md": "/path/notes.md", "source.md": "/path/source.md"},
+    readonly=("notes.md", "source.md"),
 )
+session = agent.create_session(name="my-reader", agent="my.reader", workspace=workspace)
+result = agent.run(session.id, "解释这一段", on_event=lambda event: print(event))
 
-# 方式二：创建时直接声明工具与参数（agent 插件负责构建工具）
-session = agent.create_session(
-    name="one-shot",
-    system_prompt="...",
-    files={"notes.md": "/path/notes.md"},
-    tools=[("read", {"max_lines": 50}), ("search", {})],
-    max_steps=8,
+# 写作会话只允许修改列出的文稿．
+writer = agent.create_session(
+    name="my-writer",
+    role="note_writer",
+    system_prompt="根据完整来源维护笔记．",
+    workspace=FileWorkspace(
+        {"notes.md": "/path/notes.md", "source.md": "/path/source.md"},
+        readonly=("source.md",),
+    ),
+    tools=["read", "grep", "glob", "edit", "write"],
 )
-
-result = agent.run(session.id, "请总结这一段", on_event=lambda e: print(e), stream=True)
-sub = agent.create_subsession(session.id, name="child", system_prompt="...")
-agent.register_tool(ToolSpec(...))
-agent.add_prompt_contributor(lambda session: "全局补充说明")
+agent.cancel(writer.id)
+agent.close(writer.id)
 ```
 
-工具契约：
+工具直接使用 OMP 的 schema 和动态描述．调用方只声明工具名，不设置 Python 工具参数或截断规则：
 
-- `info()`：无参数，返回课程/日期/会话/文件/流状态。
-- `read(file, l, r)`：1-based 行号；`l` 或 `r` 为 `-1` 表示该侧无界；工厂参数 `max_lines` 限制单次返回行数。
-- `search(keywords, file=?)`：返回命中的 `(行号, 该行内容)` 列表；`file` 省略时查全部可读文件；工厂参数 `max_hits` 限制命中数。
-- `replace(file, old_str, new_str)`：唯一替换；0 次或多次都报错，多次时报告出现次数与行号。
-- `append(file, text)`：在文件末尾新行追加。
-- `write(file, text)`：整文件覆盖（默认不提供，需显式声明）。
+| 工具    | 行为                                         | 调度      |
+| ------- | -------------------------------------------- | --------- |
+| `read`  | 路径选择器、范围、快照与继续读取             | shared    |
+| `grep`  | 正则、文件过滤与命中上下文                   | shared    |
+| `glob`  | 列出授权工作区文件                           | shared    |
+| `edit`  | 模型选择的上游编辑模式，多文件修改与快照检查 | exclusive |
+| `write` | 创建文件或完整写入，遵守上游写入约束         | exclusive |
 
-流式运行的 `on_event` 会依次收到 `agent.run.started`、`agent.delta`（正文增量）、`agent.reasoning`（思考增量）、`agent.tool_call`、`agent.tool_result`、`agent.message`（该步完整正文 + `reasoning`）、`agent.run.finished` / `agent.error`。
+`read/grep/edit` 共用会话级工具状态．默认编辑模式为 hashline，模型策略可选择 replace 模式．追加内容使用原生 `edit`．
+
+连续只读调用可并行．写入等待前面的调用完成，后面的读取等待写入完成．多个写入保持调用顺序．工具错误返回给对应调用，SDK 继续管理恢复和上下文压缩．完整来源在压缩后仍可读取．
+
+`FileWorkspace` 声明授权文件和只读文件．运行时检查全部工具路径和编辑目标，拒绝目录逃逸、符号链接逃逸与未开放 URI．只读会话不注册 `edit/write`．职责提示追加到 SDK 的模型提示模板，不覆盖上游工具说明．
+
+`on_event` 接收 `agent.run.started`、`agent.delta`、`agent.reasoning`、`agent.tool_call`、`agent.tool_result`、`agent.message`、`agent.file` 和终态事件．成功写入触发 `agent.file`，应用在 publication lock 内更新预览．审阅会话读取同一锁下的固定快照．
+
+`cancel` 终止实际模型流与工具执行．`reset` 清除会话，`close` 取消并释放会话．Bun 进程退出时请求返回错误，已保存文稿与来源位置供恢复使用．SDK 保存模型历史，Python 显示记录不再回传给模型．
 
 ## 9. 文件与数据目录
 
@@ -369,6 +375,6 @@ runtime.start()
 runtime.stop()
 ```
 
-- 不访问网络；LLM 用 `tests/support.py` 的 `FakeLLM`。
+- 确定性测试不访问外网，使用脚本化运行时或本地请求记录．测试面向配置、授权、事件和可见文稿行为，不绑定旧 Python provider 或 worker 实现．
 - 事件异步分发，断言前调用 `runtime.bus.flush(2.0)`。
 - 线程型插件在 `teardown` 中必须停止并 join。

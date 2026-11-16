@@ -7,8 +7,6 @@ from .agent_types import (
     AgentProfile,
     AgentRunResult,
     AgentTool,
-    ToolContext,
-    ToolSpec,
 )
 from .events import (
     CLOCK_TICK,
@@ -86,8 +84,6 @@ __all__ = [
     "TabHandle",
     "TextItem",
     "TextStream",
-    "ToolContext",
-    "ToolSpec",
     "UIManager",
     "VideoFrame",
     "VideoStream",

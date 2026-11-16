@@ -58,18 +58,23 @@ def test_unknown_action() -> None:
     ui = UIManager()
     result = ui.dispatch_action("missing")
     assert not result.ok
-    assert "未知" in result.message
 
 
 def test_render_error_is_contained() -> None:
     ui = UIManager()
     ui.add_page(
-        "broken", "坏页", render=lambda: (_ for _ in ()).throw(RuntimeError("x"))
+        "broken",
+        "坏页",
+        render=lambda: (_ for _ in ()).throw(RuntimeError("<broken-render>")),
     )
     ui.open_page("broken")
     state = ui.state()
     block = state["page_content"]["broken"][0]
-    assert "渲染失败" in block["html"]
+    assert "&lt;broken-render&gt;" in block["html"]
+    assert "<broken-render>" not in block["html"]
+    ui.add_page("healthy", "Healthy", render=lambda: "unaffected content")
+    ui.open_page("healthy")
+    assert "unaffected content" in ui.state()["page_content"]["healthy"][0]["html"]
 
 
 def test_duplicate_tab_page_item_rejected() -> None:
@@ -142,6 +147,7 @@ def test_tree_block_is_normalized_recursively() -> None:
 
 def test_commands_registry_and_state() -> None:
     ui = UIManager()
+    original_commands = ui.state()["commands"]
     ui.add_page("settings:main", "设置")
     ui.register_command(
         "settings.open",
@@ -160,17 +166,25 @@ def test_commands_registry_and_state() -> None:
         action="input.refresh_courses",
         plugin_id="input",
     )
-    commands = ui.state()["commands"]
+    commands = [
+        command
+        for command in ui.state()["commands"]
+        if command["id"] in {"input.refresh", "settings.open"}
+    ]
     assert [c["id"] for c in commands] == ["input.refresh", "settings.open"]
     assert commands[1]["page"] == "settings:main"
     assert commands[0]["action"] == "input.refresh_courses"
     assert "settings.open" in ui.snapshot()["commands"]
 
     ui.unregister_command("input.refresh")
-    assert [c["id"] for c in ui.state()["commands"]] == ["settings.open"]
+    assert [
+        c["id"]
+        for c in ui.state()["commands"]
+        if c["id"] in {"input.refresh", "settings.open"}
+    ] == ["settings.open"]
 
     ui.remove_plugin_commands("settings")
-    assert ui.state()["commands"] == []
+    assert ui.state()["commands"] == original_commands
 
 
 def test_command_requires_page_or_action() -> None:

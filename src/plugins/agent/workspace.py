@@ -1,268 +1,81 @@
-"""FileWorkspace: logical name → absolute path mapping with safe line-oriented I/O.
-
-Safety invariants enforced at registration and on every access:
-
-- ``..`` is rejected (path traversal).
-- Absolute paths are rejected (must be relative logical names).
-- Empty / non-string names are rejected.
-- Atomic writes via ``mkstemp`` + ``os.replace``.
-"""
+"""Logical file authorization shared with the SDK runtime."""
 
 from __future__ import annotations
 
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Iterable, Mapping
 
 from core.file_access import path_lock
 
 
 class FileWorkspace:
-    """A sandbox that maps logical names to absolute file paths.
-
-    Plugins (for example summarise) create a workspace per session and pass it to
-    ``AgentService.create_session(files=ws)``.  The agent tools only see the
-    logical names; the real paths are never exposed to the LLM.
-    """
+    """Map authorized names to files without implementing model tools."""
 
     def __init__(
         self,
         files: Mapping[str, str | Path] | None = None,
         *,
-        cache_dir: str | Path | None = None,
         readonly: Iterable[str] = (),
     ) -> None:
         self._files: dict[str, Path] = {}
-        self._hidden: set[str] = set()
         self._readonly: set[str] = set(readonly)
-        self._cache_dir = Path(cache_dir) if cache_dir is not None else None
-        if files:
-            for name, path in files.items():
-                self.register(name, path)
+        for name, path in (files or {}).items():
+            self.register(name, path)
 
-    # ------------------------------------------------------------------
-    # Registration
-    # ------------------------------------------------------------------
-    def register(
-        self,
-        name: str,
-        path: str | Path,
-        *,
-        hidden: bool = False,
-        readonly: bool = False,
-    ) -> None:
-        """Map *name* to *path*, validating the name first.
-
-        Hidden files stay readable (by exact name) but are left out of
-        ``info`` listings: they hold spill-over tool output the user should
-        not see.
-        """
+    def register(self, name: str, path: str | Path, *, readonly: bool = False) -> None:
         self._validate_name(name)
-        resolved = Path(path).resolve()
-        self._files[name] = resolved
+        self._files[name] = Path(path).absolute()
         if readonly:
             self._readonly.add(name)
-        if hidden:
-            self._hidden.add(name)
-        else:
-            self._hidden.discard(name)
 
-    def ensure(self, name: str) -> Path:
-        """Return the absolute path for *name*, creating an empty file if missing."""
-        self._validate_name(name)
-        if name not in self._files:
-            raise KeyError(f"workspace file {name!r} not registered")
-        path = self._files[name]
-        if name in self._readonly and not path.exists():
-            raise PermissionError(f"File is read-only: {name}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            path.write_text("", encoding="utf-8")
-        return path
+    @staticmethod
+    def _validate_name(name: str) -> None:
+        if not isinstance(name, str) or not name:
+            raise ValueError("File name must be a non-empty string")
+        if os.path.isabs(name):
+            raise ValueError(f"File name must not be an absolute path: {name!r}")
+        if any(part in ("..", "") for part in name.replace("\\", "/").split("/")):
+            raise ValueError(f"Invalid logical file name: {name!r}")
 
     @property
     def names(self) -> tuple[str, ...]:
-        """Registered logical names in insertion order."""
         return tuple(self._files)
 
     @property
-    def visible_names(self) -> tuple[str, ...]:
-        """Names shown to the agent (hidden spill files excluded)."""
-        return tuple(name for name in self._files if name not in self._hidden)
-
-    def is_hidden(self, name: str) -> bool:
-        return name in self._hidden
-
-    def spill(self, content: str, *, prefix: str = "tool-output") -> str:
-        """Persist *content* as a hidden workspace file; return its name."""
-
-        directory = self._cache_dir
-        if directory is None:
-            if self._files:
-                directory = next(iter(self._files.values())).parent / ".agent-cache"
-            else:
-                directory = Path(tempfile.gettempdir()) / "agent-cache"
-        directory.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(
-            dir=directory, prefix=f"{prefix}-", suffix=".md"
-        )
-        os.close(fd)
-        path = Path(temporary)
-        name = path.name
-        self.register(name, path, hidden=True)
-        self.write(name, content)
-        return name
+    def readonly(self) -> tuple[str, ...]:
+        return tuple(name for name in self._files if name in self._readonly)
 
     def path(self, name: str) -> Path:
-        """Return the absolute path for *name* (never creates)."""
         self._validate_name(name)
-        if name not in self._files:
-            raise KeyError(f"workspace file {name!r} not registered")
         return self._files[name]
 
     def __contains__(self, name: str) -> bool:
         return name in self._files
 
     def to_dict(self) -> dict[str, Path]:
-        """Shallow copy of the mapping (for subsession inheritance)."""
         return dict(self._files)
 
-    # ------------------------------------------------------------------
-    # Validation
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _validate_name(name: str) -> None:
-        if not name or not isinstance(name, str):
-            raise ValueError("file name must be a non-empty string")
-        parts = name.replace("\\", "/").split("/")
-        if any(p == ".." for p in parts):
-            raise ValueError(f"file name must not contain '..': {name!r}")
-        if os.path.isabs(name):
-            raise ValueError(f"file name must not be an absolute path: {name!r}")
-
-    # ------------------------------------------------------------------
-    # Atomic write
-    # ------------------------------------------------------------------
-    def _check_writable(self, name: str) -> None:
-        if name in self._readonly:
-            raise PermissionError(f"File is read-only: {name}")
+    def text(self, name: str) -> str:
+        path = self._files.get(name)
+        return path.read_text(encoding="utf-8") if path and path.exists() else ""
 
     def write(self, name: str, content: str) -> None:
-        """Atomically replace the file content (ensures parent dirs)."""
-        self._check_writable(name)
-        path = self.ensure(name)
+        """Publish application-generated content with an atomic replacement."""
+        if name in self._readonly:
+            raise PermissionError(f"File is read-only: {name}")
+        path = self.path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with path_lock(path):
-            fd, tmp_name = tempfile.mkstemp(
-                dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+            fd, temporary = tempfile.mkstemp(
+                dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
             )
-            tmp_path = Path(tmp_name)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:
                     handle.write(content)
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(tmp_path, path)
-            except Exception:
-                tmp_path.unlink(missing_ok=True)
-                raise
-
-    # ------------------------------------------------------------------
-    # Line-oriented I/O (1-based)
-    # ------------------------------------------------------------------
-    def read_lines(self, name: str, l: int, r: int) -> str:
-        """Read lines *l* through *r* (1-based, inclusive).
-
-        ``-1`` for *l* or *r* means "unbounded on that side".
-        Returns a header line ``"# name (lines lo-hi of N)\\n"`` followed by
-        the raw lines **without** line-number prefixes (so the output is
-        directly usable as ``old_str`` for ``replace_unique``).
-        """
-        path = self._files.get(name)
-        if path is None or not path.exists():
-            return f"# {name} (lines ?-? of 0)\n"
-        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-        N = len(lines)
-        if N == 0:
-            return f"# {name} (lines ?-? of 0)\n"
-        # Resolve bounds
-        lo = max(1, l) if l != -1 else 1
-        hi = min(N, r) if r != -1 else N
-        if lo > hi:
-            lo = max(1, hi)
-            hi = min(N, l if l != -1 else N)
-        lo = max(1, lo)
-        hi = min(N, hi)
-        if lo > hi:
-            lo, hi = 1, 1
-        selected = lines[lo - 1 : hi]
-        header = f"# {name} (lines {lo}-{hi} of {N})\n"
-        return header + "".join(selected)
-
-    def replace_unique(self, name: str, old: str, new: str) -> str:
-        """Replace *old* with *new* exactly once.
-
-        Returns a success message.  Raises :class:`ValueError` when *old*
-        appears zero times or more than once.  The error message includes
-        the count and, for multiple matches, the line numbers.
-        """
-        self._check_writable(name)
-        path = self.ensure(name)
-        with path_lock(path):
-            text = path.read_text(encoding="utf-8")
-            count = text.count(old)
-            if count == 0:
-                raise ValueError("未找到要替换的文本（出现 0 次）")
-            if count > 1:
-                line_nos = _find_line_numbers(text, old)
-                line_str = ", ".join(str(ln) for ln in line_nos)
-                raise ValueError(
-                    f"替换文本出现 {count} 次（行 {line_str}），请提供更具体的上下文以确保唯一"
-                )
-            self.write(name, text.replace(old, new, 1))
-            return "已替换 1 处"
-
-    def append_line(self, name: str, text: str) -> str:
-        """Append *text* as a new line at the end, ensuring a trailing newline."""
-        self._check_writable(name)
-        path = self.ensure(name)
-        with path_lock(path):
-            content = path.read_text(encoding="utf-8")
-            if content and not content.endswith("\n"):
-                content += "\n"
-            content += text + "\n"
-            self.write(name, content)
-            return f"已追加 1 行到 {name}"
-
-    def text(self, name: str) -> str:
-        """Return full file content, or ``""`` if missing."""
-        path = self._files.get(name)
-        if path is None or not path.exists():
-            return ""
-        return path.read_text(encoding="utf-8")
-
-    # ------------------------------------------------------------------
-    # Pickle helpers (for copying)
-    # ------------------------------------------------------------------
-    def copy(self) -> "FileWorkspace":
-        """Return a shallow clone with the same logical→path mapping."""
-        clone = FileWorkspace(dict(self._files), cache_dir=self._cache_dir)
-        clone._hidden = set(self._hidden)
-        clone._readonly = set(self._readonly)
-        return clone
-
-
-def _find_line_numbers(text: str, needle: str) -> list[int]:
-    """Return 1-based line numbers where *needle* appears in *text*."""
-    line_nos: list[int] = []
-    remaining = text
-    offset = 0
-    while True:
-        idx = remaining.find(needle)
-        if idx == -1:
-            break
-        line_no = text[: offset + idx].count("\n") + 1
-        line_nos.append(line_no)
-        offset += idx + len(needle)
-        remaining = text[offset:]
-    return line_nos
+                os.replace(temporary, path)
+            finally:
+                Path(temporary).unlink(missing_ok=True)

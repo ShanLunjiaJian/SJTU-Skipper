@@ -45,8 +45,9 @@ class LLMProxy:
     def stream(self, **kwargs: Any) -> Any:
         return self._service().stream(**kwargs)
 
-    def config_for(self, profile: str) -> Any:
-        return self._service().config_for(profile)
+    @property
+    def runtime(self):
+        return self._service().runtime
 
     def info(self) -> dict[str, Any]:
         service = self._services.get("llm")
@@ -151,10 +152,6 @@ class Runtime:
         registered = plugin() if isinstance(plugin, type) else plugin
         self.plugins.register(registered)
         return registered
-
-    def add_plugins(self, plugins: Iterable[Plugin | type[Plugin]]) -> None:
-        for plugin in plugins:
-            self.add_plugin(plugin)
 
     # -- dynamic plugin management --------------------------------------
     def load_plugin(self, plugin_or_spec: Plugin | type[Plugin] | str) -> Plugin:

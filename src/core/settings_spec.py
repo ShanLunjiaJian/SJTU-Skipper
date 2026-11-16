@@ -24,8 +24,6 @@ SETTING_TYPES = {
     "action",
 }
 
-#: Backwards-compatible alias (the old name used by ``plugins.settings``).
-VALID_TYPES = SETTING_TYPES
 
 SECRET_MASK = "******"
 """Placeholder shown in public (UI/HTTP) output for a configured secret."""

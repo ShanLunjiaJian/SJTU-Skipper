@@ -74,6 +74,62 @@ def test_state_and_action(client) -> None:
     assert payload["message"] == "pong"
 
 
+def test_navigation_restores_dynamic_pages(client):
+    from types import SimpleNamespace
+
+    test_client, cfg = client
+    runtime = test_client.app.state.runtime
+    sid = "lecture-test"
+    (cfg.data_dir / "sessions" / sid).mkdir(parents=True)
+    selected = {}
+
+    def notes(session_id, doc):
+        selected.update(session=session_id, doc=doc)
+        runtime.ui.add_page(f"reader:notes:{session_id}:summarize", "Notes")
+
+    def logs(session_id):
+        selected["session"] = session_id
+        runtime.ui.add_page(f"summarize:logs:{session_id}", "Logs")
+
+    runtime.services.register(
+        "summarize", SimpleNamespace(open_notes=notes, open_logs=logs)
+    )
+    runtime.services.register(
+        "reader",
+        SimpleNamespace(
+            navigation=lambda page: selected["doc"],
+            select_document=lambda page, key: selected.update(doc=key),
+        ),
+    )
+    runtime.services.register(
+        "input",
+        SimpleNamespace(
+            open_class=lambda key: selected.update(class_id=key),
+            selected_class=lambda: selected["class_id"],
+        ),
+    )
+    runtime.ui.add_page("input:session", "Class")
+    for route in [
+        {"page": "input:session", "class": "class:math:rec:video"},
+        {"page": f"reader:notes:{sid}:summarize", "doc": "knowledge"},
+        {"page": f"summarize:logs:{sid}"},
+        {"page": ""},
+    ]:
+        response = test_client.post("/api/ui/navigate", json=route)
+        assert response.status_code == 200
+        assert test_client.get("/api/ui/state").json()["navigation"] == route
+    assert (
+        test_client.post("/api/ui/navigate", json={"page": "missing"}).status_code
+        == 404
+    )
+    assert (
+        test_client.post(
+            "/api/ui/navigate", json={"page": "summarize:logs:../secret"}
+        ).status_code
+        == 400
+    )
+
+
 def test_open_close_page(client) -> None:
     test_client, _cfg = client
     response = test_client.post("/api/ui/pages/test.page/close")

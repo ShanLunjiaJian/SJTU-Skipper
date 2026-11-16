@@ -2,46 +2,39 @@
 
 import json
 import threading
-import time
 from core.plugin import Plugin
 from core.settings_spec import SettingsSpec
 from plugins.notes_pipeline.prompts import SYSTEM, REVIEW_SYSTEM
 
 
-def note_status_blocks(state):
-    phase = {
-        "collecting": "收集来源",
-        "chunking": "整理片段",
-        "writing": "整课写作",
-        "reviewing": "审阅",
-        "revising": "修改",
-        "published": "已发布",
-        "failed": "失败",
-        "resetting": "清理笔记",
-        "deleted": "已删除",
-    }[state["phase"]]
-    blocks = [
-        {"type": "text", "text": f"笔记：{phase}"},
-        {
-            "type": "text",
-            "text": f"片段 {state['completed_chunks']}/{state['total_chunks']}；等待 {state['pending_chunks']}；运行 {state['running_chunks']}",
-        },
-    ]
-    for task in state["tasks"]:
-        elapsed = max(0, int(time.monotonic() - task["started"]))
-        blocks.append(
-            {
-                "type": "text",
-                "text": f"{task['label']}：步骤 {task['agent_step']}；{elapsed} 秒",
-            }
-        )
+def note_log_blocks(state):
+    agents = [agent for task in state["tasks"] for agent in task["agents"].values()]
+    blocks = (
+        [{"type": "agent_activity", "id": state["session_id"], "agents": agents}]
+        if agents
+        else []
+    )
     if state["error"]:
         blocks.append(
             {
                 "type": "text",
-                "text": f"笔记生成失败：{state['error']}．可重新生成笔记．",
+                "text": f"笔记生成失败：{state['error']}．删除笔记后可重新生成．",
             }
         )
+    seen = set()
+    for error in state.get("errors", []):
+        message = str(error.get("error") or error.get("message") or "")
+        if not message or message == state["error"]:
+            continue
+        location = str(error.get("source") or "来源读取")
+        if error.get("chunk") is not None:
+            location = f"笔记片段 {error['chunk'] + 1}"
+        if error.get("start") is not None and error.get("end") is not None:
+            location += f" {error['start']:.1f}-{error['end']:.1f}s"
+        entry = (location, message)
+        if entry not in seen:
+            seen.add(entry)
+            blocks.append({"type": "text", "text": f"{location}：{message}"})
     return blocks
 
 
@@ -52,11 +45,7 @@ class SummarizeService:
     @property
     def busy(self):
         state = self.plugin.pipeline.status()
-        return bool(
-            state["pending_chunks"]
-            or state["running_chunks"]
-            or state["phase"] in ("writing", "reviewing", "revising")
-        )
+        return state["generation_state"] == "generating"
 
     def start(self, session_id=""):
         return self.plugin.pipeline.start(session_id)
@@ -70,6 +59,12 @@ class SummarizeService:
     def running_tasks(self):
         return self.plugin.pipeline.running_tasks()
 
+    def open_notes(self, session_id, doc="knowledge"):
+        return self.plugin._read({"session_id": session_id, "doc": doc})
+
+    def open_logs(self, session_id):
+        return self.plugin._logs({"session_id": session_id})
+
 
 class SummarizePlugin(Plugin):
     id = "summarize"
@@ -77,9 +72,9 @@ class SummarizePlugin(Plugin):
     optional_requires = ("input",)
     provides = ("summarize",)
     ON_STOP_LABELS = (
-        ("direct", "直接生成讲义"),
+        ("direct", "直接生成笔记"),
         ("fill", "先补全再生成"),
-        ("skip", "不自动生成讲义"),
+        ("skip", "不自动生成笔记"),
     )
 
     def setup(self, ctx):
@@ -89,17 +84,11 @@ class SummarizePlugin(Plugin):
         self.stop_event = threading.Event()
         self.notices = {}
         self.fill_threads = []
+        self.log_pages = set()
         for key, default, kind in (
             ("system_prompt", SYSTEM, "string"),
             ("reviewer_prompt", REVIEW_SYSTEM, "string"),
-            ("model", "", "string"),
-            ("max_tokens", 32000, "int"),
-            ("max_tool_output", 200000, "int"),
-            ("max_history_chars", 0, "int"),
             ("review_enabled", True, "bool"),
-            ("review_model", "", "string"),
-            ("review_max_steps", 0, "int"),
-            ("review_max_tokens", 32000, "int"),
             ("review_max_rounds", 0, "int"),
             ("fill_wait_minutes", 20, "int"),
             ("fill_max_attempts", 6, "int"),
@@ -129,42 +118,66 @@ class SummarizePlugin(Plugin):
         ctx.ui.add_toolbox_item(
             "note",
             "summarize.notes",
-            "课堂讲义",
+            "笔记",
             order=10,
             render=self._render,
             plugin_id=self.id,
         )
         for action, handler in (
             ("read", self._read),
+            ("logs", self._logs),
             ("set_mode", self._set_mode),
             ("fill_again", self._fill_again),
             ("delete", self._delete),
-            ("regenerate", self._regenerate),
+            ("generate", self._generate),
+            ("stop", self._stop),
         ):
             ctx.ui.register_action(f"summarize.{action}", handler, plugin_id=self.id)
         ctx.events.on("session.stopped", self._stopped, plugin_id=self.id)
 
     def _render(self):
         sid = self.ctx.streams.notes_session_id
-        state = self.pipeline.status(sid)
-        blocks = note_status_blocks(state)
+        state = self.pipeline.status(sid)["generation_state"]
+        state_label = {
+            "not_started": "未开始",
+            "generating": "正在生成",
+            "finished": "生成结束",
+        }[state]
+        blocks = []
         blocks.extend(
             [
                 {
                     "type": "buttons",
                     "buttons": [
                         {
-                            "label": "打开课堂讲义",
+                            "label": "打开笔记",
                             "action": "summarize.read",
-                        }
+                        },
+                        {
+                            "label": "Agent 日志",
+                            "action": "summarize.logs",
+                        },
                     ],
                 },
+                {"type": "keyvalue", "items": [["笔记状态", state_label]]},
                 {
                     "type": "buttons",
                     "buttons": [
-                        {"label": "生成笔记", "action": "summarize.regenerate"},
-                        {"label": "补录缺失内容", "action": "summarize.fill_again"},
-                        {"label": "删除笔记", "action": "summarize.delete"},
+                        {
+                            "label": "生成笔记",
+                            "action": "summarize.generate",
+                            "disabled": state != "not_started",
+                        },
+                        {
+                            "label": "停止生成",
+                            "action": "summarize.stop",
+                            "disabled": state != "generating",
+                        },
+                        {
+                            "label": "删除笔记",
+                            "action": "summarize.delete",
+                            "disabled": state != "finished",
+                        },
                     ],
                 },
                 {
@@ -190,20 +203,35 @@ class SummarizePlugin(Plugin):
         return blocks
 
     def _delete(self, payload):
-        self.pipeline.reset(
+        deleted = self.pipeline.delete(
             str(payload.get("session_id") or self.ctx.streams.notes_session_id)
         )
-        return {"ok": True, "refresh": True, "message": "正在删除笔记"}
+        if not deleted:
+            return {"ok": False, "refresh": True, "message": "仅生成结束的笔记可删除"}
+        return {"ok": True, "refresh": True, "message": "已删除笔记"}
 
-    def _regenerate(self, payload):
-        self.pipeline.reset(
-            str(payload.get("session_id") or self.ctx.streams.notes_session_id),
-            regenerate=True,
+    def _generate(self, payload):
+        started = self.pipeline.start(
+            str(payload.get("session_id") or self.ctx.streams.notes_session_id)
         )
+        if not started:
+            return {
+                "ok": False,
+                "refresh": True,
+                "message": "笔记未开始生成，请检查状态和来源",
+            }
         return {"ok": True, "refresh": True, "message": "正在生成笔记"}
 
+    def _stop(self, payload):
+        stopped = self.pipeline.stop(
+            str(payload.get("session_id") or self.ctx.streams.notes_session_id)
+        )
+        if not stopped:
+            return {"ok": False, "refresh": True, "message": "仅正在生成的笔记可停止"}
+        return {"ok": True, "refresh": True, "message": "已停止生成笔记"}
+
     def _read(self, payload):
-        sid = self.ctx.streams.notes_session_id
+        sid = str(payload.get("session_id") or self.ctx.streams.notes_session_id)
         docs = [
             {
                 "key": key,
@@ -213,13 +241,37 @@ class SummarizePlugin(Plugin):
             for key, (name, label) in self.pipeline.note_files("final").items()
         ]
         page = self.ctx.require("reader").show(
-            title="课堂讲义",
+            title="笔记",
             docs=docs,
             active=str(payload.get("doc", "knowledge")),
             page_key=f"{sid}:summarize",
             owner=self.id,
         )
         return {"ok": True, "open_page": page}
+
+    def _logs(self, payload):
+        sid = str(payload.get("session_id") or self.ctx.streams.notes_session_id)
+        page = f"summarize:logs:{sid}"
+        if not self.ctx.ui.has_page(page):
+            self.ctx.ui.add_page(
+                page,
+                "Agent 日志",
+                render=lambda sid=sid: self._render_logs(sid),
+                order=6,
+                plugin_id=self.id,
+            )
+        self.log_pages.add(page)
+        self.ctx.ui.open_page(page)
+        return {"ok": True, "open_page": page}
+
+    def _render_logs(self, sid):
+        blocks = note_log_blocks(self.pipeline.status(sid))
+        return blocks or [
+            {
+                "type": "text",
+                "text": "还没有 Agent 日志．生成笔记后，日志会显示在这里．",
+            }
+        ]
 
     def _set_mode(self, payload):
         mode = str(payload.get("mode", ""))
@@ -243,12 +295,14 @@ class SummarizePlugin(Plugin):
         if not sid or sid == "boot":
             return
         meta = self._meta(sid)
+        if meta.get("input_failed") or meta.get("processing_cancelled"):
+            return
         if meta.get("fill_for"):
-            self.pipeline.start(str(meta["fill_for"]))
+            self.pipeline.finalize(str(meta["fill_for"]))
             return
         mode = self.settings.get("summarize.on_stop", "direct")
         if mode == "direct":
-            self.pipeline.start(sid)
+            self.pipeline.finalize(sid)
         elif mode == "fill":
             self._request_fill(sid)
 
@@ -280,14 +334,24 @@ class SummarizePlugin(Plugin):
                 max(1, int(self.settings.get("summarize.fill_wait_minutes", 20))) * 60
             ):
                 return
-        self.notices[sid] = "未取得录播，讲义使用已有来源，并保留来源缺口标记"
-        self.pipeline.start(sid)
+        self.notices[sid] = "未取得录播，笔记使用已有来源，并保留来源缺口标记"
+        self.pipeline.finalize(sid)
         self.ctx.ui.refresh("notes.fill")
 
     def teardown(self):
         self.stop_event.set()
         for thread in self.fill_threads:
             thread.join()
-        for action in ("read", "set_mode", "fill_again", "delete", "regenerate"):
+        for action in (
+            "read",
+            "logs",
+            "set_mode",
+            "fill_again",
+            "delete",
+            "generate",
+            "stop",
+        ):
             self.ctx.ui.unregister_action(f"summarize.{action}")
         self.ctx.ui.remove_toolbox_item("summarize.notes")
+        for page in self.log_pages:
+            self.ctx.ui.remove_page(page)

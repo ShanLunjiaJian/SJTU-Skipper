@@ -92,10 +92,6 @@ class _TimeIndexedStream:
             return self._total
 
     @property
-    def total_time(self) -> float:
-        return self.duration
-
-    @property
     def chunk_count(self) -> int:
         with self._lock:
             return len(self._chunks)
@@ -238,9 +234,6 @@ class AudioStream(_TimeIndexedStream):
     @property
     def bytes_per_second(self) -> int:
         return self.sample_rate * self.channels * self.sample_width
-
-    def duration_to_bytes(self, duration: float) -> int:
-        return max(0, int(round(float(duration) * self.bytes_per_second)))
 
     def bytes_to_duration(self, size: int) -> float:
         return float(size) / float(self.bytes_per_second)
@@ -455,10 +448,6 @@ class TextStream(Sequence[TextItem]):
                 end=end,
             )
         return item
-
-    def item_at(self, index: int) -> TextItem:
-        with self._lock:
-            return self._items[index]
 
     def text_since(self, index: int = 0) -> str:
         with self._lock:

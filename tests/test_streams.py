@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import threading
 import time
+import wave
 
 import pytest
 
@@ -34,10 +36,15 @@ def test_audio_prefix_is_immutable() -> None:
 def test_audio_read_as_wav() -> None:
     hub = StreamHub()
     audio = hub.current.audio
-    audio.append(b"\x00\x00" * 16000)
-    wav = audio.read_as_wav(0, 1)
-    assert wav[:4] == b"RIFF"
-    assert wav[8:12] == b"WAVE"
+    pcm = b"\x01\x02" * audio.sample_rate
+    audio.append(pcm)
+    with wave.open(io.BytesIO(audio.read_as_wav(0.25, 0.75)), "rb") as wav:
+        assert wav.getnchannels() == audio.channels
+        assert wav.getsampwidth() == audio.sample_width
+        assert wav.getframerate() == audio.sample_rate
+        assert (
+            wav.readframes(wav.getnframes()) == pcm[len(pcm) // 4 : 3 * len(pcm) // 4]
+        )
 
 
 def test_audio_wait_for() -> None:
@@ -162,8 +169,7 @@ class TestTrim:
         assert stream.kept_seconds == pytest.approx(2.0)
         # Reads after the trim still return the remaining data.
         assert len(stream.read(2.0, 4.0)) == 64000
-        # Reads in the dropped region return nothing / the next chunk.
-        assert stream.read(0.0, 1.0) in (b"", b"\x00\x00" * 16000)
+        assert stream.read(0.0, 1.0) == b""
 
     def test_video_trim_keeps_timeline(self) -> None:
         from core.streams import VideoStream

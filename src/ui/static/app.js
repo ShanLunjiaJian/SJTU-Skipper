@@ -9,7 +9,10 @@
     playerCache: {},
     paletteItems: [],
     paletteIndex: 0,
-    loading: false,
+    loading: null,
+    navigationVersion: 0,
+    navigationPending: 0,
+    navigationQueue: Promise.resolve(),
     lastLoad: 0,
     ws: null,
     wsRetry: 0,
@@ -82,8 +85,8 @@
       ...options,
     });
     if (resp.status === 401) {
-      // Session expired (or never existed): the login page owns the rest.
-      window.location.href = "/login";
+      const next = location.pathname + location.search + location.hash;
+      window.location.href = `/login?next=${encodeURIComponent(next)}`;
       throw new Error("未登录");
     }
     if (!resp.ok) {
@@ -97,20 +100,106 @@
     return type.includes("application/json") ? resp.json() : resp.text();
   }
 
-  async function loadState({ quiet = false } = {}) {
-    if (state.loading) return;
-    state.loading = true;
+  function navigationFromUrl() {
+    const params = new URL(window.location.href).searchParams;
+    const navigation = { page: params.get("page") || "" };
+    for (const key of ["class", "doc"]) {
+      if (params.has(key)) navigation[key] = params.get(key);
+    }
+    return navigation;
+  }
+
+  function syncNavigation(navigation, historyMode) {
+    if (!navigation) return;
+    const url = new URL(window.location.href);
+    for (const key of ["page", "class", "doc"]) {
+      const value = navigation[key];
+      if (value) url.searchParams.set(key, value);
+      else url.searchParams.delete(key);
+    }
+    if (url.href !== window.location.href) {
+      window.history[`${historyMode}State`](window.history.state, "", url);
+    }
+  }
+
+  async function loadState({
+    quiet = false,
+    historyMode = "replace",
+    navigationVersion = null,
+  } = {}) {
+    if (navigationVersion === null && state.navigationPending) return;
+    if (state.loading) {
+      await state.loading;
+      if (navigationVersion === null) return;
+    }
+    const version = navigationVersion ?? state.navigationVersion;
+    if (version !== state.navigationVersion) return;
+    state.loading = (async () => {
+      try {
+        const ui = await api("/api/ui/state");
+        if (version !== state.navigationVersion) return;
+        if (navigationVersion === null && state.navigationPending) return;
+        const previousPage = state.ui?.navigation?.page;
+        state.ui = ui;
+        state.lastLoad = Date.now();
+        if (previousPage !== ui.navigation?.page) {
+          for (const side of ["left", "right"]) {
+            const tab = (ui[`${side}_tabs`] || []).find((item) =>
+              (item.toolbox || []).some((tool) => tool.page === ui.active_page),
+            );
+            if (tab) state.activeTab[side] = tab.id;
+          }
+        }
+        renderAll();
+        syncNavigation(ui.navigation, historyMode);
+        setConnection(true);
+      } catch (err) {
+        setConnection(false);
+        if (!quiet) toast(`加载状态失败：${err.message}`, "err");
+      } finally {
+        state.loading = null;
+      }
+    })();
+    await state.loading;
+  }
+
+  function changeNavigation(callback, historyMode = "push") {
+    const version = state.navigationVersion;
+    state.navigationPending += 1;
+    const task = state.navigationQueue.then(async () => {
+      try {
+        const result = await callback();
+        if (result?.refresh !== false || result?.open_page) {
+          await loadState({
+            quiet: true,
+            historyMode,
+            navigationVersion: version,
+          });
+        }
+        return result;
+      } finally {
+        state.navigationPending -= 1;
+      }
+    });
+    state.navigationQueue = task.catch(() => {});
+    return task;
+  }
+
+  async function restoreNavigation(initial = false) {
+    state.navigationVersion += 1;
+    const navigation = navigationFromUrl();
+    const hasPage = new URL(window.location.href).searchParams.has("page");
     try {
-      const ui = await api("/api/ui/state");
-      state.ui = ui;
-      state.lastLoad = Date.now();
-      renderAll();
-      setConnection(true);
+      await changeNavigation(async () => {
+        if (!initial || hasPage) {
+          await api("/api/ui/navigate", {
+            method: "POST",
+            body: JSON.stringify(navigation),
+          });
+        }
+      }, "replace");
     } catch (err) {
-      setConnection(false);
-      if (!quiet) toast(`加载状态失败：${err.message}`, "err");
-    } finally {
-      state.loading = false;
+      toast(`加载状态失败：${err.message}`, "err");
     }
   }
 
@@ -137,6 +226,7 @@
           { left: "$", right: "$", display: false },
           { left: "\\(", right: "\\)", display: false },
         ],
+        ignoredClasses: ["agent-workflow"],
         throwOnError: false,
         strict: false,
       });
@@ -265,18 +355,19 @@
     const box = el("div", { class: "tree-node" });
     const children = Array.isArray(node.children) ? node.children : [];
     const hasChildren = children.length > 0;
+    const canExpand = hasChildren || !!node.toggle;
     const row = el("div", {
       class: `tree-row ${node.active ? "active" : ""} ${node.live ? "live" : ""}`,
     });
     const caret = el("button", {
-      class: `tree-caret ${hasChildren ? "" : "leaf"}`,
+      class: `tree-caret ${canExpand ? "" : "leaf"}`,
       type: "button",
       text: node.expanded ? "▾" : "▸",
-      title: hasChildren ? (node.expanded ? "折叠" : "展开") : "",
+      title: canExpand ? (node.expanded ? "折叠" : "展开") : "",
     });
     caret.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (hasChildren) runNodeAction(node.toggle);
+      if (canExpand) runNodeAction(node.toggle);
     });
     row.appendChild(caret);
     if (node.icon)
@@ -296,7 +387,7 @@
     }
     row.addEventListener("click", () => {
       if (node.action) runNodeAction(node.action);
-      else if (hasChildren) runNodeAction(node.toggle);
+      else if (canExpand) runNodeAction(node.toggle);
     });
     box.appendChild(row);
     if (hasChildren && node.expanded) {
@@ -523,9 +614,15 @@
       block.key ||
       `tabs:${tabs.map((t) => t.title || "").join("\u0001")}`;
     const savedTitle = state.blockTabs[key];
-    // A client-side selection wins over the server hint so that periodic
-    // refreshes do not yank the reader back to the document it opened with.
-    let active = tabs.findIndex((t) => (t.title || "") === savedTitle);
+    const navigation = state.ui?.navigation;
+    let active = tabs.findIndex(
+      (t) =>
+        navigation?.doc &&
+        t.meta?.doc_key === navigation.doc &&
+        t.meta?.page_id === navigation?.page,
+    );
+    if (active < 0)
+      active = tabs.findIndex((t) => (t.title || "") === savedTitle);
     if (active < 0) active = tabs.findIndex((t) => t.active);
     if (active < 0) active = 0;
     // Selection-menu context of the visible tab: which document is displayed
@@ -561,7 +658,21 @@
         type: "button",
         text: tab.title || `Tab ${i + 1}`,
       });
-      btn.addEventListener("click", () => show(i));
+      btn.addEventListener("click", async () => {
+        show(i);
+        const meta = tab.meta || {};
+        if (!meta.doc_key || !meta.page_id) return;
+        try {
+          await changeNavigation(() =>
+            api("/api/ui/navigate", {
+              method: "POST",
+              body: JSON.stringify({ page: meta.page_id, doc: meta.doc_key }),
+            }),
+          );
+        } catch (err) {
+          toast(`打开页面失败：${err.message}`, "err");
+        }
+      });
       bar.appendChild(btn);
     });
     wrap.appendChild(bar);
@@ -770,14 +881,6 @@
 
     bar.appendChild(stateEl);
     bar.appendChild(toggle);
-    if (block.part && block.parts && block.parts > 1) {
-      bar.appendChild(
-        el("span", {
-          class: "player-meta",
-          text: `第 ${block.part}/${block.parts} 节`,
-        }),
-      );
-    }
     wrap.appendChild(bar);
     return wrap;
   }
@@ -1037,9 +1140,485 @@
     }
   }
 
+  const agentSelections = new Map();
+  const agentViews = new Map();
+
+  function executionText(value) {
+    if (value === undefined || value === null) return "";
+    return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  }
+
+  function executionArgs(value) {
+    if (value && typeof value === "object") return value;
+    try {
+      const parsed = JSON.parse(value || "{}");
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function executionNumber(value) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0;
+  }
+
+  function executionTokens(value) {
+    return value >= 1000000
+      ? `${(value / 1000000).toFixed(1)}M`
+      : `${(value / 1000).toFixed(1)}K`;
+  }
+
+  function executionToolTitle(block, args) {
+    const name = (block.name || "tool").split(/[.:/]/).at(-1);
+    const path = args.path || args.file_path || args.file || "";
+    if (name === "read") {
+      const range =
+        args.offset !== undefined ? ` from line ${args.offset}` : "";
+      const count = args.limit !== undefined ? `, ${args.limit} lines` : "";
+      const details = block.result?.details;
+      const lines = details?.lineCount ?? details?.totalLines;
+      return `read ${path || "path unavailable"}${range}${count}${executionNumber(lines) ? ` (${lines} lines)` : ""}`;
+    }
+    if (name === "wait") {
+      const targets =
+        args.targets ||
+        args.ids ||
+        args.handles ||
+        block.result?.details?.jobs?.map((job) => job.name || job.id);
+      return `wait: ${targets ? executionText(targets).replace(/\s+/g, " ") : args.i || "background work or peer messages"}`;
+    }
+    if (["grep", "glob"].includes(name))
+      return `${name} ${args.pattern || path || ""}${args.pattern && path ? ` in ${path}` : ""}`;
+    return `${name}${path ? ` ${path}` : args.i ? `: ${args.i}` : ""}`;
+  }
+
+  function renderExecutionBlock(block, row) {
+    const args = executionArgs(block.arguments);
+    const name = (block.name || "").split(/[.:/]/).at(-1);
+    const isRead = block.kind === "tool" && name === "read";
+    const text = executionText(block.text);
+    const latestLine =
+      text
+        .trim()
+        .split(/\n\s*\n/)
+        .at(-1)
+        ?.split("\n")[0] || "";
+    const title =
+      block.kind === "tool"
+        ? executionToolTitle(block, args)
+        : block.kind === "thinking"
+          ? `Thinking${latestLine ? `: ${latestLine.replaceAll("**", "")}` : ""}`
+          : block.kind === "review"
+            ? "Review report"
+            : `Text${text ? `: ${text.trim().split("\n")[0]}` : ""}`;
+    row.className = `execution-block execution-${block.kind || "text"}`;
+    row.dataset.status = block.status || "completed";
+    const header = el("summary", { class: "execution-header" }, [
+      el("span", { class: "execution-title", text: title }),
+      el("span", {
+        class: "execution-status",
+        text: block.status || "completed",
+      }),
+      el("span", {
+        class: "execution-seconds",
+        text: executionNumber(block.seconds)
+          ? `${block.seconds.toFixed(1)}s`
+          : "",
+      }),
+    ]);
+    const body = el("div", { class: "execution-body" });
+    if (!isRead && block.kind === "tool") {
+      body.append(
+        el("h4", { text: "Arguments" }),
+        el("pre", { text: executionText(block.arguments) || "Unavailable" }),
+      );
+      if (block.result !== undefined)
+        body.append(
+          el("h4", { text: "Result" }),
+          el("pre", { text: executionText(block.result) }),
+        );
+    } else if (block.kind === "review") {
+      const report = executionArgs(block.report);
+      const verdict = report.overall_correctness;
+      if (verdict)
+        body.appendChild(
+          el("strong", { class: "execution-verdict", text: verdict }),
+        );
+      if (report.explanation || report.summary || text)
+        body.appendChild(
+          el("p", { text: report.explanation || report.summary || text }),
+        );
+      for (const finding of report.findings || []) {
+        body.appendChild(
+          el("article", { class: "execution-finding" }, [
+            el("strong", {
+              text: `${finding.priority !== undefined ? `P${finding.priority} ` : ""}${finding.title || "Finding"}`,
+            }),
+            el("p", { text: finding.body || finding.explanation || "" }),
+            finding.file_path
+              ? el("pre", {
+                  text: `${finding.file_path}:${finding.line_start}-${finding.line_end}`,
+                })
+              : null,
+          ]),
+        );
+      }
+      if (!Object.keys(report).length && block.report)
+        body.appendChild(el("pre", { text: executionText(block.report) }));
+    } else if (!isRead) body.appendChild(el("pre", { text }));
+    const preview = el("pre", { class: "execution-preview", text: "" });
+    if (!isRead && block.kind === "tool") {
+      if (["grep", "glob"].includes(name) && block.result !== undefined) {
+        const result = block.result;
+        const output =
+          result?.details?.displayContent ??
+          (Array.isArray(result?.content)
+            ? result.content
+                .filter((part) => part.type === "text")
+                .map((part) => part.text || "")
+                .join("\n")
+            : result);
+        preview.textContent = executionText(output)
+          .split("\n")
+          .slice(0, 6)
+          .join("\n");
+      } else if (
+        ["write", "edit", "apply_patch"].includes(name) ||
+        ["streaming", "running"].includes(block.status)
+      ) {
+        const writing = ["write", "edit", "apply_patch"].includes(name);
+        const content = executionText(
+          writing
+            ? (args.content ?? args.input ?? args.patch ?? block.arguments)
+            : block.arguments,
+        );
+        preview.textContent = writing
+          ? content.split("\n").slice(-5).join("\n")
+          : content.split("\n").slice(0, 5).join("\n");
+      }
+    }
+    header.appendChild(preview);
+    row.replaceChildren(header, body);
+  }
+
+  function executionPosition(view) {
+    const { log } = view;
+    const edge = log.getBoundingClientRect().top;
+    const anchor = Array.from(log.children).find(
+      (node) => node.getBoundingClientRect().bottom > edge,
+    );
+    return {
+      top: log.scrollTop,
+      bottom: log.scrollHeight - log.clientHeight - log.scrollTop <= 24,
+      anchor,
+      offset: anchor ? anchor.getBoundingClientRect().top - edge : 0,
+    };
+  }
+
+  function renderAgentActivity(block) {
+    const key = JSON.stringify([state.ui.active_page, block.id]);
+    let view = agentViews.get(key);
+    if (!view) {
+      const root = el("section", { class: "block agent-workflow" });
+      const select = el("button", {
+        class: "execution-select",
+        type: "button",
+        "aria-label": "查看会话",
+        "aria-haspopup": "listbox",
+        "aria-expanded": "false",
+      });
+      const menu = el("div", {
+        class: "execution-session-menu",
+        role: "listbox",
+        "aria-label": "选择会话",
+        hidden: true,
+      });
+      document.body.appendChild(menu);
+      const metrics = el("div", {
+        class: "execution-metrics",
+        "aria-label": "Execution metrics",
+      });
+      const log = el("div", {
+        class: "execution-log",
+        tabindex: "0",
+        "aria-label": "Execution blocks",
+      });
+      root.append(
+        el("div", { class: "execution-bar" }, [select, metrics]),
+        log,
+      );
+      view = {
+        root,
+        select,
+        menu,
+        options: new Map(),
+        metrics,
+        log,
+        rows: new Map(),
+        positions: new Map(),
+        agents: [],
+      };
+      const close = () => {
+        menu.hidden = true;
+        select.setAttribute("aria-expanded", "false");
+      };
+      select.addEventListener("click", () => {
+        if (!menu.hidden) {
+          close();
+          return;
+        }
+        const rect = select.getBoundingClientRect();
+        menu.style.left = `${rect.left}px`;
+        menu.style.top = `${rect.bottom + 4}px`;
+        menu.hidden = false;
+        select.setAttribute("aria-expanded", "true");
+        (
+          menu.querySelector('[aria-selected="true"]') || menu.firstElementChild
+        )?.focus();
+      });
+      menu.addEventListener("click", (event) => {
+        const option = event.target.closest("[data-role]");
+        if (!option) return;
+        agentSelections.set(key, option.dataset.role);
+        close();
+        showAgentExecution(view, key);
+        select.focus();
+      });
+      menu.addEventListener("keydown", (event) => {
+        const options = Array.from(menu.children);
+        const index = options.indexOf(document.activeElement);
+        if (event.key === "Escape") {
+          close();
+          select.focus();
+        } else if (
+          ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)
+        ) {
+          event.preventDefault();
+          const next =
+            event.key === "Home"
+              ? 0
+              : event.key === "End"
+                ? options.length - 1
+                : (index +
+                    (event.key === "ArrowDown" ? 1 : -1) +
+                    options.length) %
+                  options.length;
+          options[next]?.focus();
+        }
+      });
+      document.addEventListener("pointerdown", (event) => {
+        if (
+          !menu.hidden &&
+          !menu.contains(event.target) &&
+          !select.contains(event.target)
+        )
+          close();
+      });
+      log.addEventListener("scroll", () => {
+        if (!view.updating)
+          view.positions.set(view.role, executionPosition(view));
+      });
+      agentViews.set(key, view);
+    }
+    view.agents = Array.isArray(block.agents) ? block.agents : [];
+    const roles = view.agents.some((agent) => agent.role === "main")
+      ? new Map([
+          ["main", "主写作"],
+          ["note_review", "笔记审阅"],
+        ])
+      : new Map();
+    for (const agent of view.agents)
+      if (agent.role?.startsWith("chunk:")) roles.set(agent.role, agent.label);
+    view.roles = roles;
+    for (const [value, text] of roles) {
+      let option = view.options.get(value);
+      if (!option) {
+        option = el("button", {
+          type: "button",
+          role: "option",
+          dataset: { role: value },
+        });
+        view.options.set(value, option);
+        view.menu.appendChild(option);
+      }
+      if (option.textContent !== text) option.textContent = text;
+    }
+    for (const [value, option] of view.options) {
+      if (!roles.has(value)) {
+        option.remove();
+        view.options.delete(value);
+      }
+    }
+    showAgentExecution(view, key);
+    return view.root;
+  }
+
+  function showAgentExecution(view, key) {
+    const { select, metrics, log } = view;
+    if (view.role && log.isConnected)
+      view.positions.set(view.role, executionPosition(view));
+    view.updating = true;
+    const preferred = agentSelections.get(key);
+    const role =
+      preferred && view.roles.has(preferred)
+        ? preferred
+        : view.agents.some((agent) => agent.role === "main")
+          ? "main"
+          : view.agents[0]?.role || "main";
+    view.role = role;
+    const label = `${view.roles.get(role) || "查看会话"} ▾`;
+    if (select.textContent !== label) select.textContent = label;
+    for (const [value, option] of view.options)
+      option.setAttribute("aria-selected", String(value === role));
+    const agents = view.agents.filter((agent) => agent.role === role);
+    const latest = agents.at(-1) || {};
+    const context =
+      executionNumber(latest.context_tokens) &&
+      executionNumber(latest.context_window) &&
+      latest.context_window > 0
+        ? `${((100 * latest.context_tokens) / latest.context_window).toFixed(1)}%/${executionTokens(latest.context_window)}`
+        : "unavailable";
+    const seconds = (value) =>
+      executionNumber(value) ? `${value.toFixed(1)}s` : "unavailable";
+    metrics.replaceChildren(
+      ...[
+        `${latest.model || "unavailable"}:${latest.thinking || "unavailable"}`,
+        `上下文 ${context}`,
+        `LLM ${seconds(latest.llm_seconds)}`,
+        `工具调用 ${seconds(latest.tool_seconds)}`,
+        executionNumber(latest.tokens_per_second)
+          ? `${latest.tokens_per_second.toFixed(1)} tok/s`
+          : "tok/s unavailable",
+      ].map((text) => el("span", { text })),
+    );
+    const rows = [];
+    for (const agent of agents) {
+      for (const block of agent.blocks || []) {
+        const id = JSON.stringify([agent.id, block.id]);
+        let cached = view.rows.get(id);
+        if (!cached) {
+          cached = { node: el("details"), signature: null };
+          view.rows.set(id, cached);
+        }
+        const signature = JSON.stringify(block);
+        if (cached.signature !== signature) {
+          renderExecutionBlock(block, cached.node);
+          cached.signature = signature;
+        }
+        rows.push(cached.node);
+      }
+    }
+    if (!rows.length)
+      rows.push(
+        el("p", {
+          class: "execution-empty",
+          text: "Waiting for execution blocks",
+        }),
+      );
+    for (const child of Array.from(log.children))
+      if (!rows.includes(child)) child.remove();
+    rows.forEach((row, index) => {
+      if (log.children[index] !== row)
+        log.insertBefore(row, log.children[index] || null);
+    });
+    const position = view.positions.get(role);
+    const restore = () => {
+      if (!position || position.bottom) log.scrollTop = log.scrollHeight;
+      else if (position.anchor?.parentNode === log) {
+        log.scrollTop +=
+          position.anchor.getBoundingClientRect().top -
+          log.getBoundingClientRect().top -
+          position.offset;
+      } else log.scrollTop = position.top;
+    };
+    restore();
+    view.updating = false;
+    const revision = (view.revision = (view.revision || 0) + 1);
+    requestAnimationFrame(() => {
+      if (view.role === role && view.revision === revision) {
+        restore();
+        view.positions.set(role, executionPosition(view));
+      }
+    });
+  }
+
+  function renderTaskQueue(existing = null) {
+    const root =
+      existing ||
+      el("section", { class: "block task-queue" }, [
+        el("h2", { class: "block-title", text: "任务队列" }),
+        el("p", { class: "task-summary" }),
+        el("p", {
+          class: "empty task-empty",
+          text: "还没有等待或运行中的任务．开始课程处理或生成笔记后，任务会出现在这里．",
+        }),
+        el("ul", { class: "task-list", "aria-label": "任务队列" }),
+      ]);
+    const tasks = state.ui.tasks || [];
+    const pending = tasks.filter((task) => task.state === "pending").length;
+    $(".task-summary", root).textContent =
+      `等待中 ${pending} 个，运行中 ${tasks.length - pending} 个`;
+    $(".task-empty", root).hidden = tasks.length > 0;
+    const list = $(".task-list", root);
+    const rows = new Map(
+      Array.from(list.children, (row) => [row.dataset.taskId, row]),
+    );
+    tasks.forEach((task, index) => {
+      const key = String(task.id ?? index);
+      let row = rows.get(key);
+      if (!row) {
+        row = el("li", { class: "task-row", dataset: { taskId: key } }, [
+          el("div", { class: "task-info" }, [
+            el("h3", { class: "task-label" }),
+            el("p", { class: "task-detail" }),
+            el("p", { class: "task-session" }),
+          ]),
+          el("span", { class: "badge task-state" }),
+          el("button", {
+            type: "button",
+            class: "btn btn-sm btn-danger task-cancel",
+            text: "停止任务",
+          }),
+        ]);
+        $(".task-cancel", row).addEventListener("click", async (event) => {
+          const button = event.currentTarget;
+          const cancel = row.task.cancel;
+          if (!cancel?.action || button.disabled) return;
+          button.disabled = true;
+          try {
+            await postAction(cancel.action, cancel.payload || {});
+          } finally {
+            button.disabled = false;
+          }
+        });
+      }
+      rows.delete(key);
+      row.task = task;
+      $(".task-label", row).textContent = task.label || "任务";
+      $(".task-detail", row).textContent = task.detail || "";
+      const session = $(".task-session", row);
+      session.textContent = task.session_id ? `会话：${task.session_id}` : "";
+      session.hidden = !task.session_id;
+      $(".task-state", row).textContent =
+        task.state === "pending" ? "等待中" : "运行中";
+      const button = $(".task-cancel", row);
+      button.hidden = !task.cancel?.action;
+      button.setAttribute(
+        "aria-label",
+        `停止任务：${task.label || task.id || "任务"}`,
+      );
+      if (list.children[index] !== row)
+        list.insertBefore(row, list.children[index] || null);
+    });
+    for (const row of rows.values()) row.remove();
+    return root;
+  }
+
   function renderBlock(block) {
     if (!block || typeof block !== "object") return null;
     const type = block.type || "text";
+    if (type === "agent_activity") return renderAgentActivity(block);
+    if (type === "task_queue") return renderTaskQueue();
     if (type === "html")
       return el("div", { class: "block", html: block.html || "" });
     if (type === "markdown") {
@@ -1712,6 +2291,15 @@
     const tabs = side === "left" ? state.ui.left_tabs : state.ui.right_tabs;
     const tabsEl = $(`#${side}-tabs`);
     const toolboxEl = $(`#${side}-toolbox`);
+    const sidebarKey = JSON.stringify([
+      tabs,
+      state.activeTab[side],
+      state.ui.active_page,
+      side === "right" ? state.ui.context : null,
+    ]);
+    if (toolboxEl.dataset.renderKey === sidebarKey) return;
+    toolboxEl.dataset.renderKey = sidebarKey;
+    const sidebarScroll = toolboxEl.scrollTop;
     if (side === "right") renderSidebarContext();
     const contextKnown = Object.prototype.hasOwnProperty.call(
       state.ui,
@@ -1796,7 +2384,11 @@
       }
       const body = el("div", { class: "toolbox-body" });
       if (item.blocks && item.blocks.length) {
-        body.appendChild(renderBlocks(item.blocks));
+        body.appendChild(
+          renderBlocks(
+            item.blocks.filter((block) => block.type !== "agent_activity"),
+          ),
+        );
       } else {
         body.appendChild(
           el("div", {
@@ -1808,6 +2400,7 @@
       panel.appendChild(body);
       toolboxEl.appendChild(panel);
     }
+    toolboxEl.scrollTop = sidebarScroll;
   }
 
   function renderPageTabs() {
@@ -1849,6 +2442,13 @@
     const container = $("#page-content");
     const active = state.ui.active_page || "";
     const blocks = active ? state.ui.page_content?.[active] : null;
+    if (active === "ui:tasks" && container.dataset.pageId === active) {
+      const queue = $(".task-queue", container);
+      if (queue) {
+        renderTaskQueue(queue);
+        return false;
+      }
+    }
     // ``collapsed`` is client-side fold state persisted in the note; ignoring
     // it here keeps polling refreshes from re-rendering after a fold toggle.
     const key = active
@@ -1859,12 +2459,38 @@
     // KaTeX when the payload is identical.  This is what made the board and
     // notes pages feel like they were reloading constantly.
     if (samePage && state.pageKey === key) return false;
+    if (
+      samePage &&
+      blocks?.length &&
+      blocks.some((block) => block.type === "agent_activity") &&
+      container.children.length === blocks.length
+    ) {
+      blocks.forEach((block, index) => {
+        const current = container.children[index];
+        if (block.type === "agent_activity") {
+          const view = renderAgentActivity(block);
+          if (view !== current) current.replaceWith(view);
+        } else {
+          const signature = JSON.stringify(block);
+          if (current.dataset.blockSignature !== signature) {
+            const node = renderBlock(block);
+            if (node) {
+              node.dataset.blockSignature = signature;
+              current.replaceWith(node);
+            }
+          }
+        }
+      });
+      state.pageKey = key;
+      return true;
+    }
     const scrollTop = samePage ? container.scrollTop : 0;
     const focused = document.activeElement;
     const editing =
       samePage &&
       focused &&
       container.contains(focused) &&
+      !focused.classList.contains("execution-select") &&
       ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName);
     if (editing) return false; // don't wipe out a form the user is typing in
     // Q&A blocks grow and shrink as answers stream in.  Record, for blocks
@@ -1879,6 +2505,10 @@
           above: node.getBoundingClientRect().bottom <= scrollerTop,
         });
       }
+    }
+    for (const view of agentViews.values()) {
+      if (view.log.isConnected)
+        view.positions.set(view.role, executionPosition(view));
     }
     destroyPlayers(container);
     container.replaceChildren();
@@ -1956,11 +2586,23 @@
         llm.registered ? "ok" : "",
       ),
     );
-    for (const task of state.ui.tasks || []) {
-      bar.appendChild(
-        item(task.label || "任务", task.detail || "运行中", "busy"),
-      );
-    }
+    const tasks = state.ui.tasks || [];
+    bar.appendChild(
+      el(
+        "button",
+        {
+          type: "button",
+          class: "status-item status-task-link",
+          "aria-label": `打开任务队列，共 ${tasks.length} 个任务`,
+          onclick: () => openPage("ui:tasks"),
+        },
+        [
+          tasks.length ? el("span", { class: "dot busy" }) : null,
+          el("span", { text: "任务队列" }),
+          el("b", { text: String(tasks.length) }),
+        ],
+      ),
+    );
 
     const sessionPill = $("#session-pill");
     if (session.session_id) {
@@ -1974,10 +2616,11 @@
 
   async function openPage(pageId) {
     try {
-      await api(`/api/ui/pages/${encodeURIComponent(pageId)}/open`, {
-        method: "POST",
-      });
-      await loadState({ quiet: true });
+      await changeNavigation(() =>
+        api(`/api/ui/pages/${encodeURIComponent(pageId)}/open`, {
+          method: "POST",
+        }),
+      );
     } catch (err) {
       toast(`打开页面失败：${err.message}`, "err");
     }
@@ -1985,10 +2628,11 @@
 
   async function closePage(pageId) {
     try {
-      await api(`/api/ui/pages/${encodeURIComponent(pageId)}/close`, {
-        method: "POST",
-      });
-      await loadState({ quiet: true });
+      await changeNavigation(() =>
+        api(`/api/ui/pages/${encodeURIComponent(pageId)}/close`, {
+          method: "POST",
+        }),
+      );
     } catch (err) {
       toast(`关闭页面失败：${err.message}`, "err");
     }
@@ -2028,19 +2672,27 @@
 
   async function postAction(action, values = {}, pageId = null, itemId = null) {
     try {
-      const result = await api("/api/ui/action", {
-        method: "POST",
-        body: JSON.stringify({
-          action,
-          values,
-          page_id: pageId || state.ui?.active_page || null,
-          item_id: itemId || null,
-        }),
+      return await changeNavigation(async () => {
+        const result = await api("/api/ui/action", {
+          method: "POST",
+          body: JSON.stringify({
+            action,
+            values,
+            page_id: pageId || state.ui?.active_page || null,
+            item_id: itemId || null,
+          }),
+        });
+        if (result.message) toast(result.message, result.ok ? "ok" : "err");
+        if (result.open_page) {
+          await api(
+            `/api/ui/pages/${encodeURIComponent(result.open_page)}/open`,
+            {
+              method: "POST",
+            },
+          );
+        }
+        return result;
       });
-      if (result.message) toast(result.message, result.ok ? "ok" : "err");
-      if (result.open_page) await openPage(result.open_page);
-      if (result.refresh !== false) await loadState({ quiet: true });
-      return result;
     } catch (err) {
       toast(`操作失败：${err.message}`, "err");
       return { ok: false };
@@ -2125,14 +2777,15 @@
     });
   }
 
-  function boot() {
+  async function boot() {
     applySidebarState();
     bindSidebarControls();
     bindSidebarResize();
     bindSelectionMenu();
     bindAskDialog();
     bindPaletteTrigger();
-    loadState();
+    window.addEventListener("popstate", () => restoreNavigation());
+    await restoreNavigation(true);
     connectWs();
     setInterval(() => {
       if (Date.now() - state.lastLoad > 2500) loadState({ quiet: true });

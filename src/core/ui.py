@@ -7,11 +7,13 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import Any, Callable, Iterable, Literal, Mapping
 
 from html import escape as html_escape
 
 from markdown_it import MarkdownIt
+from mdit_py_plugins.footnote import footnote_plugin
 
 logger = logging.getLogger("lecture_agent.ui")
 
@@ -35,6 +37,7 @@ def _markdown_renderer() -> MarkdownIt:
             md.enable(rule)
         except Exception:  # pragma: no cover - rule availability differs
             pass
+    md.use(footnote_plugin)
     return md
 
 
@@ -109,9 +112,10 @@ def _sanitize_html(html: str) -> str:
     return html
 
 
-def render_markdown(text: str) -> str:
+def render_markdown(text: str, *, document_id: str = "") -> str:
     prepared, blocked = _normalise_math(text)
-    html = _MD.render(prepared)
+    env = {"docId": sha256(document_id.encode()).hexdigest()} if document_id else {}
+    html = _MD.render(prepared, env)
     html = _restore_math(html, blocked)
     return _sanitize_html(html)
 
@@ -276,6 +280,20 @@ class UIManager:
             },
             plugin_id="core",
         )
+        self.add_page(
+            "ui:tasks",
+            "任务队列",
+            render=lambda: [{"type": "task_queue"}],
+            plugin_id="core",
+        )
+        self.register_command(
+            "ui.tasks",
+            "打开任务队列",
+            category="视图",
+            page_id="ui:tasks",
+            keywords="tasks queue 任务 队列",
+            plugin_id="core",
+        )
 
     # ------------------------------------------------------------------
     # Contributions
@@ -432,6 +450,11 @@ class UIManager:
                 self._open_pages.append(id)
             self._active_page = id
         self.refresh(f"page-opened:{id}")
+
+    def show_home(self) -> None:
+        with self._lock:
+            self._active_page = None
+        self.refresh("page-home")
 
     def close_page(self, id: str) -> None:
         with self._lock:
@@ -614,16 +637,34 @@ class UIManager:
         *,
         plugin_id: str = "",
     ) -> None:
-        """Register a callable returning the plugin's currently running tasks.
+        """Register a provider of pending and running in-memory tasks.
 
-        Each task is ``{"id", "label", "detail", "started"}`` and is shown in
-        the status bar / notes item while it runs.
+        Tasks contain id, label, detail, state, and optional session_id.
+        An optional cancel descriptor contains an action and its payload.
+        Providers without a state describe running tasks.
         """
 
         with self._lock:
             if any(existing is provider for _owner, existing in self._task_providers):
                 return
             self._task_providers.append((plugin_id, provider))
+
+    def get_tasks(self) -> list[dict[str, Any]]:
+        """Collect active tasks without retaining task history."""
+
+        with self._lock:
+            providers = list(self._task_providers)
+        tasks: list[dict[str, Any]] = []
+        for _owner, provider in providers:
+            try:
+                tasks.extend(
+                    task
+                    for task in (provider() or [])
+                    if task.get("state", "running") in {"pending", "running"}
+                )
+            except Exception:  # noqa: BLE001 - isolate task providers
+                logger.exception("UI task provider failed")
+        return tasks
 
     def remove_plugin(self, plugin_id: str) -> None:
         """Drop every contribution owned by *plugin_id* (plugin teardown).
@@ -747,8 +788,6 @@ class UIManager:
             open_pages = list(self._open_pages)
             active = self._active_page
             version = self._version
-        if active is None and open_pages:
-            active = open_pages[-1]
 
         def tab_payload(side: Side) -> list[dict[str, Any]]:
             out = []
@@ -796,12 +835,7 @@ class UIManager:
                 status = dict(self._status_provider())
             except Exception as exc:  # noqa: BLE001
                 status = {"error": str(exc)}
-        tasks: list[dict[str, Any]] = []
-        for _owner, provider in list(self._task_providers):
-            try:
-                tasks.extend(provider() or [])
-            except Exception:  # noqa: BLE001 - a broken task provider must not
-                continue
+        tasks = self.get_tasks()
 
         context: dict[str, Any] | None = None
         if self._context_provider is not None:

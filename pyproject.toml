@@ -19,6 +19,7 @@ dependencies = [
   "numpy>=1.26,<3.0",
   "pillow>=10.0,<13.0",
   "markdown-it-py>=3.0,<4.0",
+  "mdit-py-plugins>=0.5,<1.0",
   "beautifulsoup4>=4.12,<5.0",
   "websockets>=15,<17",
   "rich>=13.7,<15.0",
@@ -37,10 +38,18 @@ py-modules = ["app", "applog", "cli", "config"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["core*", "llm*", "plugins*", "ui*", "integrations*"]
+include = [
+  "agent_runtime*",
+  "core*",
+  "llm*",
+  "plugins*",
+  "ui*",
+  "integrations*",
+]
 
 [tool.setuptools.package-data]
 ui = ["static/*"]
+agent_runtime = ["*.ts", "prompts/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

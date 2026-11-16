@@ -29,18 +29,38 @@ class Catalog:
         self._cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
         # ``_load_tree`` fans out across courses, so lazy client creation and
         # the TTL cache are touched from several threads.
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._users: dict[SJTUCatalog, int] = {}
+        self._retired: set[SJTUCatalog] = set()
 
-    def _cached(self, key: tuple[Any, ...], ttl: float, loader: Callable[[], T]) -> T:
-        """Small TTL cache; UI state() re-renders toolbox items every poll."""
-
+    def _cached(
+        self, key: tuple[Any, ...], ttl: float, loader: Callable[[SJTUCatalog], T]
+    ) -> T:
         now = time.monotonic()
-        hit = self._cache.get(key)
-        if hit is not None and now - hit[0] < ttl:
-            return hit[1]
-        value = loader()
-        self._cache[key] = (now, value)
-        return value
+        with self._lock:
+            hit = self._cache.get(key)
+            if hit is not None and now - hit[0] < ttl:
+                return hit[1]
+            cat = self._cat()
+            self._users[cat] = self._users.get(cat, 0) + 1
+        try:
+            value = loader(cat)
+            with self._lock:
+                if self._sjt_cat is cat:
+                    self._cache[key] = (time.monotonic(), value)
+            return value
+        finally:
+            with self._lock:
+                remaining = self._users[cat] - 1
+                if remaining:
+                    self._users[cat] = remaining
+                else:
+                    del self._users[cat]
+                close = not remaining and cat in self._retired
+                if close:
+                    self._retired.remove(cat)
+            if close:
+                cat.close()
 
     def _cat(self) -> SJTUCatalog:
         with self._lock:
@@ -63,7 +83,7 @@ class Catalog:
     # -- Courses ----------------------------------------------------------
 
     def list_courses(self) -> list[dict[str, Any]]:
-        return self._cached(("courses",), 60.0, lambda: self._cat().list_courses())
+        return self._cached(("courses",), 60.0, lambda cat: cat.list_courses())
 
     # -- Recordings -------------------------------------------------------
 
@@ -71,14 +91,14 @@ class Catalog:
         return self._cached(
             ("recordings", str(course_id), int(limit)),
             30.0,
-            lambda: self._cat().list_recordings(course_id, limit=limit),
+            lambda cat: cat.list_recordings(course_id, limit=limit),
         )
 
     def get_recording_url(self, course_id: str, video_id: str) -> str:
         return self._cached(
             ("recording_url", str(course_id), str(video_id)),
             60.0,
-            lambda: self._cat().get_recording_url(course_id, video_id),
+            lambda cat: cat.get_recording_url(course_id, video_id),
         )
 
     def get_recording_streams(self, course_id: str, video_id: str) -> dict[str, str]:
@@ -87,7 +107,7 @@ class Catalog:
         return self._cached(
             ("recording_streams", str(course_id), str(video_id)),
             60.0,
-            lambda: self._cat().get_recording_streams(course_id, video_id),
+            lambda cat: cat.get_recording_streams(course_id, video_id),
         )
 
     # -- Live -------------------------------------------------------------
@@ -96,14 +116,14 @@ class Catalog:
         return self._cached(
             ("lives", start, end),
             15.0,
-            lambda: self._cat().list_lives(start, end),
+            lambda cat: cat.list_lives(start, end),
         )
 
     def get_live_devices(self, live_id: str) -> list[dict[str, Any]]:
         return self._cached(
             ("live_devices", str(live_id)),
             30.0,
-            lambda: self._cat().get_live_devices(live_id),
+            lambda cat: cat.get_live_devices(live_id),
         )
 
     # -- Lifecycle --------------------------------------------------------
@@ -111,7 +131,10 @@ class Catalog:
     def close(self) -> None:
         with self._lock:
             cat, self._sjt_cat = self._sjt_cat, None
-        self._cache.clear()
+            self._cache.clear()
+            if cat is not None and self._users.get(cat, 0):
+                self._retired.add(cat)
+                cat = None
         if cat is not None:
             cat.close()
 

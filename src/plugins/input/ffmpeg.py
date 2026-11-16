@@ -211,8 +211,8 @@ def build_reconnect_args(
     ]
 
 
-def probe_duration(path: str, *, timeout: float = 20.0) -> float | None:
-    """Return the media duration in seconds via ffprobe, or None."""
+def probe_duration(path: str) -> float:
+    """Read duration through the byte cache, which controls network timeouts."""
 
     import json
     import subprocess
@@ -230,16 +230,18 @@ def probe_duration(path: str, *, timeout: float = 20.0) -> float | None:
                 str(path),
             ],
             capture_output=True,
-            timeout=timeout,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(f"Recording duration probe failed: {exc}") from exc
     if proc.returncode != 0:
-        return None
+        detail = proc.stderr.decode("utf-8", "replace").strip()
+        raise OSError(f"Recording duration probe exited {proc.returncode}: {detail}")
     try:
         data = json.loads(proc.stdout.decode("utf-8", "replace") or "{}")
         value = float((data.get("format") or {}).get("duration") or 0.0)
-    except (ValueError, TypeError):
-        return None
-    return value if value > 0 else None
+    except (ValueError, TypeError) as exc:
+        raise OSError("Recording duration probe returned invalid metadata") from exc
+    if value <= 0:
+        raise OSError("Recording metadata has no positive duration")
+    return value

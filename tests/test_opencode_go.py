@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from integrations import opencode_go
 from integrations.opencode_go import (
@@ -90,14 +91,10 @@ def test_refresh_token(monkeypatch) -> None:
     assert tokens.refresh_token == "rt_new"
 
 
-def test_refresh_error_is_clear(monkeypatch) -> None:
+def test_refresh_error_is_reported(monkeypatch) -> None:
     def fake_post(url, *, json, timeout):
         return httpx.Response(400, text="invalid_grant")
 
     monkeypatch.setattr(opencode_go.httpx, "post", fake_post)
-    try:
+    with pytest.raises(OpenCodeGoError):
         refresh_access_token("rt_bad")
-    except OpenCodeGoError as exc:
-        assert "刷新" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("expected OpenCodeGoError")
