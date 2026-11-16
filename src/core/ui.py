@@ -27,7 +27,9 @@ ActionHandler = Callable[[dict[str, Any]], Any]
 def _markdown_renderer() -> MarkdownIt:
     # Raw HTML is allowed because plugins use small inline buttons in notes /
     # tables.  LLM-generated markdown is passed through ``_sanitize_html``.
-    md = MarkdownIt("commonmark", {"html": True, "linkify": False, "typographer": False})
+    md = MarkdownIt(
+        "commonmark", {"html": True, "linkify": False, "typographer": False}
+    )
     for rule in ("table", "strikethrough"):
         try:
             md.enable(rule)
@@ -37,8 +39,12 @@ def _markdown_renderer() -> MarkdownIt:
 
 
 _MD = _markdown_renderer()
-_SCRIPT_RE = re.compile(r"<\s*(script|iframe|object|embed|link|meta)\b[^>]*>.*?<\s*/\s*\1\s*>", re.I | re.S)
-_SELF_CLOSING_RE = re.compile(r"<\s*(script|iframe|object|embed|link|meta)\b[^>]*/?>", re.I)
+_SCRIPT_RE = re.compile(
+    r"<\s*(script|iframe|object|embed|link|meta)\b[^>]*>.*?<\s*/\s*\1\s*>", re.I | re.S
+)
+_SELF_CLOSING_RE = re.compile(
+    r"<\s*(script|iframe|object|embed|link|meta)\b[^>]*/?>", re.I
+)
 _EVENT_ATTR_RE = re.compile(r"\son[a-z]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I)
 _JS_URL_RE = re.compile(r"\b(href|src)\s*=\s*(['\"])\s*javascript:[^'\"]*\2", re.I)
 
@@ -637,7 +643,9 @@ class UIManager:
                 if page_id in self._open_pages:
                     self._open_pages.remove(page_id)
                 if self._active_page == page_id:
-                    self._active_page = self._open_pages[-1] if self._open_pages else None
+                    self._active_page = (
+                        self._open_pages[-1] if self._open_pages else None
+                    )
             for item_id in [
                 item.id for item in self._items.values() if item.plugin_id == plugin_id
             ]:

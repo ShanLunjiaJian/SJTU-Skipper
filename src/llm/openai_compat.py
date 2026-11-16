@@ -61,23 +61,6 @@ _RETRYABLE_EXCEPTIONS = (
 _MAX_LINE = 1_000_000  # SSE safety valve
 
 
-def _normalise_base_url(raw: str) -> str:
-    """Accept anything from a bare host to a full ``/chat/completions`` path.
-
-    Returns a URL that ends with ``/v1`` (no trailing slash) so the caller
-    appends ``/chat/completions``.
-    """
-    raw = raw.strip().rstrip("/")
-    if raw.endswith("/chat/completions"):
-        raw = raw[: -len("/chat/completions")]
-    if raw.endswith("/v1"):
-        return raw
-    # If it's a bare host (no /v1 path), append it.
-    if "/v1" not in raw.split("/", 3)[-1]:
-        raw = raw.rstrip("/") + "/v1"
-    return raw
-
-
 def _serialise_image(part: ImagePart) -> dict[str, Any]:
     """Turn an ``ImagePart`` into an OpenAI ``image_url`` block."""
     if part.data is not None:
@@ -222,7 +205,7 @@ class OpenAICompatibleProvider:
         self._client = self._make_client(self.config)
 
     def _make_client(self, config: ProviderConfig) -> httpx.Client:
-        base = _normalise_base_url(config.base_url)
+        base = config.base_url
         headers: dict[str, str] = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {config.api_key}",
@@ -267,7 +250,9 @@ class OpenAICompatibleProvider:
         session_id = (request.session_id or "").strip()
         if not session_id:
             return {}
-        if not any(key.lower() == "x-opencode-session" for key in self.config.extra_headers):
+        if not any(
+            key.lower() == "x-opencode-session" for key in self.config.extra_headers
+        ):
             return {}
 
         root = (request.parent_session_id or session_id).strip()
@@ -398,9 +383,7 @@ class OpenAICompatibleProvider:
                 payload.update(nested)
         return payload
 
-    def _chat_once(
-        self, payload: dict[str, Any], request: ChatRequest
-    ) -> ChatResponse:
+    def _chat_once(self, payload: dict[str, Any], request: ChatRequest) -> ChatResponse:
         response = self._client.post(
             "/chat/completions", json=payload, headers=self._session_headers(request)
         )
@@ -411,7 +394,10 @@ class OpenAICompatibleProvider:
         if response.status_code == 429:
             raise LLMRateLimitError("LLM rate limited (429)")
         # 408, 409, and 5xx are retryable transient errors.
-        if response.status_code in self.retry_policy.retry_statuses or response.status_code >= 500:
+        if (
+            response.status_code in self.retry_policy.retry_statuses
+            or response.status_code >= 500
+        ):
             raise httpx.HTTPStatusError(
                 f"retryable status {response.status_code}",
                 request=response.request,
@@ -502,13 +488,16 @@ class OpenAICompatibleProvider:
                         yield StreamEvent(type="reasoning", text=str(reasoning))
 
                     # tool calls (incremental)
-                    for tc_delta in (delta.get("tool_calls") or []):
+                    for tc_delta in delta.get("tool_calls") or []:
                         idx = tc_delta.get("index", 0)
-                        acc = tool_call_acc.setdefault(idx, {
-                            "id": "",
-                            "name": "",
-                            "arguments": "",
-                        })
+                        acc = tool_call_acc.setdefault(
+                            idx,
+                            {
+                                "id": "",
+                                "name": "",
+                                "arguments": "",
+                            },
+                        )
                         if "id" in tc_delta and tc_delta["id"]:
                             acc["id"] = tc_delta["id"]
                         func = tc_delta.get("function", {})
@@ -535,16 +524,16 @@ class OpenAICompatibleProvider:
                         id=a["id"],
                         name=a["name"],
                         arguments=(
-                            json.loads(a["arguments"])
-                            if a["arguments"]
-                            else {}
+                            json.loads(a["arguments"]) if a["arguments"] else {}
                         ),
                     )
                     for a in tool_call_acc.values()
                 ]
                 for a in tool_call_acc.values():
                     try:
-                        a["arguments_parsed"] = json.loads(a["arguments"]) if a["arguments"] else {}
+                        a["arguments_parsed"] = (
+                            json.loads(a["arguments"]) if a["arguments"] else {}
+                        )
                     except json.JSONDecodeError:
                         a["arguments_parsed"] = {}
                 response = ChatResponse(
@@ -554,11 +543,7 @@ class OpenAICompatibleProvider:
                     usage=_parse_usage(usage_raw),
                     raw={
                         "choices": [
-                            {
-                                "message": {
-                                    "reasoning_content": "".join(reasoning_parts)
-                                }
-                            }
+                            {"message": {"reasoning_content": "".join(reasoning_parts)}}
                         ]
                     },
                     model=model,
@@ -590,7 +575,11 @@ class OpenAICompatibleProvider:
             if attempt + 1 >= self.retry_policy.max_attempts:
                 break
 
-            retry_after = _parse_retry_after(error_response) if error_response is not None else None
+            retry_after = (
+                _parse_retry_after(error_response)
+                if error_response is not None
+                else None
+            )
             delay = _build_retry_delay(attempt, self.retry_policy, retry_after)
             logger.warning(
                 "llm retry attempt %d/%d after %.2fs: %s",
@@ -623,7 +612,7 @@ def _parse_non_streaming_response(body: dict[str, Any]) -> ChatResponse:
     finish_reason = choice.get("finish_reason")
     content = message.get("content") or ""
     tool_calls: list[ToolCall] = []
-    for tc_raw in (message.get("tool_calls") or []):
+    for tc_raw in message.get("tool_calls") or []:
         func = tc_raw.get("function", {})
         args_str = func.get("arguments", "{}")
         try:

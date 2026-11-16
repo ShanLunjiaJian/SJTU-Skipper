@@ -135,7 +135,9 @@ class _TimeIndexedStream:
                 self._starts.append(old_total)
                 start = old_total
             if hasattr(chunk, "index"):
-                chunk = type(chunk)(index=len(self._chunks), start=start, end=end, data=chunk.data)
+                chunk = type(chunk)(
+                    index=len(self._chunks), start=start, end=end, data=chunk.data
+                )
             else:
                 chunk = type(chunk)(start=start, end=end, data=chunk.data)
             self._chunks.append(chunk)
@@ -253,7 +255,11 @@ class AudioStream(_TimeIndexedStream):
         if dur <= 0:
             raise ValueError("audio duration must be positive")
         total, _ = self.snapshot()
-        self._append(AudioChunk(start=total, end=total + dur, data=data), start=total, end=total + dur)
+        self._append(
+            AudioChunk(start=total, end=total + dur, data=data),
+            start=total,
+            end=total + dur,
+        )
 
     def discard(self, duration: float) -> None:
         """Advance the timeline without retaining PCM or inserting silence."""
@@ -377,7 +383,9 @@ class VideoStream(_TimeIndexedStream):
 class TextStream(Sequence[TextItem]):
     """Append-only text stream; ``len()`` is the number of items."""
 
-    def __init__(self, session_id: str, name: str = "text", *, notify: Notify | None = None) -> None:
+    def __init__(
+        self, session_id: str, name: str = "text", *, notify: Notify | None = None
+    ) -> None:
         self.session_id = session_id
         self.name = name
         self._notify = notify
@@ -548,7 +556,9 @@ class BacklogGate:
                     and time.monotonic() - self._last_release > self._stall_timeout
                 ):
                     if self._fail_closed:
-                        _log.error("backlog gate %s stalled; stopping producer", self.name)
+                        _log.error(
+                            "backlog gate %s stalled; stopping producer", self.name
+                        )
                         self._closed = True
                         return False
                     _log.warning(
@@ -563,6 +573,14 @@ class BacklogGate:
 
 
 @dataclass(slots=True)
+class SourceProgress:
+    before: float = 0.0
+    final: bool = False
+    enabled: bool = True
+    errors: list[dict] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class StreamSet:
     session_id: str
     started_at: float
@@ -573,16 +591,16 @@ class StreamSet:
     visual: TextStream
     ended_at: float | None = None
     end_reason: str = ""
-    audio_gate: BacklogGate = field(
-        default_factory=lambda: BacklogGate("audio")
-    )
-    video_gate: BacklogGate = field(
-        default_factory=lambda: BacklogGate("video")
-    )
+    audio_gate: BacklogGate = field(default_factory=lambda: BacklogGate("audio"))
+    video_gate: BacklogGate = field(default_factory=lambda: BacklogGate("video"))
     # Set by the input plugin once all ffmpeg readers reached EOF; consumers
     # use it to drain their queues before the session is ended.
     input_done: bool = False
     input_done_at: float | None = None
+    audio_input_done: bool = False
+    video_input_done: bool = False
+    transcript_progress: SourceProgress = field(default_factory=SourceProgress)
+    visual_progress: SourceProgress = field(default_factory=SourceProgress)
 
     def stream(self, name: str) -> AudioStream | VideoStream | TextStream:
         streams: dict[str, AudioStream | VideoStream | TextStream] = {
@@ -742,7 +760,9 @@ class StreamHub:
                 previous_stopped = previous
                 previous_id = previous.session_id
             else:
-                previous_id = previous.session_id if previous.session_id != "boot" else None
+                previous_id = (
+                    previous.session_id if previous.session_id != "boot" else None
+                )
             new_set = self._create(self._new_session_id(), meta or {})
             self._current = new_set
             self._notes_session_id = new_set.session_id
@@ -831,7 +851,11 @@ class StreamHub:
         if self._emit is None:
             return
         if stream in ("audio", "video"):
-            interval = self.audio_emit_interval if stream == "audio" else self.video_emit_interval
+            interval = (
+                self.audio_emit_interval
+                if stream == "audio"
+                else self.video_emit_interval
+            )
             key = (session_id, stream)
             with self._lock:
                 last = self._last_emit.get(key, 0.0)
@@ -896,6 +920,65 @@ class StreamHub:
                 if s.session_id == session_id:
                     return s
         return None
+
+    def _text_progress_locked(self, session_id: str, stream: str) -> SourceProgress:
+        if stream not in ("transcript", "visual"):
+            raise ValueError(f"Invalid text stream: {stream}")
+        session = self.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        return getattr(session, f"{stream}_progress")
+
+    def text_progress(self, session_id: str, stream: str) -> SourceProgress:
+        with self._lock:
+            state = self._text_progress_locked(session_id, stream)
+            return SourceProgress(
+                state.before,
+                state.final,
+                state.enabled,
+                [dict(error) for error in state.errors],
+            )
+
+    def seal_text(
+        self,
+        session_id: str,
+        stream: str,
+        before: float,
+        *,
+        final: bool = False,
+        error: dict | None = None,
+    ) -> None:
+        with self._lock:
+            state = self._text_progress_locked(session_id, stream)
+            state.before = max(state.before, float(before))
+            state.final = state.final or final
+            if error is not None:
+                state.errors.append(dict(error))
+            payload = dict(
+                session_id=session_id,
+                stream=stream,
+                before=state.before,
+                final=state.final,
+                enabled=state.enabled,
+                error=error,
+            )
+        if self._emit is not None:
+            self._emit("stream.sealed", **payload)
+
+    def set_text_enabled(self, session_id: str, stream: str, enabled: bool) -> None:
+        with self._lock:
+            state = self._text_progress_locked(session_id, stream)
+            state.enabled = bool(enabled)
+            payload = dict(
+                session_id=session_id,
+                stream=stream,
+                before=state.before,
+                final=state.final,
+                enabled=state.enabled,
+                error=None,
+            )
+        if self._emit is not None:
+            self._emit("stream.sealed", **payload)
 
     def status(self) -> dict[str, Any]:
         return self.current.status()
@@ -996,8 +1079,7 @@ class StreamHub:
 
         with self._lock:
             entries = [
-                (pid, dict(entry))
-                for (pid, _kind), entry in self._consumers.items()
+                (pid, dict(entry)) for (pid, _kind), entry in self._consumers.items()
             ]
         busy: list[str] = []
         for pid, entry in entries:

@@ -118,6 +118,7 @@ class SettingsSpec:
     label: str
     type: str = "string"
     default: Any = None
+    nullable: bool = False
     group: str = "General"
     description: str = ""
     options: tuple[Any, ...] = ()
@@ -175,6 +176,12 @@ class SettingsSpec:
         are not allowed by this specification.
         """
 
+        if self.nullable and (
+            value is None
+            or isinstance(value, str)
+            and value.strip().lower() in ("", "none", "null")
+        ):
+            return None
         if self.type in ("string", "text", "secret"):
             if value is None:
                 return ""

@@ -260,7 +260,9 @@ def test_plugin_registers_service_and_tab(tmp_path: Path) -> None:
         assert isinstance(service, SettingsService)
         assert service._store.path == tmp_path / "settings.json"
         snapshot = runtime.ui.snapshot()
-        assert "settings" not in snapshot["tabs"], "settings must live in a page, not a tab"
+        assert "settings" not in snapshot["tabs"], (
+            "settings must live in a page, not a tab"
+        )
         assert snapshot["pages"]["settings:main"] == "设置"
         assert "settings.save" in snapshot["actions"]
         assert "settings.open" in snapshot["commands"]
@@ -294,7 +296,11 @@ def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
         state = runtime.ui.state()
         # No settings tab / toolbox item: only the page (opened via palette).
         assert all(t["id"] != "settings" for t in state["right_tabs"])
-        assert all(i["id"] != "settings.open" for t in state["right_tabs"] for i in t["toolbox"])
+        assert all(
+            i["id"] != "settings.open"
+            for t in state["right_tabs"]
+            for i in t["toolbox"]
+        )
 
         runtime.ui.open_page("settings:main")
         blocks = runtime.ui.state()["page_content"]["settings:main"]
@@ -381,7 +387,9 @@ def test_settings_changed_event_payload(tmp_path: Path) -> None:
         service = runtime.services.require("settings")
         service.register(SettingsSpec(key="x.n", label="N", type="int", default=1))
         events: list[dict] = []
-        runtime.bus.on("settings.changed", lambda event: events.append(dict(event.payload)))
+        runtime.bus.on(
+            "settings.changed", lambda event: events.append(dict(event.payload))
+        )
 
         service.set("x.n", "5")
         assert runtime.bus.flush(2.0)

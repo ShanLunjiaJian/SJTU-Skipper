@@ -9,7 +9,9 @@ def test_tabs_items_pages_and_state() -> None:
     changes: list[str] = []
     ui = UIManager(on_change=changes.append)
     ui.add_tab("left", "courses", "课程", order=1)
-    ui.add_toolbox_item("courses", "list", "课程列表", render=lambda: [{"type": "text", "text": "hi"}])
+    ui.add_toolbox_item(
+        "courses", "list", "课程列表", render=lambda: [{"type": "text", "text": "hi"}]
+    )
     ui.add_page("home", "首页", render=lambda: "# Hello\n\n$E=mc^2$", order=1)
     ui.open_page("home")
     state = ui.state()
@@ -61,7 +63,9 @@ def test_unknown_action() -> None:
 
 def test_render_error_is_contained() -> None:
     ui = UIManager()
-    ui.add_page("broken", "坏页", render=lambda: (_ for _ in ()).throw(RuntimeError("x")))
+    ui.add_page(
+        "broken", "坏页", render=lambda: (_ for _ in ()).throw(RuntimeError("x"))
+    )
     ui.open_page("broken")
     state = ui.state()
     block = state["page_content"]["broken"][0]
@@ -116,7 +120,11 @@ def test_tree_block_is_normalized_recursively() -> None:
                         "expanded": True,
                         "toggle": {"action": "t", "value": {"course": "1"}},
                         "children": [
-                            {"id": "k1", "label": "11-05 08:00", "action": {"action": "open"}},
+                            {
+                                "id": "k1",
+                                "label": "11-05 08:00",
+                                "action": {"action": "open"},
+                            },
                         ],
                     }
                 ],

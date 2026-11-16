@@ -78,6 +78,7 @@ def fuse_frames(
 # Implementation
 # ---------------------------------------------------------------------------
 
+
 def _fuse_impl(
     frames: Sequence[VideoFrame],
     *,
@@ -150,6 +151,7 @@ def _fuse_impl(
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _decode_jpeg(data: bytes) -> np.ndarray:
     """Decode JPEG bytes to a grayscale numpy array."""
     img = Image.open(io_bytes(data))
@@ -158,9 +160,7 @@ def _decode_jpeg(data: bytes) -> np.ndarray:
     return np.asarray(img, dtype=np.uint8)
 
 
-def _apply_crop(
-    arr: np.ndarray, crop: tuple[float, float, float, float]
-) -> np.ndarray:
+def _apply_crop(arr: np.ndarray, crop: tuple[float, float, float, float]) -> np.ndarray:
     x0, y0, x1, y1 = crop
     h, w = arr.shape
     cx0 = max(0, int(round(x0 * w)))

@@ -63,8 +63,16 @@ class FakeLLM:
 
     def stream(self, **kwargs: Any):
         response = self._next(kwargs)
-        yield SimpleNamespace(type="text", text=response.content, tool_call=None, response=None, error=None)
-        yield SimpleNamespace(type="done", text="", tool_call=None, response=response, error=None)
+        yield SimpleNamespace(
+            type="text",
+            text=response.content,
+            tool_call=None,
+            response=None,
+            error=None,
+        )
+        yield SimpleNamespace(
+            type="done", text="", tool_call=None, response=response, error=None
+        )
 
     def config_for(self, profile: str) -> SimpleNamespace:
         return SimpleNamespace(

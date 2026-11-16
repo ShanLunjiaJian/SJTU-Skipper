@@ -1,23 +1,20 @@
 # SJTU-Skipper / 课堂总 Agent
 
-SJTU-Skipper 仓库包含两条相关但独立的能力：
+SJTU-Skipper 将音视频输入、STT、VLM、LLM、行为插件和 Web UI 分层组织．行为层通过追加流、事件和服务接口访问底层能力．
 
-1. **旧的板书批处理流水线**：`legacy/blackboard_lecture_agent.py`，从课堂录像采样、配准、融合黑板帧，经 VLM 转录后合成 LaTeX 板书笔记。
-2. **新的课堂总 Agent 架构**：`src/`，把音频/视频输入、STT、VLM、LLM、行为插件和 Web UI 拆成可独立演进的层；行为层只通过 append-only 流、事件和服务接口与底层交互。
-
-新架构的设计与接口契约见：
+设计与接口契约见：
 
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/implementation-plan.md`](docs/implementation-plan.md)
 - [`docs/plugin-api.md`](docs/plugin-api.md)
 
-## 新架构快速开始
+## 快速开始
 
 ### 1. 环境
 
-系统需要 Python 3.12、`ffmpeg`/`ffprobe`；`aria2c` 可选。
+环境需要 Python 3.13、`ffmpeg`/`ffprobe`、`uv`．
 
-本项目使用仓库根目录的 `.venv`（Python 3.12）。旧 `.venv` 已删除并重建：
+在仓库根目录创建 `.venv`：
 
 ```bash
 nix develop
@@ -58,9 +55,11 @@ devShell 提供 Python、uv、ffmpeg 和动态库路径，不打包应用．在�
 
 一节课开始处理后可以继续在左侧选别的课：处理在后台继续，切换选中不会中断它。再点「开始处理」会进入「处理队列」，按先后顺序自动开始；直播课优先排队。队列是串行的：当前媒体管线一次只处理一节课。
 
-直播与录播都连续发送最多 200 ms 的音频帧．直播显示 partial，只有 final 写入转写记录；录播使用 offline 模式全速传输，默认并发 1 路．STT 服务负责声学切分、上下文重叠及文本合并．`stt.context` 提供课程主题或术语，默认留空．VLM 并发保持独立设置．录播页显示下载和处理进度及「打开录像」链接，本地录像只保留最近 `input.keep_recordings`（默认 4）节．
+直播与录播都连续发送最多 200 ms 的音频帧．直播显示 partial，只有 final 写入转写记录；录播使用 offline 模式全速传输，默认并发 1 路．STT 服务负责声学切分、上下文重叠及文本合并．`stt.context` 提供课程主题或术语，默认留空．板书识别按顺序提交，`vlm.prepare_ahead` 控制是否提前准备下一个窗口的图像．录播页显示下载和处理进度及「打开录像」链接，本地录像只保留最近 `input.keep_recordings`（默认 4）节．
 
 多节录播共用连续时间轴，进度按各节时长之和计算．处理本节时预下载下一节，节间不等待语音或板书分析清空．全部节次结束后才完成输入尾段．
+
+录播下载与音视频解码共用本地字节缓存．支持 Range 的来源可在完整下载前开始处理．不支持 Range 且索引位于文件尾时，解码等待下载．完整录像下载成功后才显示本地播放链接．
 
 Canvas token 与 OpenAI 兼容 key 可以放在根 `.env`（git-ignored；OpenCode 套餐则走设置页授权）：
 
@@ -81,11 +80,9 @@ STT_SERVER_URL=http://127.0.0.1:8766
 ```bash
 sjtu-skipper serve [--host 0.0.0.0] [--port 8765] [--data-dir PATH]
 sjtu-skipper check
-
-# 兼容旧命令：lecture-agent <同上>
 ```
 
-## 新架构一览
+## 架构一览
 
 ```text
 输入插件（Canvas/SJTU 录播 + 直播 + 手动 URL）
@@ -108,34 +105,25 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 内置插件：
 
 | 插件 | id | 作用 |
-|---|---|---|
+| --- | --- | --- |
 | settings | `settings` | 设置注册、持久化、设置页 |
 | llm | `llm` | Provider 注册、统一 LLM 调用 |
 | input | `input` | Canvas/SJTU 录播、直播、ffmpeg 源 |
 | stt | `stt` | 兼容 HTTP/WebSocket STT 服务，支持流式临时文字、定稿及课程上下文 |
 | vlm | `vlm` | 视频流 -> 融合板书 -> 文字流 |
 | llm-agent | `llm-agent` | 多会话 REPL Agent；具名 agent profile + 工具参数声明；info/read/search/replace/append（+ 可选 write）；支持流式 |
-| summarize | `summarize` | 非即时：课后/手动一次性整理整堂课，写 note_*.md 结构完整讲义 |
+| notes-pipeline | `notes-pipeline` | 按来源完成位置整理片段，整课统稿后审阅，通过后发布讲义 |
+| summarize | `summarize` | 课堂讲义页面与课后 direct/fill/skip 策略 |
 | ask | `ask` | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存 |
 | reader | `reader` | 通用 Markdown 阅读页（每门课一页），持有选中菜单与内联问答块 |
-| instant-summarize | `instant-summarize` | 即时：按 N 字符/秒增量合并，写 instant_note_*.md；由笔记面板的开关控制累积与否 |
+| instant-summarize | `instant-summarize` | 分段笔记页面与预览开关，直播和录播均可使用 |
 
-## 旧板书流水线
-
-旧脚本保持原样，仍可单独使用：
-
-```bash
-cp .env.example .env   # 填 DEEPSEEK_API_KEY
-source .venv/bin/activate
-python legacy/blackboard_lecture_agent.py --session topo_1022
-```
-
-产物在 `data/outputs/<session>/` 与 `data/notes/`。新 VLM 插件复用其配准/融合算法与提示词；旧脚本已移入 `legacy/`（本地保留、git-ignored）。
+分段核心区间由 `notes.chunk_seconds` 设置，`notes.overlap_seconds` 提供左侧原文上下文．重叠原文不重复计入正文．`notes.concurrency` 限制所有课程同时运行的笔记 agent 数量．分段预览标为未审阅；完整讲义须经过整课写作和来源覆盖、正确性两项审阅．来源缺口与审阅结果分别显示．生成失败时保留已发布讲义和用户问答．
 
 ## 目录
 
 ```text
-src/                              # 新总 Agent（直接位于 src 下）
+src/                              # 课堂 Agent
 ├── app.py / cli.py / config.py
 ├── applog.py
 ├── core/                         # 流、事件、插件、服务、UI、runtime
@@ -143,17 +131,10 @@ src/                              # 新总 Agent（直接位于 src 下）
 ├── plugins/                      # settings/llm/input/stt/vlm/agent/summarize/instant_summarize
 ├── integrations/                 # vendored SJTU Canvas/视频客户端
 └── ui/                           # FastAPI + 静态前端
-legacy/                           # 旧脚本与旧子模块，git-ignored，仅本地保留
-├── blackboard_lecture_agent.py
-├── topo_lecture_agent.py
-├── test_placeholder_experiment.py
-└── sjtu-canvas-assistant/
 tests/
 docs/
 data/                             # 运行产物（gitignore）
 ```
-
-`sjtu-canvas-assistant` 的必要客户端代码已经 vendor 到 `src/integrations/sjtu_canvas_assistant/`，运行时不依赖 `legacy/`。
 
 ## 测试
 
@@ -165,8 +146,5 @@ data/                             # 运行产物（gitignore）
 
 ## 说明
 
-- 旧 `sjtu-canvas-assistant` 子模块已移入 `legacy/`，不再参与构建；必要的客户端代码已 vendor 到 `src/integrations/sjtu_canvas_assistant/`。
-- 不修改旧板书脚本（同上）。
-- 新版 SJTU 门户（`jy-application-resourcemanage`）的录播/直播适配已随 vendored 客户端放入 `src/integrations/sjtu_canvas_assistant/`，旧子模块不再需要。
-- 直播通道优先使用 SJTU 新版门户 `v1/vod_live` + `v1/course_vod_videoinfos`；若接口或鉴权变化，仍可在 UI 中手动填入 HLS/RTMP/HTTP URL。
+- 直播通道使用 SJTU 门户 `v1/vod_live` 和 `v1/course_vod_videoinfos`；也可在 UI 中手动填入 HLS/RTMP/HTTP URL．
 - 详细接口与扩展方式见 `docs/plugin-api.md`。

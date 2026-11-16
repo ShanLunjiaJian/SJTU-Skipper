@@ -34,7 +34,9 @@ class SettingsStore:
     empty mapping so a bad byte never blocks startup.
     """
 
-    def __init__(self, path: str | Path, *, logger_: logging.Logger | None = None) -> None:
+    def __init__(
+        self, path: str | Path, *, logger_: logging.Logger | None = None
+    ) -> None:
         self.path = Path(path)
         self.logger = logger_ or logger
         self._lock = threading.RLock()
@@ -156,9 +158,7 @@ class SettingsStore:
         """Atomically replace the settings file with 0600 permissions."""
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(
-            dict(values), ensure_ascii=False, indent=2, sort_keys=True
-        )
+        payload = json.dumps(dict(values), ensure_ascii=False, indent=2, sort_keys=True)
         fd, tmp_name = tempfile.mkstemp(
             dir=str(self.path.parent), prefix=f".{self.path.name}.", suffix=".tmp"
         )
@@ -211,9 +211,7 @@ class SettingsService:
     # ------------------------------------------------------------------
     def specs(self) -> list[SettingsSpec]:
         with self._lock:
-            return sorted(
-                self._specs.values(), key=lambda s: (s.group, s.order, s.key)
-            )
+            return sorted(self._specs.values(), key=lambda s: (s.group, s.order, s.key))
 
     def get_spec(self, key: str) -> SettingsSpec | None:
         with self._lock:
@@ -259,9 +257,7 @@ class SettingsService:
     # ------------------------------------------------------------------
     # Registration
     # ------------------------------------------------------------------
-    def register(
-        self, spec: SettingsSpec, *, plugin_id: str = ""
-    ) -> SettingsSpec:
+    def register(self, spec: SettingsSpec, *, plugin_id: str = "") -> SettingsSpec:
         """Declare a setting (idempotent per key) and return the spec.
 
         ``plugin_id`` records the owner so :meth:`unregister` can drop every
@@ -357,7 +353,9 @@ class SettingsService:
         """Validate, persist and announce one value; returns the stored value."""
 
         spec = self.get_spec(key)
-        coerced = spec.coerce(value) if spec is not None else _ensure_jsonable(key, value)
+        coerced = (
+            spec.coerce(value) if spec is not None else _ensure_jsonable(key, value)
+        )
         old = self.get(key)
         self._store.set(key, coerced)
         if old != coerced:
@@ -382,7 +380,9 @@ class SettingsService:
             spec = specs.get(key)
             if spec is not None and spec.is_secret_value(value):
                 continue
-            coerced = spec.coerce(value) if spec is not None else _ensure_jsonable(key, value)
+            coerced = (
+                spec.coerce(value) if spec is not None else _ensure_jsonable(key, value)
+            )
             pending[key] = coerced
             old_values[key] = self.get(key)
         if not pending:

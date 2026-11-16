@@ -57,9 +57,7 @@ def _open_note(runtime, tmp_path: Path) -> Path:
     notes = tmp_path / "sessions" / "ask-session" / "notes"
     notes.mkdir(parents=True, exist_ok=True)
     note = notes / "note_knowledge.md"
-    note.write_text(
-        "# 讲义\n\n第一段：这是定义。\n\n第二段：这是例题。\n", "utf-8"
-    )
+    note.write_text("# 讲义\n\n第一段：这是定义。\n\n第二段：这是例题。\n", "utf-8")
     runtime.services.require("reader").show(
         title="测试讲义",
         docs=[{"key": "knowledge", "label": "知识", "path": str(note)}],
@@ -85,9 +83,9 @@ def test_instant_ask_answers_and_persists_fold(tmp_path: Path) -> None:
             },
         )
         assert result.ok, result.message
-        assert _wait_until(
-            lambda: '"status": "done"' in note.read_text("utf-8")
-        ), note.read_text("utf-8")
+        assert _wait_until(lambda: '"status": "done"' in note.read_text("utf-8")), (
+            note.read_text("utf-8")
+        )
 
         text = note.read_text("utf-8")
         assert "第一段是定义" in text
@@ -103,9 +101,7 @@ def test_instant_ask_answers_and_persists_fold(tmp_path: Path) -> None:
         assert "第一段：这是定义。" in prompt
         assert "第二段：这是例题。" in prompt
 
-        assert _wait_until(
-            lambda: any(item.get("status") == "done" for item in events)
-        )
+        assert _wait_until(lambda: any(item.get("status") == "done" for item in events))
         final = next(item for item in events if item.get("status") == "done")
         assert final["collapsed"] is True
         assert "answer_html" in final
@@ -136,16 +132,15 @@ def test_research_ask_declares_read_and_search(tmp_path: Path) -> None:
             },
         )
         assert result.ok, result.message
-        assert _wait_until(
-            lambda: '"status": "done"' in note.read_text("utf-8")
-        ), note.read_text("utf-8")
+        assert _wait_until(lambda: '"status": "done"' in note.read_text("utf-8")), (
+            note.read_text("utf-8")
+        )
         assert "第二段是例题" in note.read_text("utf-8")
 
         first_names = [tool["function"]["name"] for tool in llm.calls[0]["tools"]]
         assert first_names == ["read", "search"]
         read_schema = next(
-            tool for tool in llm.calls[0]["tools"]
-            if tool["function"]["name"] == "read"
+            tool for tool in llm.calls[0]["tools"] if tool["function"]["name"] == "read"
         )
         assert "50 行" in read_schema["function"]["description"]
         assert "先 `search` 再 `read`" in llm.calls[0]["messages"][0]["content"]

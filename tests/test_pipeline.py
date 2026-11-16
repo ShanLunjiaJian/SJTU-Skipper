@@ -13,6 +13,7 @@ from core.streams import BacklogGate
 # BacklogGate
 # ---------------------------------------------------------------------------
 
+
 class TestBacklogGate:
     def test_disabled_gate_returns_immediately(self) -> None:
         gate = BacklogGate("audio", limit=0.0)
@@ -53,6 +54,7 @@ class TestBacklogGate:
 # ---------------------------------------------------------------------------
 # OrderedWindowPool
 # ---------------------------------------------------------------------------
+
 
 def submit_all(pool: OrderedWindowPool, windows: list[tuple[float, float]]) -> None:
     """Submit every window, polling while the pool is saturated."""

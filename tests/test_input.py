@@ -160,9 +160,11 @@ class FakeSource:
                 _log.exception("fake source append")
             time.sleep(0.05)
 
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_context(data_dir: Any = None) -> PluginContext:
     """Minimal PluginContext with all required attributes."""
@@ -173,6 +175,7 @@ def _make_context(data_dir: Any = None) -> PluginContext:
     services.register("settings", settings)
     ui = UIManager()
     import logging
+
     return PluginContext(
         plugin_id="input",
         data_dir=data_dir if data_dir is not None else mock.MagicMock(),
@@ -191,7 +194,8 @@ def _start_recording_job(ctx, plugin, monkeypatch, *, videos=("v1", "v2")):
     started = Queue()
     monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
     monkeypatch.setattr(
-        plugin._catalog, "get_recording_streams",
+        plugin._catalog,
+        "get_recording_streams",
         lambda course_id, video_id: {"1": f"https://example.com/{video_id}.mp4"},
     )
 
@@ -202,17 +206,24 @@ def _start_recording_job(ctx, plugin, monkeypatch, *, videos=("v1", "v2")):
         else:
             ctx.streams.start_session(meta=meta)
         ctx.events.emit(
-            "input.status", status="playing",
+            "input.status",
+            status="playing",
             session_id=ctx.streams.current.session_id,
         )
         started.put(spec)
 
     monkeypatch.setattr(plugin, "_start_source", start_source)
-    opened = ctx.ui.dispatch_action("input.open_class", {
-        "id": "class:1:recording", "kind": "recording", "course": "1",
-        "name": "高等数学", "label": "11-05 08:00-09:35",
-        "videos": list(videos),
-    })
+    opened = ctx.ui.dispatch_action(
+        "input.open_class",
+        {
+            "id": "class:1:recording",
+            "kind": "recording",
+            "course": "1",
+            "name": "高等数学",
+            "label": "11-05 08:00-09:35",
+            "videos": list(videos),
+        },
+    )
     assert opened.ok
     result = ctx.ui.dispatch_action("input.start_processing", {})
     assert result.ok
@@ -257,6 +268,7 @@ def _fake_jpeg() -> bytes:
 # JPEG parser
 # ====================================================================
 
+
 class TestJPEGSplitter:
     def test_single_frame(self):
         jpeg = _fake_jpeg()
@@ -274,14 +286,14 @@ class TestJPEGSplitter:
 
     def test_garbage_before_frame(self):
         jpeg = _fake_jpeg()
-        data = b"\x00\x00\xFF\x00" + jpeg + jpeg
+        data = b"\x00\x00\xff\x00" + jpeg + jpeg
         frames = split_jpeg_frames(data)
         assert len(frames) == 2
         assert frames[0] == jpeg
 
     def test_garbage_between_frames(self):
         jpeg = _fake_jpeg()
-        data = jpeg + b"\xAA\xBB\xCC" + jpeg
+        data = jpeg + b"\xaa\xbb\xcc" + jpeg
         frames = split_jpeg_frames(data)
         assert len(frames) == 2
 
@@ -339,6 +351,7 @@ class TestJPEGSplitter:
 # ====================================================================
 # ffmpeg command builders
 # ====================================================================
+
 
 class TestBuildCommands:
     def test_audio_cmd_basic(self):
@@ -415,6 +428,7 @@ class TestBuildCommands:
 # SourceManager mutual exclusion
 # ====================================================================
 
+
 class TestSourceManager:
     def test_failed_start_resets_state_and_reports_error(self, monkeypatch):
         hub = StreamHub(emit=lambda *a, **kw: None)
@@ -479,6 +493,7 @@ class TestSourceManager:
         assert src.running
         # Wait a bit for fake data
         import time
+
         time.sleep(0.2)
         src.pause()
         assert src.paused
@@ -514,6 +529,10 @@ class TestSourceManager:
         class DummySource:
             running = True
             finished = True
+            _prepare_thread = None
+            _download_thread = None
+            _audio_thread = None
+            _video_thread = None
 
             def __init__(self, spec, **kwargs):
                 self.spec = spec
@@ -535,10 +554,15 @@ class TestSourceManager:
         hub.current.video_gate.release(75.0)
         enabled = lambda: False
         mgr = SourceManager(hub=hub, emit=lambda *a, **kw: None, audio_enabled=enabled)
-        mgr.start(SourceSpec(
-            kind="recording", url="x", continue_session=True,
-            audio_gate_limit=362.0, video_gate_limit=120.0,
-        ))
+        mgr.start(
+            SourceSpec(
+                kind="recording",
+                url="x",
+                continue_session=True,
+                audio_gate_limit=362.0,
+                video_gate_limit=120.0,
+            )
+        )
         assert hub.current.audio_gate.released == 90.0
         assert hub.current.video_gate.released == 75.0
         assert mgr._current.audio_enabled is enabled
@@ -555,6 +579,7 @@ class TestSourceManager:
 # Catalog mapping (with FakeSettings)
 # ====================================================================
 
+
 class TestCatalogNoToken:
     """Tests that without a token, catalog methods give clear errors."""
 
@@ -570,9 +595,7 @@ class TestCatalogNoToken:
 
         settings = FakeSettings()
         settings.register(
-            __import__(
-                "plugins.settings.spec", fromlist=["SettingsSpec"]
-            ).SettingsSpec(
+            __import__("plugins.settings.spec", fromlist=["SettingsSpec"]).SettingsSpec(
                 key="input.canvas_token",
                 label="Token",
                 type="secret",
@@ -591,7 +614,9 @@ class TestCatalogMapping:
     def test_catalog_uses_fake_settings(self):
         from plugins.input.catalog import Catalog
 
-        settings = FakeSettings({"input.canvas_token": "fake", "input.canvas_base_url": "http://localhost"})
+        settings = FakeSettings(
+            {"input.canvas_token": "fake", "input.canvas_base_url": "http://localhost"}
+        )
         cat = Catalog(settings=settings)
         assert cat.has_token()
         # close should be no-op when no real catalog created
@@ -625,7 +650,9 @@ class TestCatalogMapping:
             def close(self):
                 pass
 
-        settings = FakeSettings({"input.canvas_token": "fake", "input.canvas_base_url": "http://localhost"})
+        settings = FakeSettings(
+            {"input.canvas_token": "fake", "input.canvas_base_url": "http://localhost"}
+        )
         cat = Catalog(settings=settings)
         cat._sjt_cat = FakeSJTUCatalog()
 
@@ -714,7 +741,7 @@ class TestCatalogMapping:
 
         r1a = cat.list_recordings("42")
         r1b = cat.list_recordings("42")  # cache hit
-        r2 = cat.list_recordings("99")   # different key, misses
+        r2 = cat.list_recordings("99")  # different key, misses
         assert len(calls) == 2  # 42 + 99, not 3
         assert r1a[0]["video_id"] == "42-1"
         assert r2[0]["video_id"] == "99-1"
@@ -723,6 +750,7 @@ class TestCatalogMapping:
 # ====================================================================
 # UI state and actions
 # ====================================================================
+
 
 class TestInputPluginUI:
     def test_plugin_setup_registers_ui(self):
@@ -936,6 +964,7 @@ class TestInputPluginUI:
 # FFmpegSource: read1 & local-file headers
 # ====================================================================
 
+
 class TestFFmpegSourceInternals:
     """Test the read1 fallback and is_http header guard in FFmpegSource."""
 
@@ -945,7 +974,10 @@ class TestFFmpegSourceInternals:
 
         spec = SourceSpec(kind="file", url="/tmp/test.mp4", title="test")
         src = FFmpegSource(
-            spec, hub=mock.MagicMock(), emit=mock.MagicMock(), reconnect=False,
+            spec,
+            hub=mock.MagicMock(),
+            emit=mock.MagicMock(),
+            reconnect=False,
         )
 
         # Simulate a stdout that has read1 (BufferedReader) and one that doesn't (FileIO)
@@ -970,6 +1002,7 @@ class TestFFmpegSourceInternals:
 
     def test_read_fallback_when_no_read1(self):
         """When stdout lacks read1, fall back to read."""
+
         class NoRead1:
             read_called = False
 
@@ -988,11 +1021,16 @@ class TestFFmpegSourceInternals:
         from plugins.input.sources import FFmpegSource
 
         spec = SourceSpec(
-            kind="file", url="/tmp/test.mp4", title="test",
+            kind="file",
+            url="/tmp/test.mp4",
+            title="test",
             headers={"Referer": "https://should-be-dropped/"},
         )
         src = FFmpegSource(
-            spec, hub=mock.MagicMock(), emit=mock.MagicMock(), reconnect=False,
+            spec,
+            hub=mock.MagicMock(),
+            emit=mock.MagicMock(),
+            reconnect=False,
         )
         # Call _restart_audio_process under mock to avoid real Popen
         with mock.patch("subprocess.Popen") as mock_popen:
@@ -1009,25 +1047,29 @@ class TestFFmpegSourceInternals:
         from plugins.input.sources import FFmpegSource
 
         spec = SourceSpec(
-            kind="recording", url="https://example.com/video.mp4", title="test",
+            kind="recording",
+            url="https://example.com/video.mp4",
+            title="test",
             headers={"Referer": "https://v.sjtu.edu.cn/"},
         )
         src = FFmpegSource(
-            spec, hub=mock.MagicMock(), emit=mock.MagicMock(), reconnect=False,
+            spec,
+            hub=mock.MagicMock(),
+            emit=mock.MagicMock(),
+            reconnect=False,
         )
         with mock.patch("subprocess.Popen") as mock_popen:
             mock_popen.return_value.stdout = None
             mock_popen.return_value.poll.return_value = -1
             src._restart_audio_process()
             audio_cmd = mock_popen.call_args[0][0]
-            assert "-headers" in audio_cmd, (
-                f"HTTP URL should pass headers: {audio_cmd}"
-            )
+            assert "-headers" in audio_cmd, f"HTTP URL should pass headers: {audio_cmd}"
 
 
 # ====================================================================
 # Recording mode: double EOF, gates, download, retention
 # ====================================================================
+
 
 class TestRecordingIngest:
     def _source(self, hub=None, **kwargs):
@@ -1086,9 +1128,7 @@ class TestRecordingIngest:
         with mock.patch("plugins.input.sources.subprocess.Popen") as popen:
             popen.return_value.stdout = None
             popen.return_value.poll.return_value = 1
-            mgr.start(
-                SourceSpec(kind="recording", url="x", title="t", realtime=False)
-            )
+            mgr.start(SourceSpec(kind="recording", url="x", title="t", realtime=False))
             mgr.stop()
         assert hub.current.meta["mode"] == "fast"
 
@@ -1100,7 +1140,7 @@ class TestRecordingIngest:
         downloaded: list[str] = []
 
         class FakeDownloader:
-            def download(self, url, dest, *, stop_event=None, on_progress=None):
+            def start(self, url, dest, *, stop_event=None, on_progress=None):
                 from plugins.input.download import DownloadResult
 
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1108,7 +1148,10 @@ class TestRecordingIngest:
                 downloaded.append(str(dest))
                 if on_progress:
                     on_progress(5, 5)
-                return DownloadResult(path=dest, total=5, ok=True)
+                return mock.Mock(
+                    input_url=str(dest),
+                    wait=lambda: DownloadResult(path=dest, total=5, ok=True),
+                )
 
         spec = SourceSpec(
             kind="recording",
@@ -1124,17 +1167,20 @@ class TestRecordingIngest:
             downloader=FakeDownloader(),
             media_dir=tmp_path,
         )
-        with mock.patch("plugins.input.sources.subprocess.Popen") as popen:
+        with (
+            mock.patch("plugins.input.sources.probe_duration", return_value=1.0),
+            mock.patch("plugins.input.sources.subprocess.Popen") as popen,
+        ):
             popen.return_value.stdout = None
             popen.return_value.poll.return_value = 1
             src.start()
+            src._download_done.wait(2)
         assert downloaded, "recording should be downloaded first"
         assert hub.current.meta["media_name"] == "rec.mp4"
         assert src._input_url.startswith(str(tmp_path))
         assert hub.current.meta["media_path"].startswith(str(tmp_path))
 
-    def test_download_failure_falls_back_to_remote(self, tmp_path) -> None:
-        from plugins.input.download import DownloadResult
+    def test_download_failure_stops_input(self, tmp_path) -> None:
         from plugins.input.sources import FFmpegSource
 
         hub = StreamHub(emit=lambda *a, **kw: None)
@@ -1142,8 +1188,8 @@ class TestRecordingIngest:
         events: list[dict] = []
 
         class BrokenDownloader:
-            def download(self, url, dest, *, stop_event=None, on_progress=None):
-                return DownloadResult(path=None, total=0, ok=False, error="nope")
+            def start(self, url, dest, *, stop_event=None, on_progress=None):
+                raise OSError("nope")
 
         spec = SourceSpec(
             kind="recording",
@@ -1163,8 +1209,11 @@ class TestRecordingIngest:
             popen.return_value.stdout = None
             popen.return_value.poll.return_value = 1
             src.start()
-        assert src._input_url == spec.url
-        assert any(e.get("status") == "failed" for e in events)
+        popen.assert_not_called()
+        assert not src.running
+        assert any(
+            e["type"] == "input.error" and "nope" in e["message"] for e in events
+        )
 
 
 class TestMediaPrune:
@@ -1192,6 +1241,7 @@ class TestMediaPrune:
 # ====================================================================
 # SourceSpec
 # ====================================================================
+
 
 class TestSourceSpec:
     def test_defaults(self):
@@ -1223,6 +1273,7 @@ class TestSourceSpec:
 # Integration: SJTUCatalog (unit tests without network)
 # ====================================================================
 
+
 class TestSJTUCatalogUnit:
     def test_no_token_raises_input_error(self):
         from integrations.sjtu_canvas import InputError, SJTUCatalog
@@ -1236,7 +1287,9 @@ class TestSJTUCatalogUnit:
         from pathlib import Path
 
         import integrations.sjtu_canvas_assistant as pkg
-        from integrations.sjtu_canvas_assistant.video_client import NEW_VIDEO_SERVICE_ROOT
+        from integrations.sjtu_canvas_assistant.video_client import (
+            NEW_VIDEO_SERVICE_ROOT,
+        )
 
         package_dir = Path(pkg.__file__).resolve().parent
         assert package_dir.name == "sjtu_canvas_assistant"
@@ -1300,8 +1353,9 @@ class TestSJTUCatalogUnit:
             },
         ]
 
-        with mock.patch.object(SJTUCatalog, "_ensure_live_token",
-                               return_value=("fake-jwt", {})):
+        with mock.patch.object(
+            SJTUCatalog, "_ensure_live_token", return_value=("fake-jwt", {})
+        ):
             with mock.patch("httpx.Client.get") as mock_get:
                 mock_get.return_value.status_code = 200
                 mock_get.return_value.json.return_value = {
@@ -1322,6 +1376,7 @@ class TestSJTUCatalogUnit:
 # Local time helper
 # ====================================================================
 
+
 class TestLocalTime:
     def test_local_time(self):
         from plugins.input.plugin import _local_time
@@ -1332,8 +1387,10 @@ class TestLocalTime:
 
     def test_local_time_empty(self):
         from plugins.input.plugin import _local_time
+
         assert _local_time("") == ""
         assert _local_time("not a date") == "not a date"
+
 
 class TestClassPlayer:
     """Selecting a class loads streams but never auto-plays."""
@@ -1361,8 +1418,12 @@ class TestClassPlayer:
         assert result.ok
         assert result.open_page == "input:session"
         assert plugin._processing is False
-        assert plugin._sources.state == "idle", "selecting a class must not start ffmpeg"
-        assert ctx.streams.current.session_id == "boot", "no session until processing starts"
+        assert plugin._sources.state == "idle", (
+            "selecting a class must not start ffmpeg"
+        )
+        assert ctx.streams.current.session_id == "boot", (
+            "no session until processing starts"
+        )
         assert plugin._current_class["videos"] == ["v1", "v2"]
 
         plugin.teardown()
@@ -1436,7 +1497,8 @@ class TestClassPlayer:
         ctx.ui.open_page("input:session")
         blocks = ctx.ui.state()["page_content"]["input:session"]
         links = [
-            b for b in blocks
+            b
+            for b in blocks
             if b["type"] == "markdown" and "/api/artifacts/" in b.get("text", "")
         ]
         assert links, "a local media link must be offered"
@@ -1515,7 +1577,9 @@ class TestClassPlayer:
         plugin = InputPlugin()
         plugin.setup(ctx)
         try:
-            job, session, first, started = _start_recording_job(ctx, plugin, monkeypatch)
+            job, session, first, started = _start_recording_job(
+                ctx, plugin, monkeypatch
+            )
             assert first.course["video_id"] == "v1"
             assert first.final_part is False
             assert first.next_source.url == "https://example.com/v2.mp4"
@@ -1540,7 +1604,10 @@ class TestClassPlayer:
         plugin.setup(ctx)
         try:
             job, session, first, _started = _start_recording_job(
-                ctx, plugin, monkeypatch, videos=("v1",),
+                ctx,
+                plugin,
+                monkeypatch,
+                videos=("v1",),
             )
             assert first.final_part is True
             assert first.next_source is None
@@ -1571,7 +1638,9 @@ class TestClassPlayer:
         advanced: list[bool] = []
         monkeypatch.setattr(plugin, "_on_class_ended", lambda: advanced.append(True))
 
-        event = SimpleNamespace(type="input.ended", get=lambda key, default=None: default)
+        event = SimpleNamespace(
+            type="input.ended", get=lambda key, default=None: default
+        )
         plugin._on_input_event(event)
 
         deadline = time.monotonic() + 2.0
@@ -1617,7 +1686,9 @@ class TestClassPlayer:
         plugin.setup(ctx)
         self._open_class(ctx, plugin)
         advanced: list[bool] = []
-        monkeypatch.setattr(plugin, "_end_fill_or_playback", lambda: advanced.append(True))
+        monkeypatch.setattr(
+            plugin, "_end_fill_or_playback", lambda: advanced.append(True)
+        )
 
         plugin._on_class_ended()
         assert plugin._class_index == 0
@@ -1663,9 +1734,7 @@ def test_next_boundary_is_the_nearest_future_moment() -> None:
         {"begin": "2026-11-12 09:00:00", "end": "2026-11-12 10:20:00"},
         {"begin": "2026-11-12 10:30:00", "end": "2026-11-12 12:00:00"},
     ]
-    assert next_boundary(lives, now=now) == datetime(
-        2026, 11, 12, 10, 20
-    ).timestamp()
+    assert next_boundary(lives, now=now) == datetime(2026, 11, 12, 10, 20).timestamp()
 
 
 def test_next_boundary_ignores_past_windows() -> None:
@@ -1731,7 +1800,11 @@ def test_pick_recordings_handles_three_parts() -> None:
     from datetime import datetime
 
     recordings = [
-        {"video_id": f"v{i}", "begin": f"2026-11-12 {begin}", "end": f"2026-11-12 {end}"}
+        {
+            "video_id": f"v{i}",
+            "begin": f"2026-11-12 {begin}",
+            "end": f"2026-11-12 {end}",
+        }
         for i, (begin, end) in enumerate(
             [
                 ("08:00:00", "08:50:00"),
@@ -1836,14 +1909,10 @@ class TestProcessingQueue:
 
         state = ctx.ui.state()
         items = {
-            item["id"]: item
-            for tab in state["right_tabs"]
-            for item in tab["toolbox"]
+            item["id"]: item for tab in state["right_tabs"] for item in tab["toolbox"]
         }
         rows = next(
-            block
-            for block in items["input.queue"]["blocks"]
-            if block["type"] == "rows"
+            block for block in items["input.queue"]["blocks"] if block["type"] == "rows"
         )
         assert len(rows["items"]) == 2
         assert "高等数学" in rows["items"][0]["title"]
@@ -1869,7 +1938,10 @@ class TestProcessingQueue:
                 "children": [
                     {
                         "id": "class:a",
-                        "action": {"action": "input.open_class", "value": {"id": "class:a"}},
+                        "action": {
+                            "action": "input.open_class",
+                            "value": {"id": "class:a"},
+                        },
                     }
                 ],
             }
@@ -1890,10 +1962,14 @@ class TestProcessingQueue:
         assert child["badge"] == "处理中"
         plugin.teardown()
 
-    def test_background_multipart_keeps_duration_and_selected_context(self, monkeypatch):
+    def test_background_multipart_keeps_duration_and_selected_context(
+        self, monkeypatch
+    ):
         ctx, plugin, _unused = self._setup(monkeypatch)
         try:
-            job, session, first, started = _start_recording_job(ctx, plugin, monkeypatch)
+            job, session, first, started = _start_recording_job(
+                ctx, plugin, monkeypatch
+            )
             assert first.next_source.url == "https://example.com/v2.mp4"
             self._open(ctx, plugin, "class:b", "线性代数")
             plugin._class_streams = {"main": "https://example.com/b.mp4"}
@@ -1904,7 +1980,9 @@ class TestProcessingQueue:
 
             for video_id, duration in (("v1", 3039.0), ("v2", 3287.0)):
                 ctx.events.emit(
-                    "input.prepared", video_id=video_id, duration=duration,
+                    "input.prepared",
+                    video_id=video_id,
+                    duration=duration,
                     session_id=session.session_id,
                 )
             assert ctx.events.flush()
@@ -1926,9 +2004,13 @@ class TestProcessingQueue:
             assert plugin._queue == [selected.id]
             assert plugin._current_class["id"] == selected.id
             assert plugin._class_index == selected.index == 0
-            assert plugin._class_streams == selected.streams == {
-                "main": "https://example.com/b.mp4",
-            }
+            assert (
+                plugin._class_streams
+                == selected.streams
+                == {
+                    "main": "https://example.com/b.mp4",
+                }
+            )
             assert ctx.streams.current is session
             assert session.ended_at is None
             assert not session.input_done
@@ -1943,7 +2025,9 @@ class TestProcessingQueue:
 
 
 @pytest.mark.parametrize("kind", ["recording", "live"])
-def test_manual_source_combines_audio_transport_and_video_consumer_gates(monkeypatch, kind) -> None:
+def test_manual_source_combines_audio_transport_and_video_consumer_gates(
+    monkeypatch, kind
+) -> None:
     ctx = _make_context()
     plugin = InputPlugin()
     plugin.setup(ctx)
@@ -1960,7 +2044,8 @@ def test_manual_source_combines_audio_transport_and_video_consumer_gates(monkeyp
     monkeypatch.setattr(plugin, "_start_source", start)
     try:
         result = ctx.ui.dispatch_action(
-            "input.play_url", {"url": "https://example.com/media", "kind": kind},
+            "input.play_url",
+            {"url": "https://example.com/media", "kind": kind},
         )
         assert result.ok
         assert ready.wait(5.0)
@@ -1970,7 +2055,9 @@ def test_manual_source_combines_audio_transport_and_video_consumer_gates(monkeyp
         plugin.teardown()
 
 
-def test_gap_fill_combines_audio_transport_and_video_consumer_gates(monkeypatch, tmp_path) -> None:
+def test_gap_fill_combines_audio_transport_and_video_consumer_gates(
+    monkeypatch, tmp_path
+) -> None:
     ctx = _make_context(tmp_path)
     plugin = InputPlugin()
     plugin.setup(ctx)
@@ -1980,7 +2067,8 @@ def test_gap_fill_combines_audio_transport_and_video_consumer_gates(monkeypatch,
     plugin._fill_course = {"course_id": "1"}
     plugin._fill_target = "live-session"
     monkeypatch.setattr(
-        plugin._catalog, "get_recording_streams",
+        plugin._catalog,
+        "get_recording_streams",
         lambda course_id, video_id: {"1": "https://example.com/recording.mp4"},
     )
     started = []
@@ -2016,8 +2104,10 @@ def _run_audio_reader(hub, chunks, *, enabled=None, emit=None):
 
     source = FFmpegSource(
         SourceSpec(kind="recording", url="test"),
-        hub=hub, emit=emit or (lambda *a, **kw: None),
-        reconnect=False, audio_enabled=enabled,
+        hub=hub,
+        emit=emit or (lambda *a, **kw: None),
+        reconnect=False,
+        audio_enabled=enabled,
     )
     source._session_id = hub.current.session_id
     stdout = mock.Mock()
@@ -2051,7 +2141,9 @@ def test_disabled_audio_discards_payload_and_resumes_real_pcm() -> None:
     session = hub.current
     enabled = iter([False, False, True])
     _run_audio_reader(
-        hub, [b"\x01\x02" * 9600], enabled=lambda: next(enabled),
+        hub,
+        [b"\x01\x02" * 9600],
+        enabled=lambda: next(enabled),
     )
     assert session.audio.duration == pytest.approx(0.6)
     assert session.audio.chunk_count == 1
@@ -2066,7 +2158,8 @@ def test_audio_gate_failure_reports_error_without_appending() -> None:
     hub.current.audio_gate.wait = lambda end: False
     events = []
     source = _run_audio_reader(
-        hub, [b"\x01\x02" * 3200],
+        hub,
+        [b"\x01\x02" * 3200],
         emit=lambda name, **payload: events.append((name, payload)),
     )
     assert hub.current.audio.duration == 0.0
@@ -2096,7 +2189,9 @@ def test_file_eof_completes_both_readers_without_reconnect() -> None:
     events = []
     source = FFmpegSource(
         SourceSpec(kind="file", url="/tmp/input.wav", realtime=False),
-        hub=hub, emit=lambda name, **payload: events.append(name), reconnect=True,
+        hub=hub,
+        emit=lambda name, **payload: events.append(name),
+        reconnect=True,
     )
     source._session_id = session.session_id
     audio_stdout = mock.Mock()
@@ -2105,8 +2200,12 @@ def test_file_eof_completes_both_readers_without_reconnect() -> None:
     video_stdout.read1.return_value = b""
     source._audio_proc = SimpleNamespace(stdout=audio_stdout, poll=lambda: 0)
     source._video_proc = SimpleNamespace(stdout=video_stdout, poll=lambda: 0)
-    source._restart_audio_process = mock.Mock(side_effect=AssertionError("Audio restarted after EOF"))
-    source._restart_video_process = mock.Mock(side_effect=AssertionError("Video restarted after EOF"))
+    source._restart_audio_process = mock.Mock(
+        side_effect=AssertionError("Audio restarted after EOF")
+    )
+    source._restart_video_process = mock.Mock(
+        side_effect=AssertionError("Video restarted after EOF")
+    )
 
     source._read_audio()
     assert session.audio.duration == pytest.approx(0.2)
@@ -2128,10 +2227,14 @@ def test_multipart_progress_uses_full_duration(tmp_path, monkeypatch) -> None:
         cursors = {"audio": 6326.0, "video": 6000.0}
         for name, kind in (("stt", "audio"), ("vlm", "video")):
             ctx.streams.register_consumer(
-                name, kind, cursor_fn=lambda kind=kind: cursors[kind],
+                name,
+                kind,
+                cursor_fn=lambda kind=kind: cursors[kind],
             )
         ctx.events.emit(
-            "input.prepared", video_id="v1", duration=3039.0,
+            "input.prepared",
+            video_id="v1",
+            duration=3039.0,
             session_id=session.session_id,
         )
         assert ctx.events.flush()
@@ -2144,14 +2247,19 @@ def test_multipart_progress_uses_full_duration(tmp_path, monkeypatch) -> None:
         assert progress["value"] == 0.0
 
         ctx.events.emit(
-            "input.prepared", video_id="v2", duration=3287.0,
+            "input.prepared",
+            video_id="v2",
+            duration=3287.0,
             session_id=session.session_id,
         )
         assert ctx.events.flush()
         assert plugin._total_seconds == 6326.0
         assert job.total_seconds == 6326.0
         ctx.events.emit(
-            "input.download", status="progress", total=10, received=5,
+            "input.download",
+            status="progress",
+            total=10,
+            received=5,
             session_id=session.session_id,
         )
         assert ctx.events.flush()
@@ -2200,14 +2308,17 @@ def test_prefetch_and_continuous_audio(tmp_path, monkeypatch) -> None:
     downloaded = []
 
     class Downloader:
-        def download(self, url, dest, *, stop_event=None, on_progress=None):
+        def start(self, url, dest, *, stop_event=None, on_progress=None):
             downloaded.append(url)
             if "part2" in url:
                 download_started.set()
                 assert allow_download.wait(2.0)
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(b"media")
-            return DownloadResult(path=dest, total=5, ok=True)
+            return mock.Mock(
+                input_url=str(dest),
+                wait=lambda: DownloadResult(path=dest, total=5, ok=True),
+            )
 
     monkeypatch.setattr(sources, "probe_duration", lambda path: 0.2)
     monkeypatch.setattr(sources.subprocess, "Popen", lambda *a, **kw: mock.Mock())
@@ -2216,14 +2327,28 @@ def test_prefetch_and_continuous_audio(tmp_path, monkeypatch) -> None:
     events = []
     hub = StreamHub(emit=lambda name, **data: events.append(name))
     session_start_count = events.count("session.started")
-    mgr = SourceManager(hub=hub, emit=lambda *a, **kw: None, media_root=tmp_path, downloader=Downloader())
+    mgr = SourceManager(
+        hub=hub,
+        emit=lambda *a, **kw: None,
+        media_root=tmp_path,
+        downloader=Downloader(),
+    )
     second = SourceSpec(
-        kind="recording", url="https://example.com/part2/record.mp4", download=True,
-        realtime=False, continue_session=True, course={"video_id": "v2"},
+        kind="recording",
+        url="https://example.com/part2/record.mp4",
+        download=True,
+        realtime=False,
+        continue_session=True,
+        course={"video_id": "v2"},
     )
     first = SourceSpec(
-        kind="recording", url="https://example.com/part1/record.mp4", download=True,
-        realtime=False, final_part=False, next_source=second, course={"video_id": "v1"},
+        kind="recording",
+        url="https://example.com/part1/record.mp4",
+        download=True,
+        realtime=False,
+        final_part=False,
+        next_source=second,
+        course={"video_id": "v1"},
     )
     try:
         mgr.start(first)
@@ -2251,7 +2376,9 @@ def test_prefetch_and_continuous_audio(tmp_path, monkeypatch) -> None:
         assert session.input_done and STTPlugin._finished(session)
         assert session.audio.read(0, 0.4) == b"\x01\x02" * 3200 + b"\x03\x04" * 3200
         assert session.audio.buffered_ranges() == [(0.0, 0.4)]
-        assert [part["offset"] for part in session.meta["media_parts"]] == pytest.approx([0.0, 0.2])
+        assert [
+            part["offset"] for part in session.meta["media_parts"]
+        ] == pytest.approx([0.0, 0.2])
         assert len(set(part["path"] for part in session.meta["media_parts"])) == 2
         assert downloaded.count(first.url) == downloaded.count(second.url) == 1
         assert events.count("session.started") == session_start_count + 1
@@ -2264,11 +2391,91 @@ def test_prefetch_and_continuous_audio(tmp_path, monkeypatch) -> None:
 def test_canceled_prefetch_does_not_restart_download(monkeypatch) -> None:
     from plugins.input.sources import FFmpegSource
 
-    source = FFmpegSource(SourceSpec(kind="recording", url="test"), hub=StreamHub(), emit=lambda *a, **kw: None)
+    source = FFmpegSource(
+        SourceSpec(kind="recording", url="test"),
+        hub=StreamHub(),
+        emit=lambda *a, **kw: None,
+    )
     source._prepare_done = threading.Event()
     source._prepare_done.set()
-    source.prepare = mock.Mock(side_effect=AssertionError("download restarted after cancel"))
+    source.prepare = mock.Mock(
+        side_effect=AssertionError("download restarted after cancel")
+    )
     source.stop()
     source.start()
     assert not source.running
     source.prepare.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "phase,label",
+    [
+        ("collecting", "收集来源"),
+        ("chunking", "整理片段"),
+        ("writing", "整课写作"),
+        ("reviewing", "审阅"),
+        ("revising", "修改"),
+        ("published", "已发布"),
+        ("failed", "失败"),
+        ("resetting", "清理笔记"),
+        ("deleted", "已删除"),
+    ],
+)
+def test_note_panel_status_parity(tmp_path, monkeypatch, phase, label):
+    from plugins.summarize.plugin import SummarizePlugin
+
+    monkeypatch.setattr("plugins.summarize.plugin.time.monotonic", lambda: 125.0)
+    ctx = _make_context(tmp_path)
+    sid = ctx.streams.notes_session_id
+    requested = []
+    state = {
+        "phase": phase,
+        "pending_chunks": 3,
+        "running_chunks": 2,
+        "completed_chunks": 4,
+        "total_chunks": 9,
+        "tasks": [{"label": "正确性审阅", "agent_step": 7, "started": 100.0}],
+        "error": "审阅服务不可用" if phase == "failed" else "",
+    }
+
+    def status(session_id):
+        requested.append(session_id)
+        return state
+
+    pipeline = SimpleNamespace(status=status, note_files=lambda kind: {})
+    ctx.services.register("notes-pipeline", pipeline)
+    input_plugin = InputPlugin()
+    input_plugin._ctx = ctx
+    input_plugin._total_seconds = 0.0
+    notes = SummarizePlugin()
+    notes.ctx = ctx
+    notes.pipeline = pipeline
+    notes.settings = ctx.service("settings")
+    notes.notices = {}
+
+    recording = input_plugin._render_recording_page(
+        processing=False,
+        finished=True,
+        download={},
+        session_id=sid,
+    )
+    summary = notes._render()
+    expected = [
+        {"type": "text", "text": f"笔记：{label}"},
+        {"type": "text", "text": "片段 4/9；等待 3；运行 2"},
+        {"type": "text", "text": "正确性审阅：步骤 7；25 秒"},
+    ]
+    if phase == "failed":
+        expected.append(
+            {"type": "text", "text": "笔记生成失败：审阅服务不可用．可重新生成笔记．"}
+        )
+    assert recording[: len(expected)] == summary[: len(expected)] == expected
+    assert requested == [sid, sid]
+    assert all(block["type"] != "progress" for block in summary)
+    assert not any("讲义已" in block.get("text", "") for block in recording)
+    assert {
+        button["action"]
+        for block in summary
+        if block["type"] == "buttons"
+        for button in block["buttons"]
+    } >= {"summarize.delete", "summarize.regenerate"}

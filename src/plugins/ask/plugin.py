@@ -11,6 +11,7 @@ import json
 import re
 import threading
 import time
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -18,6 +19,8 @@ from core.agent_types import AgentProfile, AgentTool
 from core.plugin import Plugin, PluginContext
 from core.settings_spec import SettingsSpec
 from core.ui import render_markdown
+from core.file_access import publication_lock
+from plugins.agent.workspace import FileWorkspace
 
 from .prompts import ASK_PROMPT_TEMPLATE, INSTANT_SYSTEM_PROMPT, RESEARCH_SYSTEM_PROMPT
 
@@ -149,11 +152,17 @@ class AskPlugin(Plugin):
 
     @property
     def _instant_prompt(self) -> str:
-        return str(self._setting("instant_prompt", INSTANT_SYSTEM_PROMPT) or INSTANT_SYSTEM_PROMPT)
+        return str(
+            self._setting("instant_prompt", INSTANT_SYSTEM_PROMPT)
+            or INSTANT_SYSTEM_PROMPT
+        )
 
     @property
     def _research_prompt(self) -> str:
-        return str(self._setting("research_prompt", RESEARCH_SYSTEM_PROMPT) or RESEARCH_SYSTEM_PROMPT)
+        return str(
+            self._setting("research_prompt", RESEARCH_SYSTEM_PROMPT)
+            or RESEARCH_SYSTEM_PROMPT
+        )
 
     # ------------------------------------------------------------------
     # Action
@@ -187,9 +196,7 @@ class AskPlugin(Plugin):
             message += "（未能定位选中片段，已附在笔记末尾）"
         return {"ok": True, "message": message, "refresh": True}
 
-    def _run(
-        self, path: str, qa_id: str, selection: str, intensity: str
-    ) -> None:
+    def _run(self, path: str, qa_id: str, selection: str, intensity: str) -> None:
         live = _Live(self, path, qa_id)
         status = "done"
         answer = ""
@@ -227,13 +234,21 @@ class AskPlugin(Plugin):
         )
         prompt = self._build_prompt(path, context, selection, intensity)
         files = self._workspace_files(path) if intensity == RESEARCH else {}
+        snapshot = tempfile.TemporaryDirectory(prefix="notes-ask-")
+        frozen = {}
+        with publication_lock(Path(path).parent):
+            for name, original in files.items():
+                destination = Path(snapshot.name) / name
+                destination.write_bytes(Path(original).read_bytes())
+                frozen[name] = destination
+        workspace = FileWorkspace(frozen, readonly=frozen)
 
         profile = self._profile(intensity)
         self._agent.register_agent(profile)
         session = self._agent.create_session(
             name=f"ask-{qa_id}",
             agent=profile.name,
-            files=files,
+            workspace=workspace,
             meta={
                 "internal": True,
                 "role": "ask",
@@ -247,6 +262,7 @@ class AskPlugin(Plugin):
             result = self._agent.run(session.id, prompt, on_event=live.on_event)
         finally:
             self._agent.close(session.id)
+            snapshot.cleanup()
 
         self.ctx.logger.info(
             "ask %s finished in %.1fs: intensity=%s steps=%s tokens=%s error=%s",
@@ -270,7 +286,6 @@ class AskPlugin(Plugin):
                 model=self._model or None,
                 max_steps=1,
                 max_tokens=self._instant_max_tokens,
-                llm_extra={"reasoning_effort": "max"},
                 stream=True,
             )
         research_prompt = self._research_prompt
@@ -288,7 +303,6 @@ class AskPlugin(Plugin):
             model=self._model or None,
             max_steps=self._research_max_steps,
             max_tokens=self._research_max_tokens,
-            llm_extra={"reasoning_effort": "max"},
             final_answer_on_limit=True,
             stream=True,
         )
@@ -327,10 +341,15 @@ class AskPlugin(Plugin):
 
     def _workspace_files(self, path: str) -> dict[str, str]:
         note = Path(path)
+        names = set()
+        for owner in ("summarize", "instant-summarize"):
+            service = self.ctx.service(owner)
+            if service is not None:
+                names.update(name for name, _ in service.note_files().values())
         files = {
-            item.name: str(item)
-            for item in sorted(note.parent.glob("*.md"))
-            if item.is_file()
+            name: str(note.parent / name)
+            for name in sorted(names)
+            if (note.parent / name).is_file()
         }
         source = self._source_file(note)
         if source is not None:
@@ -342,10 +361,7 @@ class AskPlugin(Plugin):
 
         service = self.ctx.service("summarize")
         if service is not None:
-            for session_id in (
-                note.parent.parent.name,
-                self.ctx.streams.notes_session_id,
-            ):
+            for session_id in (note.parent.parent.name,):
                 if not session_id:
                     continue
                 found = service.source_path(session_id)
@@ -436,7 +452,11 @@ class _Live:
             )
             with self._lock:
                 self._tools.append(
-                    {"name": name, "detail": _tool_detail(name, arguments), "done": False}
+                    {
+                        "name": name,
+                        "detail": _tool_detail(name, arguments),
+                        "done": False,
+                    }
                 )
                 self._phase = "tool"
             self.publish(force=True)
@@ -574,7 +594,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="提问模型",
         type="string",
         default="",
-        group="Ask · 提问",
+        group="提问",
         description="回答提问使用的模型（空=agent 默认）",
     ),
     SettingsSpec(
@@ -582,7 +602,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="快速模式输出上限",
         type="int",
         default=16000,
-        group="Ask · 提问",
+        group="提问",
         description="快速模式单次调用的输出 token 上限（含思考 token）",
     ),
     SettingsSpec(
@@ -590,7 +610,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="研究模式输出上限",
         type="int",
         default=131072,
-        group="Ask · 提问",
+        group="提问",
         description="研究模式单次调用的输出 token 上限（含思考 token）",
     ),
     SettingsSpec(
@@ -598,7 +618,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="研究模式步数上限",
         type="int",
         default=24,
-        group="Ask · 提问",
+        group="提问",
         description="研究模式最多几轮工具调用；最后一步强制直接回答",
     ),
     SettingsSpec(
@@ -606,7 +626,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="选中前文词数",
         type="int",
         default=2000,
-        group="Ask · 提问",
+        group="提问",
         description="上下文里选中段落之前的笔记内容（按词计，中文按字计）",
     ),
     SettingsSpec(
@@ -614,7 +634,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="选中后文词数",
         type="int",
         default=2000,
-        group="Ask · 提问",
+        group="提问",
         description="上下文里选中段落之后的笔记内容",
     ),
     SettingsSpec(
@@ -622,7 +642,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="历史问答词数",
         type="int",
         default=1000,
-        group="Ask · 提问",
+        group="提问",
         description="同一条笔记中此前问答记录的独立限额",
     ),
     SettingsSpec(
@@ -630,7 +650,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="选中内容词数",
         type="int",
         default=800,
-        group="Ask · 提问",
+        group="提问",
         description="选中片段送入模型的上限，超出部分截断",
     ),
     SettingsSpec(
@@ -638,7 +658,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="研究模式 read 行数",
         type="int",
         default=50,
-        group="Ask · 提问",
+        group="提问",
         description="研究模式单次 read 最多返回的行数",
     ),
     SettingsSpec(
@@ -646,7 +666,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="search 命中上限",
         type="int",
         default=200,
-        group="Ask · 提问",
+        group="提问",
         description="search 工具最多返回的命中行数",
     ),
     SettingsSpec(
@@ -654,7 +674,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="快速模式提示词",
         type="text",
         default=INSTANT_SYSTEM_PROMPT,
-        group="Ask · 提问",
+        group="提问",
         description="快速模式（无工具、一步回答）的系统提示词",
     ),
     SettingsSpec(
@@ -662,7 +682,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="研究模式提示词",
         type="text",
         default=RESEARCH_SYSTEM_PROMPT,
-        group="Ask · 提问",
+        group="提问",
         description="研究模式（search + read）的系统提示词；支持 {read_max_lines}",
     ),
 ]

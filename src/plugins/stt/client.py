@@ -52,7 +52,12 @@ class STTStream:
             raise SttError("The STT service returned an invalid event.")
         if event["type"] == "error":
             code = event.get("code")
-            status = {"overloaded": 429, "backend": 502, "backend_failed": 502, "backend_failure": 502}.get(code)
+            status = {
+                "overloaded": 429,
+                "backend": 502,
+                "backend_failed": 502,
+                "backend_failure": 502,
+            }.get(code)
             raise SttError(str(event.get("message", code)), status_code=status)
         return event
 
@@ -76,7 +81,10 @@ class STTClient:
     """Reuse one HTTP pool for concurrent uploads and track active streams."""
 
     def __init__(
-        self, server_url: str, *, timeout: float = 60.0,
+        self,
+        server_url: str,
+        *,
+        timeout: float = 60.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.server_url = server_url.rstrip("/")
@@ -94,7 +102,14 @@ class STTClient:
                 response = self._http.post(
                     self.server_url + "/v1/transcriptions",
                     files=[
-                        ("metadata", (None, json.dumps({"language": language, "context": context}), "application/json")),
+                        (
+                            "metadata",
+                            (
+                                None,
+                                json.dumps({"language": language, "context": context}),
+                                "application/json",
+                            ),
+                        ),
                         ("audio", ("audio.wav", wav, "audio/wav")),
                     ],
                 )
@@ -106,11 +121,15 @@ class STTClient:
                     raise SttError(str(message), status_code=response.status_code)
                 try:
                     result = response.json()
-                    if not isinstance(result, dict) or not isinstance(result["segments"], list):
+                    if not isinstance(result, dict) or not isinstance(
+                        result["segments"], list
+                    ):
                         raise ValueError
                     return result
                 except (ValueError, KeyError, TypeError) as exc:
-                    raise SttError("The STT service returned an invalid transcription.") from exc
+                    raise SttError(
+                        "The STT service returned an invalid transcription."
+                    ) from exc
             except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                 error = SttError(str(exc), connection_failed=True)
             except httpx.HTTPError as exc:
@@ -119,15 +138,31 @@ class STTClient:
                 error = exc
             if attempt == 2 or not retryable(error):
                 raise error
-            if self._cancel.wait(0.25 * (2 ** attempt)):
+            if self._cancel.wait(0.25 * (2**attempt)):
                 raise SttError("The STT request was cancelled.")
         raise AssertionError("Unreachable retry state.")
 
-    def stream(self, *, language: str, context: str, concurrency: int, mode: str) -> STTStream:
+    def stream(
+        self, *, language: str, context: str, concurrency: int, mode: str
+    ) -> STTStream:
         parts = urlsplit(self.server_url)
-        url = urlunsplit(("wss" if parts.scheme == "https" else "ws", parts.netloc, parts.path + "/v1/stream", "mode=" + mode, ""))
+        url = urlunsplit(
+            (
+                "wss" if parts.scheme == "https" else "ws",
+                parts.netloc,
+                parts.path + "/v1/stream",
+                "mode=" + mode,
+                "",
+            )
+        )
         try:
-            socket = connect(url, open_timeout=self.timeout, close_timeout=1, max_size=1024 * 1024, max_queue=16)
+            socket = connect(
+                url,
+                open_timeout=self.timeout,
+                close_timeout=1,
+                max_size=1024 * 1024,
+                max_queue=16,
+            )
         except InvalidStatus as exc:
             raise SttError(str(exc), status_code=exc.response.status_code) from exc
         except OSError as exc:
@@ -139,7 +174,15 @@ class STTClient:
                 raise SttError("The STT request was cancelled.")
             self._streams.add(stream)
         try:
-            stream._control({"type": "start", "language": language, "context": context, "mode": mode, "concurrency": concurrency})
+            stream._control(
+                {
+                    "type": "start",
+                    "language": language,
+                    "context": context,
+                    "mode": mode,
+                    "concurrency": concurrency,
+                }
+            )
             stream.metadata = stream.receive(self.timeout)
             if stream.metadata.get("type") != "ready":
                 raise SttError("The STT service did not accept the stream.")

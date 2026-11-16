@@ -185,9 +185,7 @@ class Runtime:
                 "services": self.services.snapshot(),
             },
             "session": current.status(),
-            "sessions": [
-                dataclasses.asdict(s) for s in self.hub.list_sessions()
-            ][-10:],
+            "sessions": [dataclasses.asdict(s) for s in self.hub.list_sessions()][-10:],
             "llm": self.llm.info(),
         }
 

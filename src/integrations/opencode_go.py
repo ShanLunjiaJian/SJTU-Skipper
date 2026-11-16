@@ -86,7 +86,9 @@ def start_device_flow() -> DeviceFlow:
         raise OpenCodeGoError("OpenCode 授权响应不是 JSON。") from exc
     device_code = str(data.get("device_code") or "")
     user_code = str(data.get("user_code") or "")
-    verification = str(data.get("verification_uri_complete") or data.get("verification_uri") or "")
+    verification = str(
+        data.get("verification_uri_complete") or data.get("verification_uri") or ""
+    )
     if not device_code or not verification:
         raise OpenCodeGoError("OpenCode 授权响应缺少 device_code/verification_uri。")
     return DeviceFlow(

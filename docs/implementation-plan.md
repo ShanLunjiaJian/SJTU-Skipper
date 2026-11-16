@@ -29,8 +29,8 @@
 
 ## 0. 环境与基线
 
-- Python：3.12（系统 `/usr/bin/python3.12`）。
-- 虚拟环境：`.venv`（Python 3.12；已删除旧的不可用 `.venv` 并重建）。
+- Python：3.13，由 `nix develop` 提供．
+- 虚拟环境：在 devShell 中执行 `uv sync --locked --extra dev` 创建 `.venv`．
 - 依赖：`fastapi`, `uvicorn[standard]`, `httpx`, `pydantic`, `python-dotenv`, `numpy`, `pillow`, `markdown-it-py`, `beautifulsoup4`, `rich`, `typer`；测试 `pytest`, `pytest-asyncio`。
 - 外部命令：`ffmpeg`, `ffprobe`, `aria2c`（可选）。
 - 真实冒烟：Canvas token 与 DeepSeek API key 已存在于根 `.env`（git-ignored）。
@@ -285,7 +285,7 @@
 
 ## 3. 统一约定
 
-- Python 3.12，类型注解完整，`from __future__ import annotations`。
+- Python 3.13，类型注解完整，`from __future__ import annotations`．
 - 不使用 asyncio 作为核心并发模型；核心线程 + 锁；FastAPI 只做 Web 适配。
 - 所有时间单位为秒（float）；文本流索引从 0 开始；文件行号从 1 开始。
 - 日志用标准 `logging`；不要 print（CLI 除外）。
@@ -297,7 +297,7 @@
 ## 4. 测试矩阵
 
 | 模块 | 必测 |
-|---|---|
+| --- | --- |
 | streams | append/read/len/wait_for/immutability/event coalescing/session switch |
 | events | on/once/off/wildcard/priority/exception/flush/clock |
 | plugins | topo order/cycle/missing dep/service registry/teardown |
@@ -314,19 +314,19 @@
 ## 5. 真实冒烟清单
 
 1. `sjtu-skipper check`：拓扑顺序、插件加载、无异常。
-3. `sjtu-skipper serve` + 真实 settings：
+2. `sjtu-skipper serve` + 真实 settings：
    - `input.courses` 能列出 13 门 Canvas 课程。
    - 打开「代数拓扑」页，能列出录播。
    - 选择一条录播，`FFmpegSource` 能持续追加音频/视频；STT/VLM 状态正常（无 API key 时显示错误但不崩）。
    - 今日/近期直播列表可查询；无直播时显示空状态。
-4. 真实 LLM：用 DeepSeek key 跑一次 agent `info` + `read` + `append`（低成本），确认工具循环。
-5. 真实 VLM：用一条录播的 20 s 窗口，确认融合图和板书文字。
-6. 退出：无残留 ffmpeg 进程、线程正常 join。
+3. 真实 LLM：用 DeepSeek key 跑一次 agent `info` + `read` + `append`（低成本），确认工具循环。
+4. 真实 VLM：用一条录播的 20 s 窗口，确认融合图和板书文字。
+5. 退出：无残留 ffmpeg 进程、线程正常 join。
 
 ## 6. 风险与应对
 
 | 风险 | 应对 |
-|---|---|
+| --- | --- |
 | 旧子模块用户改动被覆盖 | 已移入 git-ignored `legacy/`；运行时使用 vendored 客户端 |
 | 直播 FLV 需要鉴权 header | `FFmpegSource` 支持 `-headers`；先用门户返回的 token URL，失败再带 `jwt-token`/`Referer` |
 | 双 ffmpeg 音视频起点漂移 | 同一 `started_at` 基准；文档标注非严格 A/V sync；后续可换单进程双输出 |

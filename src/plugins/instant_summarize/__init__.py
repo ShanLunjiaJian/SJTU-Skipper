@@ -2,16 +2,6 @@
 
 from __future__ import annotations
 
-from .plugin import (
-    INSTANT_NOTE_FILES,
-    INSTANT_NOTE_HEADERS,
-    InstantSummarizePlugin,
-    InstantSummarizeService,
-)
+from .plugin import InstantSummarizePlugin, InstantSummarizeService
 
-__all__ = [
-    "InstantSummarizePlugin",
-    "InstantSummarizeService",
-    "INSTANT_NOTE_FILES",
-    "INSTANT_NOTE_HEADERS",
-]
+__all__ = ["InstantSummarizePlugin", "InstantSummarizeService"]

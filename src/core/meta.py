@@ -16,7 +16,9 @@ class MetaRegistry:
         self._providers: dict[str, tuple[str, InfoProvider]] = {}
         self._lock = threading.RLock()
 
-    def register(self, name: str, provider: InfoProvider, *, plugin_id: str = "") -> None:
+    def register(
+        self, name: str, provider: InfoProvider, *, plugin_id: str = ""
+    ) -> None:
         if not name:
             raise ValueError("meta provider name is required")
         if not callable(provider):
@@ -30,7 +32,9 @@ class MetaRegistry:
             if current is None:
                 return
             if plugin_id is not None and current[0] != plugin_id:
-                raise ValueError(f"meta provider {name!r} is not owned by {plugin_id!r}")
+                raise ValueError(
+                    f"meta provider {name!r} is not owned by {plugin_id!r}"
+                )
             self._providers.pop(name, None)
 
     def remove_plugin(self, plugin_id: str) -> None:
@@ -58,7 +62,9 @@ class MetaRegistry:
                 rendered = value
             else:
                 try:
-                    rendered = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+                    rendered = json.dumps(
+                        value, ensure_ascii=False, indent=2, default=str
+                    )
                 except TypeError:
                     rendered = str(value)
             lines.append(f"## {name}\n{rendered}")

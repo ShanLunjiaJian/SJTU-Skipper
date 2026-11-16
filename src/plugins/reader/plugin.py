@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from core.plugin import Plugin, PluginContext
+from core.file_access import path_lock, publication_lock
+from contextlib import ExitStack
 from core.ui import render_markdown
 
 from . import qa
@@ -84,9 +86,7 @@ class ReaderService:
 
         self._plugin.unregister_selection_action(page, item_id, owner=owner)
 
-    def selection_actions(
-        self, page: str, owner: str = ""
-    ) -> list[dict[str, Any]]:
+    def selection_actions(self, page: str, owner: str = "") -> list[dict[str, Any]]:
         return self._plugin.selection_actions(page, owner)
 
     # -- inline Q&A blocks ---------------------------------------------
@@ -172,9 +172,7 @@ class ReaderPlugin(Plugin):
             plugin_id=self.id,
         )
         ctx.ui.register_action(OPEN_ACTION, self._act_open, plugin_id=self.id)
-        ctx.ui.register_action(
-            DELETE_QA_ACTION, self._act_delete_qa, plugin_id=self.id
-        )
+        ctx.ui.register_action(DELETE_QA_ACTION, self._act_delete_qa, plugin_id=self.id)
         ctx.ui.register_action(
             COLLAPSE_QA_ACTION, self._act_collapse_qa, plugin_id=self.id
         )
@@ -358,9 +356,7 @@ class ReaderPlugin(Plugin):
                     self._global_selection.pop(key, None)
         self.ctx.ui.refresh(f"reader.selection:purge:{owner}")
 
-    def selection_actions(
-        self, page: str, owner: str = ""
-    ) -> list[dict[str, Any]]:
+    def selection_actions(self, page: str, owner: str = "") -> list[dict[str, Any]]:
         """Return the menu items offered on *page* for a document of *owner*."""
 
         page_id = self._as_page_id(page)
@@ -492,7 +488,8 @@ class ReaderPlugin(Plugin):
         resolved = self._known_path(path)
         if resolved is None:
             raise ValueError("未知的文稿路径")
-        text = resolved.read_text("utf-8")
+        with publication_lock(resolved.parent), path_lock(resolved):
+            text = resolved.read_text("utf-8")
         blocks = qa.parse_blocks(text)
         current = next((b for b in blocks if b.id == qa_id), None)
         if current is None:
@@ -530,7 +527,7 @@ class ReaderPlugin(Plugin):
         resolved = self._known_path(path)
         if resolved is None:
             raise ValueError("未知的文稿路径")
-        with self._lock:
+        with publication_lock(resolved.parent), path_lock(resolved):
             text = resolved.read_text("utf-8")
             updated, info = mutate(text)
             resolved.write_text(updated, "utf-8")
@@ -562,14 +559,12 @@ class ReaderPlugin(Plugin):
         if resolved is None:
             return {"ok": False, "message": "未知的文稿路径"}
         try:
-            text = resolved.read_text("utf-8")
-        except OSError as exc:
-            return {"ok": False, "message": f"读取失败：{exc}"}
-        updated = qa.remove_block(text, qa_id)
-        if updated is None:
-            return {"ok": False, "message": "未找到这条问答"}
-        try:
-            resolved.write_text(updated, "utf-8")
+            with publication_lock(resolved.parent), path_lock(resolved):
+                text = resolved.read_text("utf-8")
+                updated = qa.remove_block(text, qa_id)
+                if updated is None:
+                    return {"ok": False, "message": "未找到这条问答"}
+                resolved.write_text(updated, "utf-8")
         except OSError as exc:
             return {"ok": False, "message": f"写入失败：{exc}"}
         return {"ok": True, "message": "已删除这条问答"}
@@ -617,8 +612,14 @@ class ReaderPlugin(Plugin):
         sequence = int(state.get("sequence") or 0)
 
         tabs: list[dict[str, Any]] = []
+        with ExitStack() as stack:
+            for directory in sorted(
+                {Path(doc["path"]).resolve().parent for doc in docs}
+            ):
+                stack.enter_context(publication_lock(directory))
+            texts = {doc["path"]: _read_text(doc["path"]) for doc in docs}
         for doc in docs:
-            text = _read_text(doc["path"])
+            text = texts[doc["path"]]
             owner = str(doc.get("owner", "") or state.get("owner") or "")
             blocks = _document_blocks(text, doc["path"])
             tabs.append(
@@ -637,11 +638,7 @@ class ReaderPlugin(Plugin):
             )
 
         return [
-            *(
-                [{"type": "markdown", "text": f"### {title}"}]
-                if title
-                else []
-            ),
+            *([{"type": "markdown", "text": f"### {title}"}] if title else []),
             {
                 "type": "tabs",
                 "id": f"{page_id}:{sequence}",
@@ -685,8 +682,7 @@ def _document_blocks(text: str, path: str) -> list[dict[str, Any]]:
         if not chunk_text.strip():
             continue
         blocks.extend(
-            {"type": "markdown", "text": chunk}
-            for chunk in split_markdown(chunk_text)
+            {"type": "markdown", "text": chunk} for chunk in split_markdown(chunk_text)
         )
     if not blocks:
         return [{"type": "text", "text": "（暂无内容）"}]

@@ -108,13 +108,19 @@ def build_audio_cmd(
     cmd.extend(
         [
             "-hide_banner",
-            "-loglevel", "error",
-            "-i", url,
+            "-loglevel",
+            "error",
+            "-i",
+            url,
             "-vn",  # no video
-            "-acodec", "pcm_s16le",
-            "-ar", str(sample_rate),
-            "-ac", str(channels),
-            "-f", "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            str(channels),
+            "-f",
+            "s16le",
         ]
     )
     if extra_args:
@@ -156,11 +162,16 @@ def build_video_cmd(
         # Low-latency flags for live FLV streams
         cmd.extend(
             [
-                "-fflags", "nobuffer",
-                "-flags", "low_delay",
-                "-strict", "experimental",
-                "-probesize", "32",
-                "-analyzeduration", "0",
+                "-fflags",
+                "nobuffer",
+                "-flags",
+                "low_delay",
+                "-strict",
+                "experimental",
+                "-probesize",
+                "32",
+                "-analyzeduration",
+                "0",
             ]
         )
     video_filter = f"fps={fps}"
@@ -169,10 +180,14 @@ def build_video_cmd(
     cmd.extend(
         [
             "-an",  # no audio in video sub-process
-            "-vf", video_filter,
-            "-c:v", "mjpeg",
-            "-q:v", "3",
-            "-f", "image2pipe",
+            "-vf",
+            video_filter,
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "3",
+            "-f",
+            "image2pipe",
         ]
     )
     if extra_args:
@@ -187,10 +202,14 @@ def build_reconnect_args(
 ) -> list[str]:
     """FFmpeg reconnect arguments for resilient streaming."""
     return [
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", str(max(1, int(max_retries))),
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_delay_max",
+        str(max(1, int(max_retries))),
     ]
+
 
 def probe_duration(path: str, *, timeout: float = 20.0) -> float | None:
     """Return the media duration in seconds via ffprobe, or None."""
@@ -202,9 +221,12 @@ def probe_duration(path: str, *, timeout: float = 20.0) -> float | None:
         proc = subprocess.run(
             [
                 "ffprobe",
-                "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "json",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "json",
                 str(path),
             ],
             capture_output=True,

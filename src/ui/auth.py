@@ -235,7 +235,7 @@ _LOGIN_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>登录 · SJTU-Skipper</title>
+<title>登录 - SJTU-Skipper</title>
 <style>
   :root { --blue:#1a73e8; --border:#dadce0; --text:#202124; --muted:#5f6368; }
   * { box-sizing:border-box; }
@@ -303,15 +303,11 @@ def install(app: Any, data_dir: Path) -> AuthStore:
         password = str(form.get("password") or "")
         if store.locked(username):
             error = '<p class="error">尝试次数过多，请五分钟后再试。</p>'
-            return HTMLResponse(
-                _LOGIN_HTML.replace("{error}", error), status_code=429
-            )
+            return HTMLResponse(_LOGIN_HTML.replace("{error}", error), status_code=429)
         if not store.verify(username, password, key=username):
             logger.warning("failed login for %r", username)
             error = '<p class="error">用户名或密码不正确。</p>'
-            return HTMLResponse(
-                _LOGIN_HTML.replace("{error}", error), status_code=401
-            )
+            return HTMLResponse(_LOGIN_HTML.replace("{error}", error), status_code=401)
         token = store.issue(username)
         response = RedirectResponse("/", status_code=303)
         response.set_cookie(

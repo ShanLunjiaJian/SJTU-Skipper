@@ -78,16 +78,8 @@ def _redact(headers: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _endpoint(base_url: str) -> str:
-    """Best-effort absolute endpoint for a base URL (never raises)."""
-
-    if not base_url:
-        return ""
-    try:  # same normalisation the provider applies
-        from .openai_compat import _normalise_base_url
-
-        return f"{_normalise_base_url(base_url)}/chat/completions"
-    except Exception:  # noqa: BLE001 - cosmetic field only
-        return base_url
+    """Return the provider request endpoint."""
+    return f"{base_url.rstrip('/')}/chat/completions" if base_url else ""
 
 
 def _iso(ts: float) -> str:

@@ -28,7 +28,9 @@ def _note(tmp_path: Path, name: str = "note_knowledge.md") -> Path:
     return path
 
 
-def _open(runtime: Any, path: Path, *, owner: str = "summarize", key: str = "s1") -> str:
+def _open(
+    runtime: Any, path: Path, *, owner: str = "summarize", key: str = "s1"
+) -> str:
     reader = runtime.services.require("reader")
     return reader.show(
         title="课堂讲义",
@@ -132,9 +134,7 @@ def test_qa_begin_and_finish_render_blocks(tmp_path: Path) -> None:
         assert qa_block["status"] == "done"
         assert "$a+b" in qa_block["answer_html"]
         # Markers never leak into the markdown blocks.
-        markdown = "".join(
-            b.get("text", "") for b in blocks if b["type"] == "markdown"
-        )
+        markdown = "".join(b.get("text", "") for b in blocks if b["type"] == "markdown")
         assert "qa:begin" not in markdown
         assert "第三段内容" in markdown
     finally:
@@ -176,10 +176,14 @@ def test_qa_context_budgets_are_independent(tmp_path: Path) -> None:
         _open(runtime, path)
         reader = runtime.services.require("reader")
 
-        first = reader.qa_begin(str(path), question="第一个问题", selection="第一段内容")
+        first = reader.qa_begin(
+            str(path), question="第一个问题", selection="第一段内容"
+        )
         reader.qa_finish(str(path), first["id"], answer="第一个回答")
 
-        second = reader.qa_begin(str(path), question="第二个问题", selection="第三段内容")
+        second = reader.qa_begin(
+            str(path), question="第二个问题", selection="第三段内容"
+        )
         context = reader.qa_context(
             str(path), second["id"], before_words=100, after_words=20, history_words=100
         )
@@ -197,7 +201,9 @@ def test_qa_context_budgets_are_independent(tmp_path: Path) -> None:
         assert qa.word_count(limited["before"]) <= 3
         assert limited["after"] == ""
 
-        third = reader.qa_begin(str(path), question="第三个问题", selection="第三段内容")
+        third = reader.qa_begin(
+            str(path), question="第三个问题", selection="第三段内容"
+        )
         context = reader.qa_context(
             str(path), third["id"], history_words=1000, before_words=10, after_words=10
         )
@@ -241,7 +247,9 @@ def test_qa_block_persists_intensity_and_fold(tmp_path: Path) -> None:
             intensity="research",
         )
         reader.qa_finish(str(path), created["id"], answer="因为定义。")
-        block = next(b for b in _tabs(runtime, page_id)[0]["blocks"] if b["type"] == "qa")
+        block = next(
+            b for b in _tabs(runtime, page_id)[0]["blocks"] if b["type"] == "qa"
+        )
         assert block["intensity"] == "research"
         assert block["collapsed"] is True
         assert '"intensity": "research"' in path.read_text("utf-8")
@@ -254,7 +262,9 @@ def test_qa_block_persists_intensity_and_fold(tmp_path: Path) -> None:
         assert result.ok
         assert result.refresh is False
         assert '"collapsed": false' in path.read_text("utf-8")
-        block = next(b for b in _tabs(runtime, page_id)[0]["blocks"] if b["type"] == "qa")
+        block = next(
+            b for b in _tabs(runtime, page_id)[0]["blocks"] if b["type"] == "qa"
+        )
         assert block["collapsed"] is False
     finally:
         runtime.stop()

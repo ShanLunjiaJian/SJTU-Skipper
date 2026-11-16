@@ -43,6 +43,7 @@ class InputError(RuntimeError):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def load_token_from_env() -> str:
     """Read the Canvas token from the project or legacy .env file."""
 
@@ -87,6 +88,7 @@ def _extract_stream_url(info: Any) -> str:
 # ---------------------------------------------------------------------------
 # SJTUCatalog
 # ---------------------------------------------------------------------------
+
 
 class SJTUCatalog:
     """Thin catalog that combines Canvas courses and SJTU video portal data.
@@ -180,9 +182,7 @@ class SJTUCatalog:
         try:
             courses = client.list_courses(active_only=True)
         except CanvasAuthError:
-            raise InputError(
-                "Canvas token 无效，请在设置中更新 input.canvas_token。"
-            )
+            raise InputError("Canvas token 无效，请在设置中更新 input.canvas_token。")
         except CanvasNetworkError as exc:
             raise InputError(f"Canvas 网络错误：{exc}")
         except (CanvasAPIError, CanvasPermissionError, CanvasNotFoundError) as exc:
@@ -190,7 +190,9 @@ class SJTUCatalog:
 
         result: list[dict[str, Any]] = []
         for c in courses:
-            teacher_names = [t.display_name for t in (c.teachers or []) if t.display_name]
+            teacher_names = [
+                t.display_name for t in (c.teachers or []) if t.display_name
+            ]
             term_name = c.term.name if c.term and c.term.name else ""
             result.append(
                 {
@@ -275,9 +277,7 @@ class SJTUCatalog:
             )
         return url
 
-    def get_recording_streams(
-        self, course_id: str, video_id: str
-    ) -> dict[str, str]:
+    def get_recording_streams(self, course_id: str, video_id: str) -> dict[str, str]:
         """Return per-view stream URLs for one recording.
 
         The platform publishes several views per class; ``viewNum`` 1 is the
@@ -358,14 +358,17 @@ class SJTUCatalog:
                 if token:
                     return token, self._live_headers(token)
             except Exception as exc:
-                _log.debug("Live token: course %s (%s) auth failed: %s",
-                           cid, course.name or cid, exc)
+                _log.debug(
+                    "Live token: course %s (%s) auth failed: %s",
+                    cid,
+                    course.name or cid,
+                    exc,
+                )
                 errors.append(f"  - {course.name or cid}: {exc}")
                 continue
 
         raise InputError(
-            "无法获取视频访问令牌。已尝试所有活跃课程，均未成功：\n"
-            + "\n".join(errors)
+            "无法获取视频访问令牌。已尝试所有活跃课程，均未成功：\n" + "\n".join(errors)
         )
 
     def _live_headers(self, token: str) -> dict[str, str]:
@@ -443,8 +446,12 @@ class SJTUCatalog:
                         or item.get("courName")
                         or item.get("name", "")
                     ),
-                    "classroom": str(item.get("clroName") or item.get("classroomName", "")),
-                    "begin": str(item.get("courBeginTime") or item.get("beginTime", "")),
+                    "classroom": str(
+                        item.get("clroName") or item.get("classroomName", "")
+                    ),
+                    "begin": str(
+                        item.get("courBeginTime") or item.get("beginTime", "")
+                    ),
                     "end": str(item.get("courEndTime") or item.get("endTime", "")),
                     "status": str(item.get("status") or item.get("liveStatus", "")),
                 }
@@ -482,9 +489,7 @@ class SJTUCatalog:
 
         data = payload.get("data") if isinstance(payload, dict) else payload
         devices = (
-            data.get("courseDeviceViewDtoList")
-            if isinstance(data, dict)
-            else []
+            data.get("courseDeviceViewDtoList") if isinstance(data, dict) else []
         ) or []
 
         result: list[dict[str, Any]] = []
@@ -494,7 +499,9 @@ class SJTUCatalog:
                     "name": str(d.get("chanNameMain") or d.get("deviceName", "")),
                     "url": str(d.get("chanNameMainPlayUrl") or d.get("playUrl", "")),
                     "view_num": d.get("deviViewNum") or d.get("viewNum", 0),
-                    "device_id": str(d.get("deviId") or d.get("deviceId") or d.get("chanId", "")),
+                    "device_id": str(
+                        d.get("deviId") or d.get("deviceId") or d.get("chanId", "")
+                    ),
                 }
             )
         return result

@@ -86,7 +86,9 @@ def redact_video_payload(value: Any) -> Any:
         for key, item in value.items():
             key_text = str(key)
             normalized_key = re.sub(r"[^a-z0-9]", "", key_text.lower())
-            if re.search(r"(token|cookie|authorization|secret|session)", key_text, re.IGNORECASE):
+            if re.search(
+                r"(token|cookie|authorization|secret|session)", key_text, re.IGNORECASE
+            ):
                 redacted[key_text] = "<redacted>" if item else item
             elif "url" in normalized_key and normalized_key not in {
                 "pptimgurl",
@@ -160,7 +162,9 @@ class SJTUVideoClient:
         self.canvas_token = canvas_token
         self.video_token = video_token.strip()
         self.video_course_id = video_course_id.strip()
-        self._auth_source = "environment" if self.video_token and self.video_course_id else ""
+        self._auth_source = (
+            "environment" if self.video_token and self.video_course_id else ""
+        )
         self._is_new_system = False
         self._owns_client = http_client is None
         self._client = http_client or httpx.Client(
@@ -260,7 +264,10 @@ class SJTUVideoClient:
         headers = (
             self._video_headers()
             if auth_required
-            else {"Accept": "application/json, text/plain, */*", "Referer": VIDEO_UI_REFERER}
+            else {
+                "Accept": "application/json, text/plain, */*",
+                "Referer": VIDEO_UI_REFERER,
+            }
         )
         response = self._request(
             method,
@@ -304,10 +311,18 @@ class SJTUVideoClient:
         code = payload.get("code")
         success = payload.get("success")
         if code is not None and str(code).lower() not in _SUCCESS_CODES:
-            message = payload.get("msg") or payload.get("message") or "SJTU video API returned an error."
+            message = (
+                payload.get("msg")
+                or payload.get("message")
+                or "SJTU video API returned an error."
+            )
             raise VideoIntegrationError(_redact_sensitive_text(str(message)))
         if success is False:
-            message = payload.get("msg") or payload.get("message") or "SJTU video API returned success=false."
+            message = (
+                payload.get("msg")
+                or payload.get("message")
+                or "SJTU video API returned success=false."
+            )
             raise VideoIntegrationError(_redact_sensitive_text(str(message)))
         return payload.get("data", payload)
 
@@ -327,7 +342,9 @@ class SJTUVideoClient:
         }
 
     @staticmethod
-    def _extract_form(html: str, *, base_url: str, target_action: Optional[str] = None) -> FormPost:
+    def _extract_form(
+        html: str, *, base_url: str, target_action: Optional[str] = None
+    ) -> FormPost:
         soup = BeautifulSoup(html, "html.parser")
         forms = list(soup.find_all("form"))
         selected = None
@@ -341,7 +358,9 @@ class SJTUVideoClient:
             selected = forms[0]
         if selected is None:
             expected = f" for {target_action}" if target_action else ""
-            raise VideoAuthError(f"SJTU video LTI page did not contain the expected form{expected}.")
+            raise VideoAuthError(
+                f"SJTU video LTI page did not contain the expected form{expected}."
+            )
 
         action = str(selected.get("action") or "")
         if not action:
@@ -379,13 +398,19 @@ class SJTUVideoClient:
             params={"id": VIDEO_LTI_TOOL_ID, "launch_type": "course_navigation"},
         )
         if not isinstance(payload, Mapping):
-            raise VideoAuthError("Canvas sessionless launch returned a non-object payload.")
+            raise VideoAuthError(
+                "Canvas sessionless launch returned a non-object payload."
+            )
         launch_url = str(payload.get("url") or "").strip()
         if not launch_url.startswith(("http://", "https://")):
-            raise VideoAuthError("Canvas sessionless launch did not return a usable launch URL.")
+            raise VideoAuthError(
+                "Canvas sessionless launch did not return a usable launch URL."
+            )
         return launch_url
 
-    def resolve_course_video_auth(self, course_id: int, *, force: bool = False) -> VideoAuth:
+    def resolve_course_video_auth(
+        self, course_id: int, *, force: bool = False
+    ) -> VideoAuth:
         """Resolve and cache the short-lived SJTU video auth for a Canvas course."""
 
         if not force and self.video_token and self.video_course_id:
@@ -415,7 +440,10 @@ class SJTUVideoClient:
                 base_url=str(launch_response.url),
             )
 
-        if "jy-lti-adapter" in first_form.action or "canvas-record" in first_form.action:
+        if (
+            "jy-lti-adapter" in first_form.action
+            or "canvas-record" in first_form.action
+        ):
             self._is_new_system = True
             resp2 = self._request(
                 "POST",
@@ -445,7 +473,9 @@ class SJTUVideoClient:
                 query_qs = parse_qs(parsed_loc.query)
                 jwt_token = query_qs.get("jwt_token", [""])[0]
             if not jwt_token:
-                raise VideoAuthError("SJTU video LTI launch redirect did not include jwt_token.")
+                raise VideoAuthError(
+                    "SJTU video LTI launch redirect did not include jwt_token."
+                )
 
             ctx_response = self._request(
                 "GET",
@@ -464,7 +494,9 @@ class SJTUVideoClient:
                 course_rec = (ctx_data.get("data") or {}).get("course") or {}
                 tecl_id = course_rec.get("teachingClassId")
             if not tecl_id:
-                raise VideoAuthError("SJTU video launch context did not contain teachingClassId.")
+                raise VideoAuthError(
+                    "SJTU video launch context did not contain teachingClassId."
+                )
 
             self.video_token = jwt_token
             self.video_course_id = str(tecl_id)
@@ -501,7 +533,9 @@ class SJTUVideoClient:
             auth_required=False,
         )
         if not isinstance(data, Mapping):
-            raise VideoAuthError("SJTU video token exchange returned a non-object payload.")
+            raise VideoAuthError(
+                "SJTU video token exchange returned a non-object payload."
+            )
         params = data.get("params") if isinstance(data.get("params"), Mapping) else {}
         video_token = str(
             data.get("token")
@@ -519,7 +553,9 @@ class SJTUVideoClient:
         if not video_token:
             raise VideoAuthError("SJTU video token exchange did not return a token.")
         if not video_course_id:
-            raise VideoAuthError("SJTU video token exchange did not return a course id.")
+            raise VideoAuthError(
+                "SJTU video token exchange did not return a course id."
+            )
         self.video_token = video_token
         self.video_course_id = video_course_id
         self._auth_source = "canvas_sessionless_lti"
@@ -560,7 +596,9 @@ class SJTUVideoClient:
                 leti = item.get("letiNumber")
                 vname = f"{subj} (第{leti}节)" if leti else subj
                 teachers = item.get("teacNames") or []
-                teacher_str = ", ".join(teachers) if isinstance(teachers, list) else str(teachers)
+                teacher_str = (
+                    ", ".join(teachers) if isinstance(teachers, list) else str(teachers)
+                )
                 videos.append(
                     CanvasVideo(
                         videoId=str(item.get("id")),
@@ -585,11 +623,15 @@ class SJTUVideoClient:
         else:
             records = data
         if not isinstance(records, list):
-            raise VideoIntegrationError("SJTU video list response did not contain a records list.")
+            raise VideoIntegrationError(
+                "SJTU video list response did not contain a records list."
+            )
         try:
             return [CanvasVideo.model_validate(item) for item in records]
         except ValidationError as exc:
-            raise VideoIntegrationError("SJTU video list response shape is not supported yet.") from exc
+            raise VideoIntegrationError(
+                "SJTU video list response shape is not supported yet."
+            ) from exc
 
     def get_video_info(self, course_id: Optional[int], video_id: str) -> VideoInfo:
         self._ensure_auth(course_id)
@@ -604,7 +646,9 @@ class SJTUVideoClient:
             payload = self._decode_json(response, "SJTU video info")
             data = payload.get("data") if isinstance(payload, Mapping) else payload
             if not isinstance(data, Mapping):
-                raise VideoIntegrationError("SJTU video info response did not contain an object.")
+                raise VideoIntegrationError(
+                    "SJTU video info response did not contain an object."
+                )
             play_list = data.get("courseVodViewList") or []
             return VideoInfo(
                 id=str(video_id),
@@ -625,14 +669,20 @@ class SJTUVideoClient:
         )
         if isinstance(data, list):
             if not data:
-                raise VideoIntegrationError(f"SJTU video info response is empty for video {video_id}.")
+                raise VideoIntegrationError(
+                    f"SJTU video info response is empty for video {video_id}."
+                )
             data = data[0]
         if not isinstance(data, Mapping):
-            raise VideoIntegrationError("SJTU video info response did not contain an object.")
+            raise VideoIntegrationError(
+                "SJTU video info response did not contain an object."
+            )
         try:
             return VideoInfo.model_validate(data)
         except ValidationError as exc:
-            raise VideoIntegrationError("SJTU video info response shape is not supported yet.") from exc
+            raise VideoIntegrationError(
+                "SJTU video info response shape is not supported yet."
+            ) from exc
 
     def download_video_stream(
         self,
@@ -652,23 +702,34 @@ class SJTUVideoClient:
         if use_aria2 and shutil.which("aria2c"):
             cmd = [
                 "aria2c",
-                "-x", "16",
-                "-s", "16",
-                "-k", "1M",
+                "-x",
+                "16",
+                "-s",
+                "16",
+                "-k",
+                "1M",
                 "--check-certificate=false",
                 "--allow-overwrite=true",
                 "--auto-file-renaming=false",
-                "-d", str(destination.parent),
-                "-o", destination.name,
+                "-d",
+                str(destination.parent),
+                "-o",
+                destination.name,
                 url,
             ]
             result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0 and destination.exists() and destination.stat().st_size > 0:
+            if (
+                result.returncode == 0
+                and destination.exists()
+                and destination.stat().st_size > 0
+            ):
                 return destination
 
         part_path = destination.with_suffix(destination.suffix + ".part")
         try:
-            with httpx.Client(timeout=httpx.Timeout(120.0), follow_redirects=True, verify=False) as dl_client:
+            with httpx.Client(
+                timeout=httpx.Timeout(120.0), follow_redirects=True, verify=False
+            ) as dl_client:
                 with dl_client.stream("GET", url, follow_redirects=True) as response:
                     response.raise_for_status()
                     total = int(response.headers.get("content-length", 0))
@@ -698,9 +759,13 @@ class SJTUVideoClient:
         for value in candidates:
             if str(value or "").strip():
                 return str(value).strip()
-        raise VideoIntegrationError("Video info did not include the course id required for subtitles/PPT.")
+        raise VideoIntegrationError(
+            "Video info did not include the course id required for subtitles/PPT."
+        )
 
-    def get_subtitle(self, course_id: Optional[int], video_course_id: str) -> VideoSubtitleBody:
+    def get_subtitle(
+        self, course_id: Optional[int], video_course_id: str
+    ) -> VideoSubtitleBody:
         self._ensure_auth(course_id)
         data = self._video_api_json(
             "POST",
@@ -708,28 +773,40 @@ class SJTUVideoClient:
             json_body={"courseId": str(video_course_id)},
         )
         if not isinstance(data, Mapping):
-            raise VideoIntegrationError("SJTU subtitle response did not contain an object.")
+            raise VideoIntegrationError(
+                "SJTU subtitle response did not contain an object."
+            )
         try:
             return VideoSubtitleBody.model_validate(data)
         except ValidationError as exc:
-            raise VideoIntegrationError("SJTU subtitle response shape is not supported yet.") from exc
+            raise VideoIntegrationError(
+                "SJTU subtitle response shape is not supported yet."
+            ) from exc
 
     def get_video_subtitle(self, course_id: int, video_id: str) -> VideoSubtitleBody:
         info = self.get_video_info(course_id, video_id)
         return self.get_subtitle(course_id, self._video_course_id_from_info(info))
 
-    def get_ppt_slices(self, course_id: Optional[int], video_course_id: str) -> List[VideoPPTSlice]:
+    def get_ppt_slices(
+        self, course_id: Optional[int], video_course_id: str
+    ) -> List[VideoPPTSlice]:
         self._ensure_auth(course_id)
         query = urlencode({"ivsVideoId": str(video_course_id)})
         data = self._video_api_json("GET", f"{PPT_SLICE_URL}?{query}")
         if not isinstance(data, list):
-            raise VideoIntegrationError("SJTU PPT slice response did not contain a list.")
+            raise VideoIntegrationError(
+                "SJTU PPT slice response did not contain a list."
+            )
         try:
             return [VideoPPTSlice.model_validate(item) for item in data]
         except ValidationError as exc:
-            raise VideoIntegrationError("SJTU PPT slice response shape is not supported yet.") from exc
+            raise VideoIntegrationError(
+                "SJTU PPT slice response shape is not supported yet."
+            ) from exc
 
-    def get_video_ppt_slices(self, course_id: int, video_id: str) -> List[VideoPPTSlice]:
+    def get_video_ppt_slices(
+        self, course_id: int, video_id: str
+    ) -> List[VideoPPTSlice]:
         info = self.get_video_info(course_id, video_id)
         return self.get_ppt_slices(course_id, self._video_course_id_from_info(info))
 
@@ -754,7 +831,11 @@ class SJTUVideoClient:
         content_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
         if not response.content:
             raise VideoIntegrationError("PPT image response was empty.")
-        if content_type and not content_type.startswith("image/") and content_type != "application/octet-stream":
+        if (
+            content_type
+            and not content_type.startswith("image/")
+            and content_type != "application/octet-stream"
+        ):
             raise VideoIntegrationError(
                 f"PPT image response was not an image: {content_type}"
             )

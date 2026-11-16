@@ -281,9 +281,7 @@ class AgentService:
                 else (profile.final_answer_on_limit if profile else False)
             ),
             stream=bool(
-                stream
-                if stream is not None
-                else (profile.stream if profile else False)
+                stream if stream is not None else (profile.stream if profile else False)
             ),
             max_tool_output=(
                 max_tool_output
@@ -332,9 +330,7 @@ class AgentService:
         # ``None`` => built-in defaults; a profile with an empty tool list
         # really means "no tools" (the instant ask agent).
         declarations = (
-            tools
-            if tools is not None
-            else (list(profile.tools) if profile else None)
+            tools if tools is not None else (list(profile.tools) if profile else None)
         )
         session.tools = self._resolve_tools(declarations, session)
 
@@ -342,9 +338,7 @@ class AgentService:
             self._sessions[sid] = session
         return session
 
-    def _resolve_agent(
-        self, agent: str | AgentProfile | None
-    ) -> AgentProfile | None:
+    def _resolve_agent(self, agent: str | AgentProfile | None) -> AgentProfile | None:
         if agent is None:
             return None
         if isinstance(agent, AgentProfile):
@@ -908,6 +902,7 @@ class AgentService:
         if response is None:
             raise RuntimeError("LLM stream ended without a response")
         return response, "".join(reasoning_parts) or _response_reasoning(response)
+
     def _emit(
         self,
         event_type: str,
@@ -1053,7 +1048,9 @@ class AgentPlugin(Plugin):
         # --- build service ---
         default_model = str(settings.get("agent.model", "deepseek-chat"))
         default_max_steps = _safe_int(settings.get("agent.max_steps", 12), 12)
-        default_max_tool_output = _safe_int(settings.get("agent.max_tool_output", 8000), 8000)
+        default_max_tool_output = _safe_int(
+            settings.get("agent.max_tool_output", 8000), 8000
+        )
         default_system_prompt = str(
             settings.get("agent.system_prompt", DEFAULT_SYSTEM_PROMPT)
         )
@@ -1163,11 +1160,7 @@ class AgentPlugin(Plugin):
         service = self.service
         if service is None:
             return []
-        return [
-            s
-            for s in service.list_sessions()
-            if _is_user_session(s)
-        ]
+        return [s for s in service.list_sessions() if _is_user_session(s)]
 
     def _current_session(self, sessions: list[dict[str, Any]]) -> str:
         """Return the selected session id, falling back to the newest one."""
@@ -1176,11 +1169,7 @@ class AgentPlugin(Plugin):
         if self._current_session_id in ids:
             return self._current_session_id
         preferred = next(
-            (
-                s
-                for s in reversed(sessions)
-                if _is_user_session(s)
-            ),
+            (s for s in reversed(sessions) if _is_user_session(s)),
             sessions[-1] if sessions else None,
         )
         self._current_session_id = preferred["id"] if preferred else ""
@@ -1214,7 +1203,7 @@ class AgentPlugin(Plugin):
             items.append(
                 {
                     "title": s["name"],
-                    "subtitle": f"{s['message_count']} 条消息 · {s['model']}",
+                    "subtitle": f"{s['message_count']} 条消息；{s['model']}",
                     "action": "agent.select_session",
                     "value": {"session_id": s["id"]},
                     "label": "打开",
@@ -1253,9 +1242,7 @@ class AgentPlugin(Plugin):
                 }
             ]
         current_id = self._current_session(sessions)
-        current = next(
-            (s for s in sessions if s["id"] == current_id), sessions[0]
-        )
+        current = next((s for s in sessions if s["id"] == current_id), sessions[0])
         session = service.get_session(current["id"])
         blocks: list[dict[str, Any]] = [
             {
@@ -1323,7 +1310,9 @@ class AgentPlugin(Plugin):
         service = self.service
         if service is None:
             return {"ok": False, "message": "服务未就绪"}
-        message = str(payload.get("message", "") or payload.get("values", {}).get("message", ""))
+        message = str(
+            payload.get("message", "") or payload.get("values", {}).get("message", "")
+        )
         if not message.strip():
             return {"ok": False, "message": "消息为空"}
 
@@ -1356,7 +1345,9 @@ class AgentPlugin(Plugin):
         service = self.service
         if service is None:
             return {"ok": False, "message": "服务未就绪"}
-        values = payload.get("values") if isinstance(payload.get("values"), dict) else {}
+        values = (
+            payload.get("values") if isinstance(payload.get("values"), dict) else {}
+        )
         session_id = str(payload.get("session_id") or values.get("session_id") or "")
         if not session_id:
             return {"ok": False, "message": "缺少会话 ID"}
@@ -1374,7 +1365,9 @@ class AgentPlugin(Plugin):
         service = self.service
         if service is None:
             return {"ok": False, "message": "服务未就绪"}
-        values = payload.get("values") if isinstance(payload.get("values"), dict) else {}
+        values = (
+            payload.get("values") if isinstance(payload.get("values"), dict) else {}
+        )
         session_id = str(payload.get("session_id") or values.get("session_id") or "")
         if not session_id:
             session_id = self._current_session(self._ui_sessions())

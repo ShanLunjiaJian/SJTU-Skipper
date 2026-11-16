@@ -135,7 +135,9 @@ class EventBus:
                 self._handlers[name].sort(key=lambda s: (-s.priority, s.seq))
             return sub
 
-    def once(self, event_type: str | EventType, handler: Handler, **kwargs: Any) -> Subscription:
+    def once(
+        self, event_type: str | EventType, handler: Handler, **kwargs: Any
+    ) -> Subscription:
         kwargs["once"] = True
         return self.on(event_type, handler, **kwargs)
 
@@ -237,7 +239,9 @@ class EventBus:
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     return False
-                self._pending_cv.wait(0.05 if remaining is None else min(0.05, remaining))
+                self._pending_cv.wait(
+                    0.05 if remaining is None else min(0.05, remaining)
+                )
             return True
 
     def _drain_sync(self) -> None:

@@ -7,7 +7,7 @@ name = "sjtu-skipper"
 version = "0.1.0"
 description = "Classroom total-agent architecture: streaming input, STT, VLM, LLM, behavior plugins and web UI."
 readme = "docs/architecture.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [{ name = "SJTU-Skipper" }]
 dependencies = [
@@ -31,7 +31,6 @@ ui-test = ["playwright>=1.40,<2.0"]
 
 [project.scripts]
 sjtu-skipper = "cli:main"
-lecture-agent = "cli:main"
 
 [tool.setuptools]
 py-modules = ["app", "applog", "cli", "config"]
@@ -48,3 +47,13 @@ testpaths = ["tests"]
 pythonpath = ["src", "tests"]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.format]
+indent-style = "space"
+quote-style = "double"
+line-ending = "lf"
+docstring-code-format = false

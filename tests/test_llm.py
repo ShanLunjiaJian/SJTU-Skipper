@@ -23,7 +23,6 @@ from llm.errors import (
 )
 from llm.openai_compat import (
     OpenAICompatibleProvider,
-    _normalise_base_url,
 )
 from llm.service import LLMService
 from llm.types import (
@@ -84,22 +83,6 @@ def _sse_lines(*lines: str) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "raw, expected",
-    [
-        ("https://api.deepseek.com", "https://api.deepseek.com/v1"),
-        ("https://api.deepseek.com/v1", "https://api.deepseek.com/v1"),
-        ("https://api.deepseek.com/v1/", "https://api.deepseek.com/v1"),
-        ("https://api.deepseek.com/v1/chat/completions", "https://api.deepseek.com/v1"),
-        ("https://openai.example.com/v1", "https://openai.example.com/v1"),
-        ("https://openai.example.com", "https://openai.example.com/v1"),
-        ("http://localhost:8080/v1", "http://localhost:8080/v1"),
-    ],
-)
-def test_normalise_base_url(raw: str, expected: str) -> None:
-    assert _normalise_base_url(raw) == expected
-
-
 class ScriptedProvider:
     """Test-only provider; production has no mock LLM provider."""
 
@@ -110,14 +93,16 @@ class ScriptedProvider:
         self.calls = []
 
     def _next_response(self, request):
-        self.calls.append({
-            "model": request.model,
-            "message_count": len(request.messages),
-            "tools": [t.name for t in request.tools],
-            "stream": request.stream,
-            "session_id": request.session_id,
-            "parent_session_id": request.parent_session_id,
-        })
+        self.calls.append(
+            {
+                "model": request.model,
+                "message_count": len(request.messages),
+                "tools": [t.name for t in request.tools],
+                "stream": request.stream,
+                "session_id": request.session_id,
+                "parent_session_id": request.parent_session_id,
+            }
+        )
         if not self.script:
             raise LLMError("scripted script exhausted")
         item = self.script.pop(0)
@@ -134,7 +119,7 @@ class ScriptedProvider:
     def stream(self, request):
         response = self._next_response(request)
         text = response.content
-        chunks = [text[i:i + 3] for i in range(0, len(text), 3)] if text else [""]
+        chunks = [text[i : i + 3] for i in range(0, len(text), 3)] if text else [""]
         for chunk in chunks:
             yield StreamEvent(type="text", text=chunk)
         for tc in response.tool_calls:
@@ -145,8 +130,15 @@ class ScriptedProvider:
         pass
 
 
-def test_request_url_no_double_v1() -> None:
-    """The resolved request URL must be {base}/v1/chat/completions (no doubled /v1)."""
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://api.example.com",
+        "https://api.example.com/v1",
+        "https://api.example.com/custom",
+    ],
+)
+def test_request_url_preserves_path(base_url: str) -> None:
     body = {
         "id": "url-test",
         "model": "test",
@@ -167,8 +159,8 @@ def test_request_url_no_double_v1() -> None:
         captured_url = str(request.url)
         return httpx.Response(200, json=body)
 
-    config = _make_config(base_url="https://api.example.com")
-    base = _normalise_base_url(config.base_url)  # → https://api.example.com/v1
+    config = _make_config(base_url=base_url)
+    base = config.base_url
     test_client = httpx.Client(
         base_url=base,
         headers={
@@ -182,11 +174,7 @@ def test_request_url_no_double_v1() -> None:
     provider._client = test_client  # type: ignore[assignment]
     provider.chat(_make_request())
 
-    # Must NOT contain /v1/v1/
-    assert "/v1/v1/" not in captured_url
-    assert captured_url == "https://api.example.com/v1/chat/completions", (
-        f"expected .../v1/chat/completions, got {captured_url}"
-    )
+    assert captured_url == base_url + "/chat/completions"
 
 
 def test_non_retryable_http_error_has_body() -> None:
@@ -197,8 +185,11 @@ def test_non_retryable_http_error_has_body() -> None:
 
     config = _make_config(max_retries=1)
     test_client = httpx.Client(
-        base_url=_normalise_base_url(config.base_url),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {config.api_key}"},
+        base_url=config.base_url,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {config.api_key}",
+        },
         timeout=httpx.Timeout(config.timeout),
         transport=httpx.MockTransport(handler),
     )
@@ -234,8 +225,11 @@ def test_extra_body_merged_at_top_level() -> None:
 
     config = _make_config()
     test_client = httpx.Client(
-        base_url=_normalise_base_url(config.base_url),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {config.api_key}"},
+        base_url=config.base_url,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {config.api_key}",
+        },
         timeout=httpx.Timeout(config.timeout),
         transport=httpx.MockTransport(handler),
     )
@@ -271,7 +265,9 @@ def test_chat_non_streaming() -> None:
         return httpx.Response(200, json=body)
 
     config = _make_config()
-    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test") as client:
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
         provider = OpenAICompatibleProvider(config=config)
         provider._client = client  # type: ignore[assignment]
         response = provider.chat(_make_request())
@@ -291,17 +287,21 @@ def test_chat_streaming() -> None:
     sse_body = _sse_lines(
         json.dumps({"choices": [{"delta": {"content": "Hel"}, "index": 0}]}),
         json.dumps({"choices": [{"delta": {"content": "lo"}, "index": 0}]}),
-        json.dumps({
-            "choices": [{"delta": {}, "finish_reason": "stop", "index": 0}],
-            "model": "test-model",
-        }),
+        json.dumps(
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop", "index": 0}],
+                "model": "test-model",
+            }
+        ),
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=sse_body)
 
     config = _make_config()
-    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test") as client:
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
         provider = OpenAICompatibleProvider(config=config)
         provider._client = client  # type: ignore[assignment]
         events = list(provider.stream(_make_request()))
@@ -350,7 +350,9 @@ def test_chat_tool_calls_non_streaming() -> None:
         return httpx.Response(200, json=body)
 
     config = _make_config()
-    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test") as client:
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
         provider = OpenAICompatibleProvider(config=config)
         provider._client = client  # type: ignore[assignment]
         response = provider.chat(_make_request())
@@ -365,58 +367,77 @@ def test_chat_tool_calls_non_streaming() -> None:
 
 def test_chat_tool_calls_streaming() -> None:
     sse_body = _sse_lines(
-        json.dumps({
-            "choices": [{
-                "delta": {
-                    "tool_calls": [
-                        {
-                            "index": 0,
-                            "id": "call_s1",
-                            "type": "function",
-                            "function": {"name": "get_weather", "arguments": ""},
-                        }
-                    ]
-                },
-                "index": 0,
-            }]
-        }),
-        json.dumps({
-            "choices": [{
-                "delta": {
-                    "tool_calls": [
-                        {
-                            "index": 0,
-                            "function": {"arguments": '{"city":'},
-                        }
-                    ]
-                },
-                "index": 0,
-            }]
-        }),
-        json.dumps({
-            "choices": [{
-                "delta": {
-                    "tool_calls": [
-                        {
-                            "index": 0,
-                            "function": {"arguments": '"Paris"}'},
-                        }
-                    ]
-                },
-                "index": 0,
-            }]
-        }),
-        json.dumps({
-            "choices": [{"delta": {}, "finish_reason": "tool_calls", "index": 0}],
-            "model": "test-model",
-        }),
+        json.dumps(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_s1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": "",
+                                    },
+                                }
+                            ]
+                        },
+                        "index": 0,
+                    }
+                ]
+            }
+        ),
+        json.dumps(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": '{"city":'},
+                                }
+                            ]
+                        },
+                        "index": 0,
+                    }
+                ]
+            }
+        ),
+        json.dumps(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": '"Paris"}'},
+                                }
+                            ]
+                        },
+                        "index": 0,
+                    }
+                ]
+            }
+        ),
+        json.dumps(
+            {
+                "choices": [{"delta": {}, "finish_reason": "tool_calls", "index": 0}],
+                "model": "test-model",
+            }
+        ),
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=sse_body)
 
     config = _make_config()
-    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test") as client:
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
         provider = OpenAICompatibleProvider(config=config)
         provider._client = client  # type: ignore[assignment]
         events = list(provider.stream(_make_request()))
@@ -458,7 +479,9 @@ def test_image_data_url() -> None:
         return httpx.Response(200, json=body)
 
     config = _make_config()
-    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test") as client:
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
         provider = OpenAICompatibleProvider(config=config)
         provider._client = client  # type: ignore[assignment]
         msg = Message(
@@ -501,7 +524,9 @@ def test_image_url_passthrough() -> None:
         return httpx.Response(200, json=body)
 
     config = _make_config()
-    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test") as client:
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
         provider = OpenAICompatibleProvider(config=config)
         provider._client = client  # type: ignore[assignment]
         msg = Message(
@@ -574,7 +599,9 @@ def test_retry_exhausted_non_streaming() -> None:
 
     config = _make_config(max_retries=2)
     policy = RetryPolicy(max_attempts=2, base_delay=0.01, max_delay=0.05)
-    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test") as client:
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
         provider = OpenAICompatibleProvider(config=config, retry_policy=policy)
         provider._client = client  # type: ignore[assignment]
         with pytest.raises(LLMRetryExhausted):
@@ -593,7 +620,9 @@ def test_retry_exhausted_streaming() -> None:
 
     config = _make_config(max_retries=2)
     policy = RetryPolicy(max_attempts=2, base_delay=0.01, max_delay=0.05)
-    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test") as client:
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
         provider = OpenAICompatibleProvider(config=config, retry_policy=policy)
         provider._client = client  # type: ignore[assignment]
         with pytest.raises(LLMRetryExhausted):
@@ -619,7 +648,11 @@ def test_retry_after_header() -> None:
             "id": "ra-ok",
             "model": "test-model",
             "choices": [
-                {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop",
+                }
             ],
             "usage": {},
         }
@@ -628,7 +661,9 @@ def test_retry_after_header() -> None:
     config = _make_config(max_retries=3)
     # Speed up the test: the retry will check Retry-After
     policy = RetryPolicy(max_attempts=3, base_delay=0.01, max_delay=0.1, jitter=0.0)
-    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test") as client:
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
         provider = OpenAICompatibleProvider(config=config, retry_policy=policy)
         provider._client = client  # type: ignore[assignment]
         response = provider.chat(_make_request())
@@ -662,7 +697,13 @@ def test_stream_no_retry_after_first_delta() -> None:
             body = {
                 "id": "never",
                 "model": "test-model",
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": "never"}, "finish_reason": "stop"}],
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "never"},
+                        "finish_reason": "stop",
+                    }
+                ],
                 "usage": {},
             }
             return httpx.Response(200, json=body)
@@ -726,7 +767,9 @@ def test_service_profile_vlm() -> None:
     service = LLMService(config_provider=config_cb)
     service.register_provider("openai", scripted_provider)
 
-    response = service.chat(profile="vlm", messages=[Message(role="user", content="describe this")])
+    response = service.chat(
+        profile="vlm", messages=[Message(role="user", content="describe this")]
+    )
     assert response.content == "vlm reply"
     # Verify the config was resolved for vlm
     assert len(configs) >= 1
@@ -748,6 +791,7 @@ def test_service_message_dict() -> None:
 
 def test_service_config_for() -> None:
     """config_for returns a populated ProviderConfig."""
+
     def config_cb(profile: str) -> ProviderConfig:
         return ProviderConfig(
             base_url="http://example.com",
@@ -806,23 +850,27 @@ def test_scripted_provider_text() -> None:
 
 
 def test_scripted_provider_response_objects() -> None:
-    provider = ScriptedProvider(script=[
-        ChatResponse(content="a", finish_reason="stop", model="mock"),
-    ])
+    provider = ScriptedProvider(
+        script=[
+            ChatResponse(content="a", finish_reason="stop", model="mock"),
+        ]
+    )
     r = provider.chat(_make_request())
     assert r.content == "a"
     assert r.model == "mock"
 
 
 def test_scripted_provider_tool_calls() -> None:
-    provider = ScriptedProvider(script=[
-        ChatResponse(
-            content="",
-            tool_calls=[ToolCall(id="c1", name="f", arguments={"x": 1})],
-            finish_reason="tool_calls",
-            model="mock",
-        ),
-    ])
+    provider = ScriptedProvider(
+        script=[
+            ChatResponse(
+                content="",
+                tool_calls=[ToolCall(id="c1", name="f", arguments={"x": 1})],
+                finish_reason="tool_calls",
+                model="mock",
+            ),
+        ]
+    )
     r = provider.chat(_make_request())
     assert r.tool_calls[0].name == "f"
     assert r.tool_calls[0].arguments == {"x": 1}
@@ -892,6 +940,26 @@ def test_llm_plugin_setup_registers_settings_and_service() -> None:
     assert "llm.max_retries" in fake_settings.specs_map
     assert "llm.extra_headers" in fake_settings.specs_map
     assert "llm.extra_body" in fake_settings.specs_map
+    service = services.get("llm")
+    fake_settings.set(
+        "llm.temperature", fake_settings.specs_map["llm.temperature"].coerce(0.5)
+    )
+    fake_settings.set(
+        "llm.temperature", fake_settings.specs_map["llm.temperature"].coerce(None)
+    )
+    fake_settings.set(
+        "llm.max_tokens", fake_settings.specs_map["llm.max_tokens"].coerce(4096)
+    )
+    fake_settings.set(
+        "llm.max_tokens", fake_settings.specs_map["llm.max_tokens"].coerce("")
+    )
+    assert service.config_for("agent").temperature is None
+    assert service.config_for("agent").max_tokens is None
+    fake_settings.set("llm.reasoning_effort", "low")
+    assert service.config_for("agent").extra_body["reasoning_effort"] == "low"
+    assert service.config_for("vlm").extra_body["reasoning_effort"] == "low"
+    fake_settings.set("llm.extra_body", {"reasoning_effort": "custom-level"})
+    assert service.config_for("agent").extra_body["reasoning_effort"] == "custom-level"
 
     # The api_key spec should be secret
     api_key_spec = fake_settings.specs_map["llm.api_key"]
@@ -923,13 +991,15 @@ def test_llm_plugin_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 
     from plugins.llm_core.plugin import LLMPlugin, _resolve_env
 
-    url = _resolve_env("LLM_BASE_URL", ("LLM_BASE_URL", "OPENAI_BASE_URL"), "https://default")
+    url = _resolve_env(
+        "LLM_BASE_URL", ("LLM_BASE_URL", "OPENAI_BASE_URL"), "https://default"
+    )
     assert url == "https://custom.openai.com/v1"
 
-    key = _resolve_env("LLM_API_KEY", ("LLM_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"), "")
+    key = _resolve_env(
+        "LLM_API_KEY", ("LLM_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"), ""
+    )
     assert key == "env-key"
-
-
 
 
 def test_parse_response_with_null_tool_calls() -> None:
@@ -942,7 +1012,11 @@ def test_parse_response_with_null_tool_calls() -> None:
             "choices": [
                 {
                     "finish_reason": "stop",
-                    "message": {"role": "assistant", "content": "ok", "tool_calls": None},
+                    "message": {
+                        "role": "assistant",
+                        "content": "ok",
+                        "tool_calls": None,
+                    },
                 }
             ],
             "usage": {},
@@ -1004,6 +1078,7 @@ def test_provider_config_defaults() -> None:
     assert cfg.model == ""
     assert cfg.timeout == 60.0
     assert cfg.max_retries == 3
+
 
 def test_opencode_mode_uses_app_owned_tokens(tmp_path) -> None:
     """OpenCode mode reads its own settings, not a local OpenCode install."""
@@ -1135,7 +1210,11 @@ def test_non_streaming_usage_cached_tokens(usage_payload: dict[str, Any]) -> Non
     body = {
         "model": "m",
         "choices": [
-            {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }
         ],
         "usage": usage_payload,
     }
@@ -1195,12 +1274,22 @@ def test_service_counts_tokens_per_model() -> None:
             ChatResponse(
                 content="a",
                 model="m1",
-                usage=Usage(prompt_tokens=100, completion_tokens=10, total_tokens=110, cached_tokens=60),
+                usage=Usage(
+                    prompt_tokens=100,
+                    completion_tokens=10,
+                    total_tokens=110,
+                    cached_tokens=60,
+                ),
             ),
             ChatResponse(
                 content="b",
                 model="m1",
-                usage=Usage(prompt_tokens=200, completion_tokens=20, total_tokens=220, cached_tokens=150),
+                usage=Usage(
+                    prompt_tokens=200,
+                    completion_tokens=20,
+                    total_tokens=220,
+                    cached_tokens=150,
+                ),
             ),
             ChatResponse(
                 content="c",
@@ -1236,3 +1325,36 @@ def test_service_counts_tokens_per_model() -> None:
     assert service.info()["usage"]["m1"]["cache_read_tokens"] == 210
     # The session id reaches the provider unchanged.
     assert provider.calls[1]["session_id"] == "sess-a"
+
+
+def test_tool_arguments_reach_provider_as_object():
+    captured = []
+
+    def respond(request):
+        captured.append(request)
+        return ChatResponse(content="done")
+
+    provider = ScriptedProvider([respond])
+    service = LLMService(config_provider=lambda _: _make_config())
+    service.register_provider("openai", provider)
+    service.chat(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {
+                            "name": "read",
+                            "arguments": '{"file":"source.md","l":1}',
+                        },
+                    }
+                ],
+            }
+        ]
+    )
+    assert captured[0].messages[0].tool_calls[0].arguments == {
+        "file": "source.md",
+        "l": 1,
+    }

@@ -26,20 +26,31 @@
       else if (k === "text") node.textContent = v;
       else if (k === "html") node.innerHTML = v;
       else if (k === "dataset") Object.assign(node.dataset, v);
-      else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2), v);
+      else if (k.startsWith("on") && typeof v === "function")
+        node.addEventListener(k.slice(2), v);
       else node.setAttribute(k, v);
     }
     for (const child of [].concat(children)) {
       if (child === null || child === undefined) continue;
-      node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+      node.appendChild(
+        typeof child === "string" ? document.createTextNode(child) : child,
+      );
     }
     return node;
   }
 
   const escapeHtml = (s) =>
-    String(s ?? "").replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[c]));
+    String(s ?? "").replace(
+      /[&<>"']/g,
+      (c) =>
+        ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[c],
+    );
 
   const fmtSeconds = (v) => {
     const n = Number(v || 0);
@@ -64,7 +75,10 @@
 
   async function api(path, options = {}) {
     const resp = await fetch(path, {
-      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      },
       ...options,
     });
     if (resp.status === 401) {
@@ -74,7 +88,9 @@
     }
     if (!resp.ok) {
       let detail = resp.statusText;
-      try { detail = (await resp.json()).detail || detail; } catch (_) {}
+      try {
+        detail = (await resp.json()).detail || detail;
+      } catch (_) {}
       throw new Error(detail);
     }
     const type = resp.headers.get("content-type") || "";
@@ -132,7 +148,13 @@
   // ------------------------------------------------------------------
   // Blocks
   // ------------------------------------------------------------------
-  function actionButton(label, action, value = undefined, cls = "btn btn-sm", disabled = false) {
+  function actionButton(
+    label,
+    action,
+    value = undefined,
+    cls = "btn btn-sm",
+    disabled = false,
+  ) {
     const attrs = { class: cls, dataset: { action } };
     if (value !== undefined) attrs.dataset.value = JSON.stringify(value);
     attrs.type = "button";
@@ -148,10 +170,14 @@
       if (typeof line === "string") {
         pre.appendChild(el("span", { class: "log-line", text: line }));
       } else {
-        pre.appendChild(el("span", { class: "log-line" }, [
-          line.time ? el("span", { class: "ts", text: String(line.time) }) : null,
-          document.createTextNode(String(line.text ?? line.message ?? "")),
-        ]));
+        pre.appendChild(
+          el("span", { class: "log-line" }, [
+            line.time
+              ? el("span", { class: "ts", text: String(line.time) })
+              : null,
+            document.createTextNode(String(line.text ?? line.message ?? "")),
+          ]),
+        );
       }
     }
     return pre;
@@ -162,9 +188,12 @@
     const table = el("table", { class: "data-table" });
     const columns = Array.isArray(block.columns) ? block.columns : [];
     const rows = Array.isArray(block.rows) ? block.rows : [];
-    const rowActions = Array.isArray(block.row_actions) ? block.row_actions : [];
+    const rowActions = Array.isArray(block.row_actions)
+      ? block.row_actions
+      : [];
 
-    const colLabel = (c) => (typeof c === "string" ? c : (c.label ?? c.key ?? ""));
+    const colLabel = (c) =>
+      typeof c === "string" ? c : (c.label ?? c.key ?? "");
     const colKey = (c, i) => (typeof c === "string" ? c : (c.key ?? i));
     const thead = el("thead");
     const tr = el("tr");
@@ -177,13 +206,14 @@
     for (const row of rows) {
       const rowObj = Array.isArray(row)
         ? Object.fromEntries(columns.map((c, i) => [colKey(c, i), row[i]]))
-        : (row || {});
+        : row || {};
       const tr = el("tr");
       for (let i = 0; i < columns.length; i += 1) {
         const c = columns[i];
         const key = colKey(c, i);
         let value = Array.isArray(row) ? row[i] : rowObj[key];
-        if (typeof value === "object" && value !== null) value = JSON.stringify(value);
+        if (typeof value === "object" && value !== null)
+          value = JSON.stringify(value);
         tr.appendChild(el("td", { text: value ?? "" }));
       }
       if (rowActions.length) {
@@ -195,7 +225,14 @@
           } else if (!action.value) {
             value = { ...rowObj };
           }
-          td.appendChild(actionButton(action.label || "执行", action.action, value, action.class || "btn btn-sm"));
+          td.appendChild(
+            actionButton(
+              action.label || "执行",
+              action.action,
+              value,
+              action.class || "btn btn-sm",
+            ),
+          );
         }
         tr.appendChild(td);
       }
@@ -203,7 +240,8 @@
     }
     table.appendChild(tbody);
     wrap.appendChild(table);
-    if (!rows.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    if (!rows.length)
+      wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
     return wrap;
   }
 
@@ -211,7 +249,12 @@
     const wrap = el("div", { class: "tree" });
     const nodes = Array.isArray(block.nodes) ? block.nodes : [];
     if (!nodes.length) {
-      wrap.appendChild(el("div", { class: "tree-empty", text: block.empty_text || "暂无内容" }));
+      wrap.appendChild(
+        el("div", {
+          class: "tree-empty",
+          text: block.empty_text || "暂无内容",
+        }),
+      );
       return wrap;
     }
     for (const node of nodes) wrap.appendChild(renderTreeNode(node));
@@ -236,12 +279,19 @@
       if (hasChildren) runNodeAction(node.toggle);
     });
     row.appendChild(caret);
-    if (node.icon) row.appendChild(el("span", { class: "tree-icon", text: node.icon }));
-    row.appendChild(el("span", { class: "tree-label", text: node.label || node.id || "" }));
-    if (node.subtitle) row.appendChild(el("span", { class: "tree-sub", text: node.subtitle }));
+    if (node.icon)
+      row.appendChild(el("span", { class: "tree-icon", text: node.icon }));
+    row.appendChild(
+      el("span", { class: "tree-label", text: node.label || node.id || "" }),
+    );
+    if (node.subtitle)
+      row.appendChild(el("span", { class: "tree-sub", text: node.subtitle }));
     if (node.badge) {
       row.appendChild(
-        el("span", { class: `tree-badge ${node.badge_class || ""}`, text: node.badge })
+        el("span", {
+          class: `tree-badge ${node.badge_class || ""}`,
+          text: node.badge,
+        }),
       );
     }
     row.addEventListener("click", () => {
@@ -262,21 +312,34 @@
     postAction(spec.action, spec.value || {});
   }
 
-  function renderRows(block) {    const wrap = el("div", { class: "row-list block" });
+  function renderRows(block) {
+    const wrap = el("div", { class: "row-list block" });
     for (const item of block.items || []) {
-      const row = el("div", { class: `row-item ${item.active ? "active" : ""}` });
+      const row = el("div", {
+        class: `row-item ${item.active ? "active" : ""}`,
+      });
       const main = el("div", { class: "row-main" }, [
         el("div", { class: "row-title", text: item.title || item.text || "" }),
-        item.subtitle ? el("div", { class: "row-sub", text: item.subtitle }) : null,
+        item.subtitle
+          ? el("div", { class: "row-sub", text: item.subtitle })
+          : null,
         item.meta ? el("div", { class: "row-meta", text: item.meta }) : null,
       ]);
       row.appendChild(main);
       if (item.action) {
-        row.appendChild(actionButton(item.label || "打开", item.action, item.value, item.class || "btn btn-sm"));
+        row.appendChild(
+          actionButton(
+            item.label || "打开",
+            item.action,
+            item.value,
+            item.class || "btn btn-sm",
+          ),
+        );
       }
       wrap.appendChild(row);
     }
-    if (!wrap.children.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    if (!wrap.children.length)
+      wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
     return wrap;
   }
 
@@ -284,13 +347,19 @@
     const wrap = el("div", { class: "cards" });
     for (const item of block.items || []) {
       const card = el("div", { class: "card" });
-      if (item.title) card.appendChild(el("div", { class: "card-title", text: item.title }));
-      if (item.subtitle) card.appendChild(el("div", { class: "card-sub", text: item.subtitle }));
+      if (item.title)
+        card.appendChild(el("div", { class: "card-title", text: item.title }));
+      if (item.subtitle)
+        card.appendChild(el("div", { class: "card-sub", text: item.subtitle }));
       if (item.meta) {
         const meta = el("div", { class: "card-meta" });
-        const entries = Array.isArray(item.meta) ? item.meta : Object.entries(item.meta);
+        const entries = Array.isArray(item.meta)
+          ? item.meta
+          : Object.entries(item.meta);
         for (const entry of entries) {
-          const text = Array.isArray(entry) ? `${entry[0]}: ${entry[1]}` : String(entry);
+          const text = Array.isArray(entry)
+            ? `${entry[0]}: ${entry[1]}`
+            : String(entry);
           meta.appendChild(el("span", { text }));
         }
         card.appendChild(meta);
@@ -299,13 +368,21 @@
       if (item.actions && item.actions.length) {
         const actions = el("div", { class: "card-actions" });
         for (const action of item.actions) {
-          actions.appendChild(actionButton(action.label || "执行", action.action, action.value, action.class || "btn btn-sm"));
+          actions.appendChild(
+            actionButton(
+              action.label || "执行",
+              action.action,
+              action.value,
+              action.class || "btn btn-sm",
+            ),
+          );
         }
         card.appendChild(actions);
       }
       wrap.appendChild(card);
     }
-    if (!wrap.children.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    if (!wrap.children.length)
+      wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
     return wrap;
   }
 
@@ -325,10 +402,13 @@
             field.button_label || field.label || "执行",
             field.action,
             {},
-            "btn btn-sm btn-primary"
-          )
+            "btn btn-sm btn-primary",
+          ),
         );
-        if (field.description) row.appendChild(el("div", { class: "hint", text: field.description }));
+        if (field.description)
+          row.appendChild(
+            el("div", { class: "hint", text: field.description }),
+          );
         form.appendChild(row);
         continue;
       }
@@ -336,16 +416,28 @@
       const type = field.input || (field.secret ? "password" : rawType);
       let input;
       if (type === "textarea") {
-        input = el("textarea", { class: "textarea", id, name: fieldName, placeholder: field.placeholder || "" });
+        input = el("textarea", {
+          class: "textarea",
+          id,
+          name: fieldName,
+          placeholder: field.placeholder || "",
+        });
         input.value = field.value ?? "";
       } else if (type === "select") {
         input = el("select", { class: "select", id, name: fieldName });
         const options = field.option_items || field.options || [];
         for (const option of options) {
           const value = typeof option === "object" ? option.value : option;
-          const label = typeof option === "object" ? (option.label ?? option.value) : option;
-          const opt = el("option", { value: String(value), text: String(label) });
-          if (String(value) === String(field.value ?? field.default ?? "")) opt.selected = true;
+          const label =
+            typeof option === "object"
+              ? (option.label ?? option.value)
+              : option;
+          const opt = el("option", {
+            value: String(value),
+            text: String(label),
+          });
+          if (String(value) === String(field.value ?? field.default ?? ""))
+            opt.selected = true;
           input.appendChild(opt);
         }
       } else if (type === "checkbox" || rawType === "bool") {
@@ -353,10 +445,21 @@
         input.checked = Boolean(field.value);
       } else {
         input = el("input", {
-          class: "input", id, name: fieldName,
-          type: type === "password" || field.secret ? "password" : (type === "number" || rawType === "int" || rawType === "float" ? "number" : "text"),
+          class: "input",
+          id,
+          name: fieldName,
+          type:
+            type === "password" || field.secret
+              ? "password"
+              : type === "number" || rawType === "int" || rawType === "float"
+                ? "number"
+                : "text",
         });
-        if (!field.secret && field.value !== undefined && field.value !== null) {
+        if (
+          !field.secret &&
+          field.value !== undefined &&
+          field.value !== null
+        ) {
           input.value = field.value;
         }
         if (field.secret) {
@@ -385,17 +488,24 @@
         const line = el("div", { class: "form-inline" }, [status]);
         if (field.is_set) {
           line.appendChild(
-            actionButton("清除", "settings.clear_secret", { key: fieldName }, "btn btn-sm btn-danger")
+            actionButton(
+              "清除",
+              "settings.clear_secret",
+              { key: fieldName },
+              "btn btn-sm btn-danger",
+            ),
           );
         }
         row.appendChild(line);
       }
-      if (field.description) row.appendChild(el("div", { class: "hint", text: field.description }));
+      if (field.description)
+        row.appendChild(el("div", { class: "hint", text: field.description }));
       form.appendChild(row);
     }
     const actions = el("div", { class: "form-actions" });
     const submit = el("button", {
-      class: "btn btn-primary", type: "submit",
+      class: "btn btn-primary",
+      type: "submit",
       text: block.submit_label || submitSpec.label || "保存",
     });
     actions.appendChild(submit);
@@ -408,7 +518,10 @@
     const bar = el("div", { class: "tabs-bar" });
     const body = el("div", { class: "tabs-body" });
     const tabs = block.tabs || [];
-    const key = block.id || block.key || `tabs:${tabs.map((t) => t.title || "").join("\u0001")}`;
+    const key =
+      block.id ||
+      block.key ||
+      `tabs:${tabs.map((t) => t.title || "").join("\u0001")}`;
     const savedTitle = state.blockTabs[key];
     // A client-side selection wins over the server hint so that periodic
     // refreshes do not yank the reader back to the document it opened with.
@@ -423,20 +536,31 @@
       body.dataset.docPath = meta.path || "";
       body.dataset.pageId = meta.page_id || "";
       body.dataset.owner = meta.owner || "";
-      body.dataset.selectionActions = JSON.stringify(meta.selection_actions || []);
+      body.dataset.selectionActions = JSON.stringify(
+        meta.selection_actions || [],
+      );
     };
     const show = (index, remember = true) => {
       active = index;
       if (remember) state.blockTabs[key] = tabs[index]?.title || "";
-      $$(".tab-btn", bar).forEach((b, i) => b.classList.toggle("active", i === active));
+      $$(".tab-btn", bar).forEach((b, i) =>
+        b.classList.toggle("active", i === active),
+      );
       applyMeta(tabs[index]);
       body.replaceChildren(renderBlocks(tabs[index]?.blocks || []));
-      if (remember && (body.textContent.includes("$") || body.textContent.includes("\\("))) {
+      if (
+        remember &&
+        (body.textContent.includes("$") || body.textContent.includes("\\("))
+      ) {
         typeset(body);
       }
     };
     tabs.forEach((tab, i) => {
-      const btn = el("button", { class: "tab-btn", type: "button", text: tab.title || `Tab ${i + 1}` });
+      const btn = el("button", {
+        class: "tab-btn",
+        type: "button",
+        text: tab.title || `Tab ${i + 1}`,
+      });
       btn.addEventListener("click", () => show(i));
       bar.appendChild(btn);
     });
@@ -459,8 +583,16 @@
     // Relay every media URL through this server: the browser may be on a VPN
     // that cannot reach live.sjtu.edu.cn, while the server can.
     const src = relayedMediaUrl(rawSrc);
-    if (rawSrc.includes(".flv") && window.mpegts && window.mpegts.isSupported()) {
-      const player = window.mpegts.createPlayer({ type: "flv", isLive: true, url: src });
+    if (
+      rawSrc.includes(".flv") &&
+      window.mpegts &&
+      window.mpegts.isSupported()
+    ) {
+      const player = window.mpegts.createPlayer({
+        type: "flv",
+        isLive: true,
+        url: src,
+      });
       player.attachMediaElement(video);
       player.load();
       video._mpegts = player;
@@ -483,8 +615,12 @@
     if (startAt > 1) {
       video.addEventListener(
         "loadedmetadata",
-        () => { try { video.currentTime = startAt; } catch (_) {} },
-        { once: true }
+        () => {
+          try {
+            video.currentTime = startAt;
+          } catch (_) {}
+        },
+        { once: true },
       );
     }
   }
@@ -509,7 +645,10 @@
       const saved = block.live ? {} : cache[source.key] || {};
       const pane = el("div", { class: "player-pane" });
       pane.appendChild(
-        el("div", { class: "player-label", text: source.label || source.key || "" })
+        el("div", {
+          class: "player-label",
+          text: source.label || source.key || "",
+        }),
       );
       const video = el("video", {
         class: "player-video",
@@ -531,9 +670,10 @@
       video.addEventListener("seeked", remember);
       const hint = el("div", { class: "player-error", text: "" });
       video.addEventListener("error", () => {
-        hint.textContent = video._mpegts || video._hls
-          ? "视频加载失败：转发代理无法连上视频源"
-          : "视频无法播放（服务器转发失败）";
+        hint.textContent =
+          video._mpegts || video._hls
+            ? "视频加载失败：转发代理无法连上视频源"
+            : "视频无法播放（服务器转发失败）";
       });
       videos.push(video);
       pane.appendChild(video);
@@ -543,7 +683,10 @@
 
     if (block.screen_missing) {
       grid.appendChild(
-        el("div", { class: "player-pane player-empty", text: "该课程没有屏幕流" })
+        el("div", {
+          class: "player-pane player-empty",
+          text: "该课程没有屏幕流",
+        }),
       );
     }
     wrap.appendChild(grid);
@@ -586,7 +729,9 @@
     };
     const pauseAll = () => {
       for (const video of videos) {
-        try { video.pause(); } catch (_) {}
+        try {
+          video.pause();
+        } catch (_) {}
       }
     };
 
@@ -627,7 +772,10 @@
     bar.appendChild(toggle);
     if (block.part && block.parts && block.parts > 1) {
       bar.appendChild(
-        el("span", { class: "player-meta", text: `第 ${block.part}/${block.parts} 节` })
+        el("span", {
+          class: "player-meta",
+          text: `第 ${block.part}/${block.parts} 节`,
+        }),
       );
     }
     wrap.appendChild(bar);
@@ -650,13 +798,16 @@
       postAction(block.action, { enabled: input.checked });
     });
     wrap.appendChild(label);
-    if (block.hint) wrap.appendChild(el("div", { class: "hint", text: block.hint }));
+    if (block.hint)
+      wrap.appendChild(el("div", { class: "hint", text: block.hint }));
     return wrap;
   }
 
   function qaPreview(text) {
-    const flat = String(text || "").replace(/\s+/g, " ").trim();
-    return flat.length > 90 ? `${flat.slice(0, 90)}…` : (flat || "（提问）");
+    const flat = String(text || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    return flat.length > 90 ? `${flat.slice(0, 90)}…` : flat || "（提问）";
   }
 
   function qaLevelLabel(intensity) {
@@ -690,7 +841,10 @@
     });
     const head = el("div", { class: "qa-head" });
     const toggle = el("button", {
-      class: "qa-toggle", type: "button", text: collapsed ? "▸" : "▾", title: "折叠 / 展开",
+      class: "qa-toggle",
+      type: "button",
+      text: collapsed ? "▸" : "▾",
+      title: "折叠 / 展开",
     });
     toggle.addEventListener("click", () => {
       const next = !wrap.classList.contains("collapsed");
@@ -704,28 +858,34 @@
     });
     head.appendChild(toggle);
     head.appendChild(el("span", { class: "qa-badge qa-badge-q", text: "问" }));
-    head.appendChild(el("span", { class: "qa-summary", text: qaPreview(block.question) }));
+    head.appendChild(
+      el("span", { class: "qa-summary", text: qaPreview(block.question) }),
+    );
     const level = qaLevelLabel(block.intensity);
     if (level) head.appendChild(el("span", { class: "qa-level", text: level }));
-    if (block.ts) head.appendChild(el("span", { class: "qa-time", text: block.ts }));
-    if (pending) head.appendChild(el("span", { class: "qa-pending", text: "回答中…" }));
+    if (block.ts)
+      head.appendChild(el("span", { class: "qa-time", text: block.ts }));
+    if (pending)
+      head.appendChild(el("span", { class: "qa-pending", text: "回答中…" }));
     head.appendChild(
       actionButton(
         "删除",
         block.delete_action || "reader.qa_delete",
         { path: block.path, id: block.id },
-        "btn btn-sm btn-danger qa-delete"
-      )
+        "btn btn-sm btn-danger qa-delete",
+      ),
     );
 
     const body = el("div", { class: "qa-body" });
-    body.appendChild(el("div", { class: "qa-msg qa-question" }, [
-      el("div", { class: "qa-role", text: "你的提问" }),
-      el("div", {
-        class: "qa-text markdown",
-        html: block.question_html || escapeHtml(block.question || ""),
-      }),
-    ]));
+    body.appendChild(
+      el("div", { class: "qa-msg qa-question" }, [
+        el("div", { class: "qa-role", text: "你的提问" }),
+        el("div", {
+          class: "qa-text markdown",
+          html: block.question_html || escapeHtml(block.question || ""),
+        }),
+      ]),
+    );
     const answerBox = el("div", {
       class: `qa-msg qa-answer ${pending ? "pending" : ""} ${block.status === "error" ? "qa-failed" : ""}`,
     });
@@ -733,10 +893,12 @@
     if (pending) {
       answerBox.appendChild(buildQaLive(block));
     } else {
-      answerBox.appendChild(el("div", {
-        class: "qa-text markdown",
-        html: block.answer_html || escapeHtml(block.answer || "（无内容）"),
-      }));
+      answerBox.appendChild(
+        el("div", {
+          class: "qa-text markdown",
+          html: block.answer_html || escapeHtml(block.answer || "（无内容）"),
+        }),
+      );
     }
     body.appendChild(answerBox);
 
@@ -757,11 +919,12 @@
   };
 
   function qaNode(path, id) {
-    return $$(".qa").find(
-      (node) =>
-        node.dataset.qaId === id &&
-        (!path || node.dataset.qaPath === path)
-    ) || null;
+    return (
+      $$(".qa").find(
+        (node) =>
+          node.dataset.qaId === id && (!path || node.dataset.qaPath === path),
+      ) || null
+    );
   }
 
   function renderQaTools(node, tools) {
@@ -773,7 +936,7 @@
         el("span", {
           class: `qa-tool ${tool.done ? "done" : "busy"}`,
           text: `${tool.name || "?"} ${tool.detail || ""}`.trim(),
-        })
+        }),
       );
     }
   }
@@ -802,8 +965,9 @@
         el("div", { class: "qa-role", text: "Agent 回答" }),
         el("div", {
           class: "qa-text markdown",
-          html: payload.answer_html || escapeHtml(payload.answer || "（无内容）"),
-        })
+          html:
+            payload.answer_html || escapeHtml(payload.answer || "（无内容）"),
+        }),
       );
       typeset(answerBox);
     }
@@ -824,7 +988,9 @@
       const phase = node.querySelector(".qa-live-phase");
       if (phase && payload.phase) {
         const text = _QA_PHASES[payload.phase] || payload.phase;
-        phase.textContent = payload.elapsed ? `${text}, ${payload.elapsed}s` : text;
+        phase.textContent = payload.elapsed
+          ? `${text}, ${payload.elapsed}s`
+          : text;
       }
       if (Array.isArray(payload.tools)) renderQaTools(node, payload.tools);
       if (payload.reasoning_delta) {
@@ -857,11 +1023,15 @@
     if (!root) return;
     for (const video of $$("video", root)) {
       if (video._hls) {
-        try { video._hls.destroy(); } catch (_) {}
+        try {
+          video._hls.destroy();
+        } catch (_) {}
         video._hls = null;
       }
       if (video._mpegts) {
-        try { video._mpegts.destroy(); } catch (_) {}
+        try {
+          video._mpegts.destroy();
+        } catch (_) {}
         video._mpegts = null;
       }
     }
@@ -870,56 +1040,89 @@
   function renderBlock(block) {
     if (!block || typeof block !== "object") return null;
     const type = block.type || "text";
-    if (type === "html") return el("div", { class: "block", html: block.html || "" });
+    if (type === "html")
+      return el("div", { class: "block", html: block.html || "" });
     if (type === "markdown") {
-      return el("div", { class: "block markdown", html: block.html || escapeHtml(block.text || "") });
+      return el("div", {
+        class: "block markdown",
+        html: block.html || escapeHtml(block.text || ""),
+      });
     }
-    if (type === "text") return el("pre", { class: "block pre", text: block.text ?? "" });
+    if (type === "text")
+      return el("pre", { class: "block pre", text: block.text ?? "" });
     if (type === "keyvalue") {
-      const items = Array.isArray(block.items) ? block.items : Object.entries(block.items || {});
+      const items = Array.isArray(block.items)
+        ? block.items
+        : Object.entries(block.items || {});
       const grid = el("div", { class: "kv-grid" });
       for (const [k, v] of items) {
         grid.appendChild(el("div", { class: "k", text: k }));
-        grid.appendChild(el("div", { text: typeof v === "object" ? JSON.stringify(v) : String(v ?? "") }));
+        grid.appendChild(
+          el("div", {
+            text: typeof v === "object" ? JSON.stringify(v) : String(v ?? ""),
+          }),
+        );
       }
       return el("div", { class: "block" }, [grid]);
     }
-    if (type === "table") return el("div", { class: "block" }, [renderTable(block)]);
-    if (type === "cards") return el("div", { class: "block" }, [renderCards(block)]);
+    if (type === "table")
+      return el("div", { class: "block" }, [renderTable(block)]);
+    if (type === "cards")
+      return el("div", { class: "block" }, [renderCards(block)]);
     if (type === "rows") return renderRows(block);
-    if (type === "tree") return el("div", { class: "block" }, [renderTree(block)]);
+    if (type === "tree")
+      return el("div", { class: "block" }, [renderTree(block)]);
     if (type === "list") {
       const list = el("div", { class: "block btn-row" });
       for (const item of block.items || []) {
-        if (typeof item === "string") list.appendChild(el("div", { text: item }));
-        else if (item.action) list.appendChild(actionButton(item.text || item.label || "执行", item.action, item.value, item.class || "btn btn-sm"));
-        else list.appendChild(el("div", { text: item.text || JSON.stringify(item) }));
+        if (typeof item === "string")
+          list.appendChild(el("div", { text: item }));
+        else if (item.action)
+          list.appendChild(
+            actionButton(
+              item.text || item.label || "执行",
+              item.action,
+              item.value,
+              item.class || "btn btn-sm",
+            ),
+          );
+        else
+          list.appendChild(
+            el("div", { text: item.text || JSON.stringify(item) }),
+          );
       }
       return list;
     }
     if (type === "buttons") {
       const row = el("div", { class: "block btn-row" });
       for (const b of block.buttons || []) {
-        row.appendChild(actionButton(
-          b.label || "执行",
-          b.action,
-          b.value,
-          b.class || (b.primary ? "btn btn-primary" : "btn"),
-          Boolean(b.disabled)
-        ));
+        row.appendChild(
+          actionButton(
+            b.label || "执行",
+            b.action,
+            b.value,
+            b.class || (b.primary ? "btn btn-primary" : "btn"),
+            Boolean(b.disabled),
+          ),
+        );
       }
       return row;
     }
-    if (type === "form") return el("div", { class: "block" }, [renderForm(block)]);
-    if (type === "log") return el("div", { class: "block" }, [renderLog(block)]);
+    if (type === "form")
+      return el("div", { class: "block" }, [renderForm(block)]);
+    if (type === "log")
+      return el("div", { class: "block" }, [renderLog(block)]);
     if (type === "image") {
-      return el("div", { class: "block" }, [el("img", { class: "image", src: block.src, alt: block.alt || "" })]);
+      return el("div", { class: "block" }, [
+        el("img", { class: "image", src: block.src, alt: block.alt || "" }),
+      ]);
     }
     if (type === "video") {
       const video = el("video", { controls: "controls", src: block.src });
       return el("div", { class: "block" }, [video]);
     }
-    if (type === "tabs") return el("div", { class: "block" }, [renderTabs(block)]);
+    if (type === "tabs")
+      return el("div", { class: "block" }, [renderTabs(block)]);
     if (type === "player") return renderPlayer(block);
     if (type === "switch") return renderSwitch(block);
     if (type === "qa") return renderQA(block);
@@ -931,11 +1134,20 @@
           el("span", { text: block.label || "进度" }),
           el("span", { text: `${Math.round(pct)}%` }),
         ]),
-        el("div", { class: "progress" }, [el("i", { style: `width:${Math.max(0, Math.min(100, pct))}%` })]),
+        el("div", { class: "progress" }, [
+          el("i", { style: `width:${Math.max(0, Math.min(100, pct))}%` }),
+        ]),
       ]);
     }
-    if (type === "badge") return el("span", { class: `badge ${block.class || ""}`, text: block.text || "" });
-    return el("pre", { class: "block pre", text: JSON.stringify(block, null, 2) });
+    if (type === "badge")
+      return el("span", {
+        class: `badge ${block.class || ""}`,
+        text: block.text || "",
+      });
+    return el("pre", {
+      class: "block pre",
+      text: JSON.stringify(block, null, 2),
+    });
   }
 
   // ------------------------------------------------------------------
@@ -989,7 +1201,11 @@
     }
     for (const [name, items] of groups) {
       const wrap = el("div", { class: "menu-wrap" });
-      const btn = el("button", { class: "menu-btn", type: "button", text: name });
+      const btn = el("button", {
+        class: "menu-btn",
+        type: "button",
+        text: name,
+      });
       btn.addEventListener("click", (event) => {
         event.stopPropagation();
         const wasOpen = wrap.classList.contains("open");
@@ -1000,8 +1216,12 @@
         const drop = el("div", { class: "menu-drop" });
         for (const cmd of items) {
           const item = el("button", { class: "menu-item", type: "button" }, [
-            el("span", { text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}` }),
-            cmd.subtitle ? el("span", { class: "sub", text: cmd.subtitle }) : null,
+            el("span", {
+              text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}`,
+            }),
+            cmd.subtitle
+              ? el("span", { class: "sub", text: cmd.subtitle })
+              : null,
           ]);
           item.addEventListener("click", (event) => {
             event.stopPropagation();
@@ -1017,11 +1237,14 @@
   }
 
   function paletteMatches(query) {
-    const q = String(query || "").trim().toLowerCase();
+    const q = String(query || "")
+      .trim()
+      .toLowerCase();
     const items = commands();
     if (!q) return items;
     return items.filter((cmd) => {
-      const hay = `${cmd.title} ${cmd.subtitle || ""} ${cmd.category || ""} ${cmd.keywords || ""}`.toLowerCase();
+      const hay =
+        `${cmd.title} ${cmd.subtitle || ""} ${cmd.category || ""} ${cmd.keywords || ""}`.toLowerCase();
       return q.split(/\s+/).every((part) => hay.includes(part));
     });
   }
@@ -1034,22 +1257,34 @@
     state.paletteItems = items;
     if (state.paletteIndex >= items.length) state.paletteIndex = 0;
     if (!items.length) {
-      list.appendChild(el("div", { class: "palette-empty", text: "没有匹配的命令" }));
+      list.appendChild(
+        el("div", { class: "palette-empty", text: "没有匹配的命令" }),
+      );
       return;
     }
     items.forEach((cmd, index) => {
-      const row = el("button", {
-        class: `palette-item ${index === state.paletteIndex ? "active" : ""}`,
-        type: "button",
-      }, [
-        cmd.category ? el("span", { class: "cat", text: cmd.category }) : null,
-        el("span", { text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}` }),
-        cmd.subtitle ? el("span", { class: "sub", text: cmd.subtitle }) : null,
-      ]);
+      const row = el(
+        "button",
+        {
+          class: `palette-item ${index === state.paletteIndex ? "active" : ""}`,
+          type: "button",
+        },
+        [
+          cmd.category
+            ? el("span", { class: "cat", text: cmd.category })
+            : null,
+          el("span", { text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}` }),
+          cmd.subtitle
+            ? el("span", { class: "sub", text: cmd.subtitle })
+            : null,
+        ],
+      );
       row.addEventListener("click", () => runCommand(cmd));
       row.addEventListener("mouseenter", () => {
         state.paletteIndex = index;
-        $$(".palette-item", list).forEach((node, i) => node.classList.toggle("active", i === index));
+        $$(".palette-item", list).forEach((node, i) =>
+          node.classList.toggle("active", i === index),
+        );
       });
       list.appendChild(row);
     });
@@ -1139,12 +1374,19 @@
 
   function sidebarWidth(side) {
     const fallback = side === "left" ? 280 : 320;
-    const stored = Number(localStorage.getItem(`lecture-agent.sidebar.${side}.w`));
-    return Number.isFinite(stored) && stored > 0 ? clampWidth(stored) : fallback;
+    const stored = Number(
+      localStorage.getItem(`lecture-agent.sidebar.${side}.w`),
+    );
+    return Number.isFinite(stored) && stored > 0
+      ? clampWidth(stored)
+      : fallback;
   }
 
   function clampWidth(value) {
-    const hardMax = Math.min(SIDEBAR_MAX, Math.max(280, window.innerWidth * 0.45));
+    const hardMax = Math.min(
+      SIDEBAR_MAX,
+      Math.max(280, window.innerWidth * 0.45),
+    );
     return Math.round(Math.min(hardMax, Math.max(SIDEBAR_MIN, value)));
   }
 
@@ -1157,7 +1399,7 @@
       app.classList.toggle(`${side}-collapsed`, collapsed);
       app.style.setProperty(
         `--${side}-col`,
-        collapsed ? "0px" : `${sidebarWidth(side)}px`
+        collapsed ? "0px" : `${sidebarWidth(side)}px`,
       );
     }
   }
@@ -1168,11 +1410,11 @@
     app.classList.toggle(`${side}-collapsed`, collapsed);
     app.style.setProperty(
       `--${side}-col`,
-      collapsed ? "0px" : `${sidebarWidth(side)}px`
+      collapsed ? "0px" : `${sidebarWidth(side)}px`,
     );
     localStorage.setItem(
       `lecture-agent.sidebar.${side}`,
-      collapsed ? "collapsed" : "open"
+      collapsed ? "collapsed" : "open",
     );
   }
 
@@ -1212,12 +1454,12 @@
           handle.removeEventListener("pointerup", stop);
           handle.removeEventListener("pointercancel", stop);
           const value = parseFloat(
-            getComputedStyle(app).getPropertyValue(`--${side}-col`)
+            getComputedStyle(app).getPropertyValue(`--${side}-col`),
           );
           if (Number.isFinite(value) && value > 0) {
             localStorage.setItem(
               `lecture-agent.sidebar.${side}.w`,
-              String(Math.round(value))
+              String(Math.round(value)),
             );
           }
         };
@@ -1231,7 +1473,7 @@
         if (!$("#app").classList.contains(`${side}-collapsed`)) {
           $("#app").style.setProperty(
             `--${side}-col`,
-            `${sidebarWidth(side)}px`
+            `${sidebarWidth(side)}px`,
           );
         }
       });
@@ -1280,7 +1522,8 @@
     const page = $("#page-content");
     if (!menu || !page) return;
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return hideSelectionMenu();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0)
+      return hideSelectionMenu();
     const text = String(sel).trim();
     if (text.length < 2) return hideSelectionMenu();
     const node = sel.anchorNode;
@@ -1317,10 +1560,11 @@
     const height = menu.offsetHeight;
     const left = Math.min(
       window.innerWidth - width - 10,
-      Math.max(10, rect.left + rect.width / 2 - width / 2)
+      Math.max(10, rect.left + rect.width / 2 - width / 2),
     );
     let top = rect.top - height - 8;
-    if (top < 8) top = Math.min(window.innerHeight - height - 10, rect.bottom + 8);
+    if (top < 8)
+      top = Math.min(window.innerHeight - height - 10, rect.bottom + 8);
     menu.style.left = `${Math.round(left)}px`;
     menu.style.top = `${Math.round(top)}px`;
   }
@@ -1340,11 +1584,17 @@
       const options =
         Array.isArray(item.intensities) && item.intensities.length
           ? item.intensities
-          : [{ value: "instant", label: "快速" }, { value: "research", label: "研究" }];
+          : [
+              { value: "instant", label: "快速" },
+              { value: "research", label: "研究" },
+            ];
       for (const option of options) {
         const value = typeof option === "object" ? option.value : option;
-        const label = typeof option === "object" ? (option.label ?? option.value) : option;
-        levels.appendChild(el("option", { value: String(value), text: String(label) }));
+        const label =
+          typeof option === "object" ? (option.label ?? option.value) : option;
+        levels.appendChild(
+          el("option", { value: String(value), text: String(label) }),
+        );
       }
     }
     const input = $("#ask-input");
@@ -1454,7 +1704,7 @@
         context.recent
           ? el("span", { class: "context-tag", text: "最近一节" })
           : null,
-      ])
+      ]),
     );
   }
 
@@ -1463,7 +1713,10 @@
     const tabsEl = $(`#${side}-tabs`);
     const toolboxEl = $(`#${side}-toolbox`);
     if (side === "right") renderSidebarContext();
-    const contextKnown = Object.prototype.hasOwnProperty.call(state.ui, "context");
+    const contextKnown = Object.prototype.hasOwnProperty.call(
+      state.ui,
+      "context",
+    );
     const context = side === "right" ? state.ui.context : null;
     if (side === "right" && contextKnown && !context) {
       // Nothing is selected and there is no class history: the right panel has
@@ -1475,7 +1728,7 @@
         el("div", { class: "sidebar-empty" }, [
           el("b", { text: "还没有选择课程" }),
           el("span", { text: "从左侧课程树展开课程，点一节课开始。" }),
-        ])
+        ]),
       );
       return;
     }
@@ -1486,13 +1739,17 @@
     state.activeTab[side] = active;
     if (active) localStorage.setItem(`lecture-agent.tab.${side}`, active);
     for (const tab of tabs || []) {
-      const btn = el("button", {
-        class: `side-tab ${tab.id === active ? "active" : ""}`,
-        type: "button",
-      }, [
-        tab.icon ? el("span", { class: "icon", text: tab.icon }) : null,
-        el("span", { text: tab.title || tab.id }),
-      ]);
+      const btn = el(
+        "button",
+        {
+          class: `side-tab ${tab.id === active ? "active" : ""}`,
+          type: "button",
+        },
+        [
+          tab.icon ? el("span", { class: "icon", text: tab.icon }) : null,
+          el("span", { text: tab.title || tab.id }),
+        ],
+      );
       btn.addEventListener("click", () => {
         state.activeTab[side] = tab.id;
         localStorage.setItem(`lecture-agent.tab.${side}`, tab.id);
@@ -1508,19 +1765,30 @@
     toolboxEl.replaceChildren();
     const current = (tabs || []).find((t) => t.id === active);
     if (!current || !(current.toolbox || []).length) {
-      toolboxEl.appendChild(el("div", { class: "empty", text: "这个 tab 还没有工具" }));
+      toolboxEl.appendChild(
+        el("div", { class: "empty", text: "这个 tab 还没有工具" }),
+      );
       return;
     }
     for (const item of current.toolbox) {
-      const panel = el("section", { class: `toolbox-item ${item.title || item.description ? "" : "bare"}` });
+      const panel = el("section", {
+        class: `toolbox-item ${item.title || item.description ? "" : "bare"}`,
+      });
       const pageId = item.page || null;
       if (item.title || item.description) {
         const head = el("div", { class: "toolbox-head" }, [
           el("div", { class: "toolbox-title", text: item.title || item.id }),
-          item.description ? el("div", { class: "toolbox-desc", text: item.description }) : null,
+          item.description
+            ? el("div", { class: "toolbox-desc", text: item.description })
+            : null,
         ]);
         if (pageId) {
-          const open = actionButton("打开页面", "ui.open_page", { page_id: pageId }, "btn btn-sm btn-ghost");
+          const open = actionButton(
+            "打开页面",
+            "ui.open_page",
+            { page_id: pageId },
+            "btn btn-sm btn-ghost",
+          );
           open.style.float = "right";
           head.appendChild(open);
         }
@@ -1530,7 +1798,12 @@
       if (item.blocks && item.blocks.length) {
         body.appendChild(renderBlocks(item.blocks));
       } else {
-        body.appendChild(el("div", { class: "empty", text: pageId ? "在页面中查看" : "暂无内容" }));
+        body.appendChild(
+          el("div", {
+            class: "empty",
+            text: pageId ? "在页面中查看" : "暂无内容",
+          }),
+        );
       }
       panel.appendChild(body);
       toolboxEl.appendChild(panel);
@@ -1542,13 +1815,20 @@
     bar.replaceChildren();
     const openIds = state.ui.open_pages || [];
     const pages = (state.ui.pages || []).filter(
-      (p) => openIds.includes(p.id) || p.id === state.ui.active_page
+      (p) => openIds.includes(p.id) || p.id === state.ui.active_page,
     );
     for (const page of pages) {
       const active = page.id === state.ui.active_page;
       const tab = el("div", { class: `page-tab ${active ? "active" : ""}` }, [
         el("span", { text: page.title || page.id }),
-        page.closable ? el("button", { class: "close", type: "button", text: "×", title: "关闭" }) : null,
+        page.closable
+          ? el("button", {
+              class: "close",
+              type: "button",
+              text: "×",
+              title: "关闭",
+            })
+          : null,
       ]);
       tab.addEventListener("click", async (event) => {
         if (event.target.classList.contains("close")) return;
@@ -1605,11 +1885,15 @@
     container.dataset.pageId = active;
     state.pageKey = key;
     if (!active || !blocks) {
-      container.appendChild(el("div", { class: "welcome" }, [
-        el("div", { class: "welcome-mark", text: "∮" }),
-        el("h2", { text: "选择一节课" }),
-        el("p", { text: "左侧课程树里展开课程，选择录播或直播。按 Ctrl+P 打开命令面板。" }),
-      ]));
+      container.appendChild(
+        el("div", { class: "welcome" }, [
+          el("div", { class: "welcome-mark", text: "∮" }),
+          el("h2", { text: "选择一节课" }),
+          el("p", {
+            text: "左侧课程树里展开课程，选择录播或直播。按 Ctrl+P 打开命令面板。",
+          }),
+        ]),
+      );
       container.scrollTop = 0;
       return true;
     }
@@ -1618,7 +1902,9 @@
     if (samePage && qaBefore.size) {
       let adjust = 0;
       for (const node of $$(".qa", container)) {
-        const prev = qaBefore.get(`${node.dataset.qaPath}\u0000${node.dataset.qaId}`);
+        const prev = qaBefore.get(
+          `${node.dataset.qaPath}\u0000${node.dataset.qaId}`,
+        );
         if (prev && prev.above) adjust += node.offsetHeight - prev.height;
       }
       if (adjust) container.scrollTop += adjust;
@@ -1634,26 +1920,45 @@
     const bar = $("#statusbar");
     bar.replaceChildren();
 
-    const item = (label, value, cls = "") => el("span", { class: "status-item" }, [
-      cls ? el("span", { class: `dot ${cls}` }) : null,
-      el("span", { text: label }),
-      el("b", { text: String(value) }),
-    ]);
+    const item = (label, value, cls = "") =>
+      el("span", { class: "status-item" }, [
+        cls ? el("span", { class: `dot ${cls}` }) : null,
+        el("span", { text: label }),
+        el("b", { text: String(value) }),
+      ]);
 
     bar.appendChild(item("会话", shortId(session.session_id)));
     bar.appendChild(item("音频", fmtSeconds(session.audio_seconds)));
     bar.appendChild(item("视频", fmtSeconds(session.video_seconds)));
-    bar.appendChild(item("转写", `${session.transcript_chars ?? 0} 字 / ${session.transcript_items ?? 0} 段`));
-    bar.appendChild(item("板书", `${session.visual_chars ?? 0} 字 / ${session.visual_items ?? 0} 段`));
-    bar.appendChild(item("插件", (runtime.plugins_loaded || runtime.plugin_order || []).length || 0, runtime.started ? "ok" : ""));
-    bar.appendChild(item("LLM", llm.provider || (llm.registered ? "已注册" : "未配置"), llm.registered ? "ok" : ""));
+    bar.appendChild(
+      item(
+        "转写",
+        `${session.transcript_chars ?? 0} 字 / ${session.transcript_items ?? 0} 段`,
+      ),
+    );
+    bar.appendChild(
+      item(
+        "板书",
+        `${session.visual_chars ?? 0} 字 / ${session.visual_items ?? 0} 段`,
+      ),
+    );
+    bar.appendChild(
+      item(
+        "插件",
+        (runtime.plugins_loaded || runtime.plugin_order || []).length || 0,
+        runtime.started ? "ok" : "",
+      ),
+    );
+    bar.appendChild(
+      item(
+        "LLM",
+        llm.provider || (llm.registered ? "已注册" : "未配置"),
+        llm.registered ? "ok" : "",
+      ),
+    );
     for (const task of state.ui.tasks || []) {
       bar.appendChild(
-        item(
-          task.label || "任务",
-          task.detail || "运行中",
-          "busy"
-        )
+        item(task.label || "任务", task.detail || "运行中", "busy"),
       );
     }
 
@@ -1669,7 +1974,9 @@
 
   async function openPage(pageId) {
     try {
-      await api(`/api/ui/pages/${encodeURIComponent(pageId)}/open`, { method: "POST" });
+      await api(`/api/ui/pages/${encodeURIComponent(pageId)}/open`, {
+        method: "POST",
+      });
       await loadState({ quiet: true });
     } catch (err) {
       toast(`打开页面失败：${err.message}`, "err");
@@ -1678,7 +1985,9 @@
 
   async function closePage(pageId) {
     try {
-      await api(`/api/ui/pages/${encodeURIComponent(pageId)}/close`, { method: "POST" });
+      await api(`/api/ui/pages/${encodeURIComponent(pageId)}/close`, {
+        method: "POST",
+      });
       await loadState({ quiet: true });
     } catch (err) {
       toast(`关闭页面失败：${err.message}`, "err");
@@ -1691,16 +2000,25 @@
   function formValues(form) {
     const values = {};
     for (const field of Array.from(form.elements)) {
-      if (!field.name || field.type === "submit" || field.type === "button") continue;
+      if (!field.name || field.type === "submit" || field.type === "button")
+        continue;
       if (field.type === "checkbox") {
         values[field.name] = field.checked;
       } else if (field.dataset.fieldType === "json") {
-        try { values[field.name] = JSON.parse(field.value); }
-        catch (_) { values[field.name] = field.value; }
-      } else if (field.dataset.fieldType === "int" || field.dataset.fieldType === "number") {
-        values[field.name] = field.value === "" ? null : Number.parseInt(field.value, 10);
+        try {
+          values[field.name] = JSON.parse(field.value);
+        } catch (_) {
+          values[field.name] = field.value;
+        }
+      } else if (
+        field.dataset.fieldType === "int" ||
+        field.dataset.fieldType === "number"
+      ) {
+        values[field.name] =
+          field.value === "" ? null : Number.parseInt(field.value, 10);
       } else if (field.dataset.fieldType === "float") {
-        values[field.name] = field.value === "" ? null : Number.parseFloat(field.value);
+        values[field.name] =
+          field.value === "" ? null : Number.parseFloat(field.value);
       } else {
         values[field.name] = field.value;
       }
@@ -1741,11 +2059,20 @@
       values[key] = value;
     }
     if (btn.dataset.value) {
-      try { values = { ...values, ...JSON.parse(btn.dataset.value) }; } catch (_) { /* keep dataset */ }
+      try {
+        values = { ...values, ...JSON.parse(btn.dataset.value) };
+      } catch (_) {
+        /* keep dataset */
+      }
     }
     const form = btn.closest("form");
     if (form) values = { ...formValues(form), ...values };
-    postAction(action, values, btn.dataset.pageId || null, btn.dataset.itemId || null);
+    postAction(
+      action,
+      values,
+      btn.dataset.pageId || null,
+      btn.dataset.itemId || null,
+    );
   });
 
   document.addEventListener("submit", (event) => {
@@ -1781,7 +2108,9 @@
         else if (data.type === "notify" && data.topic === "qa.live") {
           applyQaLive(data.payload || {});
         }
-      } catch (_) { /* ignore */ }
+      } catch (_) {
+        /* ignore */
+      }
     });
     ws.addEventListener("close", () => {
       setConnection(false);
@@ -1790,7 +2119,9 @@
       setTimeout(connectWs, delay);
     });
     ws.addEventListener("error", () => {
-      try { ws.close(); } catch (_) {}
+      try {
+        ws.close();
+      } catch (_) {}
     });
   }
 

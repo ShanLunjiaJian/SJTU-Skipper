@@ -92,7 +92,10 @@ _APPEND_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "file": {"type": "string", "description": "要追加的文件名（逻辑名）"},
-        "text": {"type": "string", "description": "要追加的文本内容（会自动在末尾添加换行符）"},
+        "text": {
+            "type": "string",
+            "description": "要追加的文本内容（会自动在末尾添加换行符）",
+        },
     },
     "required": ["file", "text"],
     "additionalProperties": False,
@@ -214,9 +217,7 @@ def search_tool(ctx: ToolContext, *, max_hits: int = 200) -> ToolSpec:
         hits = 0
         for name in names:
             found: list[str] = []
-            for number, line in enumerate(
-                ctx.workspace.text(name).splitlines(), 1
-            ):
+            for number, line in enumerate(ctx.workspace.text(name).splitlines(), 1):
                 lowered = line.lower()
                 if any(term.lower() in lowered for term in terms):
                     text = line.strip()

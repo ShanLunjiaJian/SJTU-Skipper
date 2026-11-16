@@ -103,7 +103,10 @@ def test_build_tree_course_and_class_nodes() -> None:
 
 
 def test_build_tree_live_session_is_marked() -> None:
-    recordings = {"1": [_rec("a", "2026-11-04 08:00:00", "2026-11-04 09:35:00")], "2": []}
+    recordings = {
+        "1": [_rec("a", "2026-11-04 08:00:00", "2026-11-04 09:35:00")],
+        "2": [],
+    }
     lives = [
         {
             "id": "L1",
@@ -162,7 +165,10 @@ def test_build_tree_unmatched_live_goes_to_other_node() -> None:
 
 
 def test_build_tree_current_class_is_active_and_expanded() -> None:
-    recordings = {"1": [_rec("a", "2026-11-05 08:00:00", "2026-11-05 09:35:00")], "2": []}
+    recordings = {
+        "1": [_rec("a", "2026-11-05 08:00:00", "2026-11-05 09:35:00")],
+        "2": [],
+    }
     nodes = build_tree(
         COURSES,
         recordings,
@@ -241,9 +247,7 @@ def test_a_recorded_part_does_not_hide_the_remaining_live_part() -> None:
         _live("L9", "2026-11-05 15:55:00", "2026-11-05 16:50:00"),
         _live("L10", "2026-11-05 16:50:20", "2026-11-05 17:45:00"),
     ]
-    nodes = build_tree(
-        COURSES, recordings, lives, now=datetime(2026, 11, 5, 17, 0)
-    )
+    nodes = build_tree(COURSES, recordings, lives, now=datetime(2026, 11, 5, 17, 0))
     children = nodes[0]["children"]
     live_children = [c for c in children if c["action"]["value"]["kind"] == "live"]
     assert len(live_children) == 1
@@ -263,6 +267,5 @@ def test_recording_overlap_preserves_both_parts() -> None:
     value = nodes[0]["children"][0]["action"]["value"]
     assert value["videos"] == ["a", "b"]
     assert value["recording_parts"] == [
-        {key: part[key] for key in ("video_id", "begin", "end")}
-        for part in recordings
+        {key: part[key] for key in ("video_id", "begin", "end")} for part in recordings
     ]

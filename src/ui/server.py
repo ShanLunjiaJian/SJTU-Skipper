@@ -268,7 +268,9 @@ def create_app(runtime: Runtime) -> FastAPI:
         """
 
         url = _allowed_media_url(src)
-        client: httpx.AsyncClient | None = getattr(request.app.state, "media_client", None)
+        client: httpx.AsyncClient | None = getattr(
+            request.app.state, "media_client", None
+        )
         if client is None:
             raise HTTPException(status_code=503, detail="media relay unavailable")
 
@@ -296,7 +298,9 @@ def create_app(runtime: Runtime) -> FastAPI:
         }
         if request.method == "HEAD":
             await upstream.aclose()
-            return StreamingResponse(iter(()), status_code=upstream.status_code, headers=passthrough)
+            return StreamingResponse(
+                iter(()), status_code=upstream.status_code, headers=passthrough
+            )
         return StreamingResponse(
             upstream.aiter_bytes(),
             status_code=upstream.status_code,

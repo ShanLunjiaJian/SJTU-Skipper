@@ -41,12 +41,8 @@ _BLOCK_RE = re.compile(
     r"<!--\s*qa:begin\s*(?P<meta>\{.*?\})\s*-->(?P<body>.*?)<!--\s*qa:end\s*-->",
     re.S,
 )
-_QUESTION_HEAD_RE = re.compile(
-    r"^[ \t]*\*\*[^\n]*提问[^\n]*\*\*[ \t]*(?:\n|$)", re.M
-)
-_ANSWER_SEP_RE = re.compile(
-    r"^[ \t]*\*\*[^\n]*回答[^\n]*\*\*[ \t]*(?:\n|$)", re.M
-)
+_QUESTION_HEAD_RE = re.compile(r"^[ \t]*\*\*[^\n]*提问[^\n]*\*\*[ \t]*(?:\n|$)", re.M)
+_ANSWER_SEP_RE = re.compile(r"^[ \t]*\*\*[^\n]*回答[^\n]*\*\*[ \t]*(?:\n|$)", re.M)
 _MULTI_BLANK_RE = re.compile(r"\n{3,}")
 _LEADING_BLOCK_RE = re.compile(
     r"[ \t]*<!--\s*qa:begin\s*\{.*?\}\s*-->.*?<!--\s*qa:end\s*-->", re.S
@@ -235,9 +231,7 @@ def find_anchor(text: str, selection: str) -> int | None:
     return None
 
 
-def insert_block(
-    text: str, block: str, selection: str = ""
-) -> tuple[str, bool]:
+def insert_block(text: str, block: str, selection: str = "") -> tuple[str, bool]:
     """Insert *block* below the paragraph containing *selection*.
 
     Returns ``(new_text, anchored)``; ``anchored`` is False when the selection

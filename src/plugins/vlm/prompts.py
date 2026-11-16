@@ -120,9 +120,7 @@ def build_user_message(
     """
     if prompt_text is None:
         prompt_text = BOARD_RECOGNITION_PROMPT
-    text = build_recognition_prompt(
-        prompt_text, timestamp=timestamp, history=history
-    )
+    text = build_recognition_prompt(prompt_text, timestamp=timestamp, history=history)
     content: list[TextPart | ImagePart] = [TextPart(text=text)]
     if image_data_url:
         content.append(ImagePart(url=image_data_url))

@@ -422,10 +422,7 @@ def resolve_plugin_spec(
     head, _, attr = text.partition(":")
     candidate = Path(head).expanduser()
     looks_like_path = (
-        candidate.suffix == ".py"
-        or "/" in head
-        or "\\" in head
-        or candidate.is_file()
+        candidate.suffix == ".py" or "/" in head or "\\" in head or candidate.is_file()
     )
 
     if looks_like_path:
@@ -440,14 +437,18 @@ def resolve_plugin_spec(
             raise PluginError(f"{text!r} defines no Plugin subclass")
         if len(classes) > 1:
             names = ", ".join(cls.__name__ for cls in classes)
-            raise PluginError(f"{text!r} defines several Plugin classes ({names}); use 'file.py:Class'")
+            raise PluginError(
+                f"{text!r} defines several Plugin classes ({names}); use 'file.py:Class'"
+            )
         return _instantiate(classes[0], text), text
 
     module_name = head
     try:
         module = importlib.import_module(module_name)
     except ImportError as exc:
-        raise PluginError(f"cannot import plugin module {module_name!r}: {exc}") from exc
+        raise PluginError(
+            f"cannot import plugin module {module_name!r}: {exc}"
+        ) from exc
     if reload_module:
         module = importlib.reload(module)
     if attr:
@@ -573,9 +574,7 @@ class PluginManager:
             plugin = plugins[pid]
             for dep in plugin.requires:
                 if dep not in plugins:
-                    raise PluginError(
-                        f"plugin {pid!r} requires missing plugin {dep!r}"
-                    )
+                    raise PluginError(f"plugin {pid!r} requires missing plugin {dep!r}")
             for dep in self._predecessors(plugin, plugins):
                 visit(dep)
             stack.pop()
@@ -714,7 +713,9 @@ class PluginManager:
             _rollback()
             raise PluginError(f"plugin {pid!r} setup failed: {exc}") from exc
 
-        unregistered = [name for name in plugin.provides if self._services.get(name) is None]
+        unregistered = [
+            name for name in plugin.provides if self._services.get(name) is None
+        ]
         if unregistered:
             try:
                 plugin.teardown()
@@ -745,8 +746,7 @@ class PluginManager:
             dependents = [
                 pid
                 for pid in self._loaded
-                if pid != plugin_id
-                and plugin_id in self._plugins[pid].requires
+                if pid != plugin_id and plugin_id in self._plugins[pid].requires
             ]
             order = list(self._order)
         if dependents:
@@ -755,7 +755,9 @@ class PluginManager:
                     f"cannot unload plugin '{plugin_id}': required by {dependents}"
                 )
             # Reverse topological order: dependents before their dependency.
-            dependents.sort(key=lambda pid: order.index(pid) if pid in order else 0, reverse=True)
+            dependents.sort(
+                key=lambda pid: order.index(pid) if pid in order else 0, reverse=True
+            )
 
         removed: list[str] = []
         for pid in dependents:
@@ -801,7 +803,9 @@ class PluginManager:
             ]
             order = list(self._order)
         dependents.sort(key=lambda pid: order.index(pid) if pid in order else 0)
-        dependent_plugins = [self._plugins[pid] for pid in dependents if pid in self._plugins]
+        dependent_plugins = [
+            self._plugins[pid] for pid in dependents if pid in self._plugins
+        ]
 
         self.unload(plugin_id, cascade=True)
 

@@ -541,7 +541,11 @@ class TestAgentService:
                 content="",
                 tool_calls=[
                     FakeToolCall(id="c1", name="info", arguments={}),
-                    FakeToolCall(id="c2", name="read", arguments={"file": "notes.md", "l": 1, "r": 10}),
+                    FakeToolCall(
+                        id="c2",
+                        name="read",
+                        arguments={"file": "notes.md", "l": 1, "r": 10},
+                    ),
                 ],
             ),
             FakeResponse(content="All done, I have read the file."),
@@ -551,7 +555,9 @@ class TestAgentService:
         try:
             session = agent.create_session("test", files={"notes.md": f})
             events: list[AgentEvent] = []
-            result = agent.run(session.id, "read the file", on_event=lambda e: events.append(e))
+            result = agent.run(
+                session.id, "read the file", on_event=lambda e: events.append(e)
+            )
 
             assert result.error is None
             assert result.steps == 2
@@ -578,8 +584,20 @@ class TestAgentService:
                 tool_calls=[
                     FakeToolCall(id="c1", name="info", arguments={}),
                     FakeToolCall(id="c2", name="read", arguments={"file": "notes.md"}),
-                    FakeToolCall(id="c3", name="append", arguments={"file": "notes.md", "text": "new line"}),
-                    FakeToolCall(id="c4", name="replace", arguments={"file": "notes.md", "old_str": "old line", "new_str": "fixed line"}),
+                    FakeToolCall(
+                        id="c3",
+                        name="append",
+                        arguments={"file": "notes.md", "text": "new line"},
+                    ),
+                    FakeToolCall(
+                        id="c4",
+                        name="replace",
+                        arguments={
+                            "file": "notes.md",
+                            "old_str": "old line",
+                            "new_str": "fixed line",
+                        },
+                    ),
                 ],
             ),
             FakeResponse(content="File updated successfully."),
@@ -607,7 +625,11 @@ class TestAgentService:
             FakeResponse(
                 content="",
                 tool_calls=[
-                    FakeToolCall(id="c1", name="append", arguments={"file": "notes.md", "text": "新内容"}),
+                    FakeToolCall(
+                        id="c1",
+                        name="append",
+                        arguments={"file": "notes.md", "text": "新内容"},
+                    ),
                 ],
             ),
             FakeResponse(content="done"),
@@ -691,7 +713,11 @@ class TestAgentService:
             FakeResponse(
                 content="",
                 tool_calls=[
-                    FakeToolCall(id="c1", name="read", arguments={"file": "notes.md", "l": 1000, "r": 2000}),
+                    FakeToolCall(
+                        id="c1",
+                        name="read",
+                        arguments={"file": "notes.md", "l": 1000, "r": 2000},
+                    ),
                 ],
             ),
             FakeResponse(content="Recovered from error."),
@@ -897,7 +923,9 @@ class TestAgentService:
         runtime, agent, _, _ = _make_agent_runtime(tmp_path, fake_llm=fake_llm)
         try:
             root = agent.create_session("root", files={"notes.md": f})
-            child = agent.create_session("child", files={"notes.md": f}, parent_id=root.id)
+            child = agent.create_session(
+                "child", files={"notes.md": f}, parent_id=root.id
+            )
 
             agent.run(root.id, "msg")
             agent.run(child.id, "msg")
@@ -963,7 +991,11 @@ class TestAgentService:
             FakeResponse(
                 content="",
                 tool_calls=[
-                    FakeToolCall(id="c1", name="read", arguments={"file": "big.txt", "l": 1, "r": -1}),
+                    FakeToolCall(
+                        id="c1",
+                        name="read",
+                        arguments={"file": "big.txt", "l": 1, "r": -1},
+                    ),
                 ],
             ),
             FakeResponse(content="truncated, but done"),
@@ -1012,7 +1044,9 @@ class TestAgentUI:
     def test_action_new_session(self, tmp_path: Path):
         runtime, agent, llm, settings = _make_agent_runtime(tmp_path)
         try:
-            result = runtime.ui.dispatch_action("agent.new_session", {"name": "my-session"})
+            result = runtime.ui.dispatch_action(
+                "agent.new_session", {"name": "my-session"}
+            )
             assert result.ok
             assert "my-session" in result.message
             sessions = agent.list_sessions()
@@ -1088,7 +1122,9 @@ class TestAgentSettings:
         fsettings.values["agent.model"] = "gpt-5"
         fsettings.values["agent.max_steps"] = 8
         fsettings.values["agent.system_prompt"] = "custom default"
-        runtime, agent, llm, settings = _make_agent_runtime(tmp_path, fake_settings=fsettings)
+        runtime, agent, llm, settings = _make_agent_runtime(
+            tmp_path, fake_settings=fsettings
+        )
         try:
             session = agent.create_session("test")
             assert session.model == "gpt-5"
@@ -1096,6 +1132,7 @@ class TestAgentSettings:
             assert session.system_prompt == "custom default"
         finally:
             runtime.stop()
+
 
 # ===================================================================
 # Context trimming
@@ -1163,3 +1200,18 @@ def test_normalize_tool_calls_unwraps_nested_arguments() -> None:
     assert calls[1]["arguments"] == expected
     assert calls[2]["arguments"] == expected
     assert calls[3]["arguments"] == {}
+
+
+def test_readonly_workspace_copy(tmp_path):
+    source = tmp_path / "source.md"
+    source.write_text("original", encoding="utf-8")
+    workspace = FileWorkspace({"source.md": source}, readonly=("source.md",))
+    for candidate in (workspace, workspace.copy()):
+        for mutate in (
+            lambda: candidate.write("source.md", "changed"),
+            lambda: candidate.append_line("source.md", "changed"),
+            lambda: candidate.replace_unique("source.md", "original", "changed"),
+        ):
+            with pytest.raises(PermissionError, match="File is read-only: source.md"):
+                mutate()
+    assert source.read_text(encoding="utf-8") == "original"

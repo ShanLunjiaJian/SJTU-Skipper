@@ -8,8 +8,7 @@
 | `hls/` | hls.js | 1.5.20 | Apache-2.0 | 播放 `.m3u8` 录播/直播流（Safari 回退原生 HLS） |
 | `mpegts/` | mpegts.js | 1.7.3 | Apache-2.0 | 播放 `.flv` 直播流 |
 
-`hls/` 与 `mpegts/` 中的文件是上游 `dist/` 构建产物，未做修改；上游许可证全文见
-<https://github.com/video-dev/hls.js> 和 <https://github.com/xqq/mpegts.js>。
+`hls/` 与 `mpegts/` 中的文件是上游 `dist/` 构建产物，未做修改；上游许可证全文见 <https://github.com/video-dev/hls.js> 和 <https://github.com/xqq/mpegts.js>。
 
 新增或升级这些库时：
 

@@ -206,7 +206,7 @@ class EventBus:
 内置事件：
 
 | 事件 | 触发 |
-|---|---|
+| --- | --- |
 | `clock.tick` | 每秒一次，payload: `ts`, `tick`, `interval` |
 | `session.started` | 新会话 |
 | `session.stopped` | 会话结束 |
@@ -585,14 +585,14 @@ SettingsSpec(
 - 设置项：enabled（默认 true）、model、window_seconds（默认 20，窗口以采样点为中心，前后各 10 s）、cadence_live_seconds（直播采样间隔，默认 180）、cadence_recording_seconds（录播采样间隔，默认 300）、history_windows（默认 3）、fps、max_frames（默认 12）、fusion、dedupe_threshold、完整提示词 prompt。VLM 连接与 API Key 复用 LLM 分组。
 - 工作线程：读 `video`，窗口内取帧 -> 融合 -> VLM -> 追加 `visual`。
 - **采样节奏**：直播每 3 分钟取一个 20 秒窗口，录播每 5 分钟取一个 20 秒窗口；窗口之间的视频帧不再需要，工作线程会边等边 `trim`，避免把整堂课解码后的 MJPEG 留在内存里。
-- **顺序**：两种模式都串行处理（`vlm.concurrency` 保留但固定为 1），保证“最近几次转录”的顺序正确。
+- **顺序**：识别请求按窗口顺序执行，前一个窗口提交后再读取历史．`vlm.prepare_ahead=1` 在识别期间准备下一个窗口的图像；设为 0 则顺序准备．
 - 融合算法来自 `picture_parser`：
   1. 解码 JPEG -> 灰度（保持原始分辨率，不裁剪、不缩放）；
   2. FFT 相位相关配准（可选）；
   3. 30 分位背景 + 时序活动/方差 + 空间梯度 + 粉笔候选掩码；
   4. 时序持续性 + 单调边缘滤波；
   5. 候选帧鲁棒中位数融合。
-- 窗口默认 20 s / 4 fps、每窗最多 12 帧；整帧原始分辨率输出，不做裁剪或缩放。
+- 窗口默认 20 s / 4 fps、每个窗口最多 12 帧；整帧原始分辨率输出，不做裁剪或缩放。
 - **VLM 只做观察者**：prompt 要求只转录图中真实可见的内容，不推断、不补全、不纠正，看不清的字符写作 `□`；空黑板回复 `【黑板暂无板书】`。
 - **增量转录**：最近 `history_windows` 次转录以纯文本放进 prompt（不附加历史图片）；模型只输出相对最近一次**新增 / 修改 / 擦除**的内容，完全一致时回复 `【无变化】`，插件直接跳过不写入。这样 `visual` 里保存的是板书变更日志，而不是每 20 秒重录一遍整块黑板。
 - 去重：与上一条 visual 文本相似度高则跳过（`difflib.SequenceMatcher`，阈值默认 0.92）；输出后处理会折叠连续重复的公式块。
@@ -627,25 +627,17 @@ SettingsSpec(
 - 事件：`agent.run.started`、`agent.delta`、`agent.reasoning`、`agent.message`、`agent.tool_call`、`agent.tool_result`、`agent.run.finished`、`agent.error`。
 - UI：没有侧边栏 tab，只有 Agent page（`agent:chat`），从菜单栏 / 命令面板打开；page 显示会话列表、对话记录、输入框；action `agent.chat` 后台执行。
 
-### 7.7 summarize（非即时，整堂课）
+### 7.7 notes-pipeline 与 summarize
 
-- 依赖：`settings`、`llm-agent`。
-- 设置项：`max_tool_output`（默认 200000，单次 read 上限）、`max_history_chars`（默认 0 = 不裁剪）、`max_tokens`（默认 32000）、`model`、`notes_dir`、`system_prompt`（写作提示词）、`review_enabled`（默认 true）、`reviewer_prompt`、`review_model`（空 = 与写作相同）、`review_max_steps`（默认 0 = 不设上限）、`review_max_tokens`（默认 32000）、`review_max_rounds`（默认 0 = 不设上限）、`retry_max`、`on_stop`（`direct` 直接总结 / `fill` 先补全缺课部分再总结 / `skip` 不生成）、`fill_wait_minutes`（默认 20）、`fill_max_attempts`（默认 6）、`auto_on_stop`（旧开关，`on_stop` 的兼容入口）。
-- 每个会话创建三个笔记文件 + 一份只读材料：
-  - `note_knowledge.md`：课程知识；
-  - `note_gossip.md`：与课程知识无关的内容（世界局势、生活趣事、对学生的期待、AI 对数学的冲击等）；
-  - `note_notice.md`：作业、考试、考核等通知；
-  - `lecture_source.md`：整堂课的 transcript + visual，按时间合并（`[mm:ss] 讲授：…` / `[mm:ss–mm:ss] 板书：…`）。材料直接由 `transcript.jsonl` / `visual.jsonl` 重建（不是内存流），所以崩溃、提前结束、重复生成都不丢内容；板书是增量日志，prompt 里会提示按时间顺序重建板书状态。若本会话有 `instant_draft.md`（即时笔记合并稿），也会作为组织线索附上。
-- 触发：不在课堂中运行。`session.stopped`（`on_stop=direct`）或 UI action `summarize.full` 手动触发；`on_stop=fill` 时先让 input 把本课的录播（可能分多段）补跑一遍，只处理 STT/VLM 没覆盖的时间区间（`coverage.json`），等待期间每 `fill_wait_minutes` 重试一次、最多 `fill_max_attempts` 次，补录结束后自动开始总结。补录产生的独立会话带 `meta.fill_for` 指向原直播会话，讲义会把两边日志按 `media_begin` 对齐合并；超时则退化为直接总结，并在笔记页留下可见警告和「重新补全」按钮（`summarize.fill_again`）。
-- 执行（**写作 + 审阅两个独立 agent 上下文**）：
-  - **写作 agent**：把整堂课写成 `lecture_source.md`，三份笔记与材料一起放进工作区；先给一条任务提示，之后由模型自己 `info` → `read` 分段读材料 → `append`/`replace` 写笔记。会话 **不设步数上限**（`max_steps=0`）、不裁剪工具结果（`max_history_chars=0`）、`reasoning_effort=max`、`max_tokens=32000`。工具里**不提供 `write`**，只允许追加与局部替换。
-  - **审阅 agent**：独立会话、只读工具（`info`/`read`）、同一批文件。检查四件事：老师讲没讲（逐条对照 `lecture_source.md`）、数学正确性、结构完整度、公式与格式；最后输出 `REVIEW: PASS` 或 `REVIEW: FAIL`。
-  - **迭代**：审阅不通过就把问题清单原样发回写作 agent，写作 agent 只对问题处做 `replace`/`append`；审阅 agent 带着上一轮的意见继续审，直到 PASS。两个上下文全程不重置。
-  - **安全阀**：审阅返回 FAIL 但没有问题清单、写作 agent 收到意见后文件 md5 没变、审阅连续两轮给出完全相同的问题，三者任一触发即记日志停止，避免空转。
-  - 关闭审阅时退回旧行为：一次写作，若三份笔记均无变化则用 `RETRY_PROMPT` 重试一次。
-- 失败发 `summarize.error`；完成后发 `summarize.finished`。
-- UI：右侧「笔记」tab 的 toolbox「课堂讲义」；三个按钮（知识 / 闲话 / 通知）通过 reader 服务打开 `note_*.md`；「生成完整讲义」触发 `summarize.full`；运行中任务条会显示当前阶段（撰写 / 审阅 / 修改）。
-- **选中提问** 已迁移到独立的 `ask` 插件，见 7.8。
+- `notes-pipeline` 依赖 `settings`、`llm-agent`，可选依赖 `stt`、`vlm`．统一管理所有课程的片段、统稿、修改和审阅任务．
+- `notes.chunk_seconds` 设置核心区间长度，`notes.overlap_seconds` 设置左侧原文上下文，`notes.concurrency` 限制同时运行的笔记 agent 数量．
+- 来源通过 `stream.sealed` 报告完成位置．所有启用来源完成核心区间后，才能冻结材料并整理片段．按记录起点归属核心区间，跨边界记录完整保留．
+- 每个片段保存只读来源、上下文、板书历史及 3 份私有底稿．只有连续完成的片段可以发布未审阅预览．失败片段保留范围错误，完整原文仍交给整课写作者．
+- 来源终止后，整课写作者读取完整来源和成功底稿，统一结构、符号与跨段推导．随后来源覆盖和正确性审阅者并发只读审阅．任一失败则由同一写作者修改，再执行两项审阅．
+- 审阅全部通过才标记通过．关闭审阅时标记未审阅．生成失败保留已有公开讲义．来源缺口与审阅结果分别记录．
+- 公开文件为 `notes/note_knowledge.md`、`notes/note_gossip.md`、`notes/note_notice.md`，对应来源为会话目录的 `lecture_source.md`．发布锁保护整组文稿与来源快照．用户问答保留原始块内容和顺序．
+- `summarize` 依赖 `settings`、`notes-pipeline`、`reader`，负责讲义页面和课后策略．`direct` 登记整课请求，`fill` 查询录播并请求补录，`skip` 不自动生成整课讲义．手动请求会等待来源终止．
+- 保留写作、审阅模型及 token、步数、轮数配置．`review_max_rounds=0` 不设轮数上限，重复意见或无修改时结束并标记未通过．
 
 ### 7.8 ask（笔记内问答）
 
@@ -663,23 +655,13 @@ SettingsSpec(
 - **流式期间的滚动**：问答块在视口上方时，前端在每次内容增长后按高度差补偿 `scrollTop`，保证屏幕内其它内容不动；整页重渲染（轮询）时也按同样的高度差补偿。
 - 日志：每一步的耗时、工具调用参数、可见正文，以及**完整的思考（reasoning）文本**都会写入日志，不截断。
 
-### 7.9 instant-summarize（即时，增量）
+### 7.9 instant-summarize（分段笔记）
 
-- 依赖：`settings`、`llm-agent`。
-- 设置项：`enabled`（默认 true，见下方开关）、`trigger_chars`（默认 100000，实际由时间触发）、`trigger_audio_seconds`（默认 600 = 10 分钟）、`min_chars`（默认 80）、`max_steps`（默认 12）、`max_tool_output`（默认 24000）、`model`、`notes_dir`、`system_prompt`、`retry_max`。
-- **开关（直播模式）**：笔记面板里是一个 `switch`（`instant-summarize.enabled` / action `instant-summarize.toggle`）。**开**：照常累积并定期总结；**关**：水位直接推到当前时刻——不累积任何内容、不触发总结、会话结束也不 flush，重新打开从打开时刻开始累积。
-- 每个会话创建三个文件：`instant_note_knowledge.md`、`instant_note_gossip.md`、`instant_note_notice.md`（与 summarize 共用 `notes/` 目录，互不覆盖）。
-- 触发：
-  - 监听 `stream.appended`（transcript / visual / audio）；
-  - 默认每 10 分钟音频触发一次（`trigger_audio_seconds=600`）；文字增量达到 `trigger_chars` 也可触发，但默认值很大，几乎只按时间走；
-  - 串行执行；运行中到达的增量在下一轮处理。
-- 执行：
-  - 取上次水位之后的文字（语音 + 板书，不注入时间戳），构造中文提示；
-  - 创建子会话，工具为 `info/read/replace/append/write`；
-  - 要求把新内容**合并进既有大纲**：结构必须清晰，但以增量维护为主——已有章节用 `replace` 补充，新章节用 `append`，只有确需调整结构时才重排受影响章节，不整篇重写；
-  - 明确禁止压缩细节、禁止时间戳。
-- 成功后推进水位；失败保留水位，指数退避重试；连续失败发 `instant-summarize.error`。
-- UI：右侧「笔记」tab 的 toolbox「实时笔记」：一个「实时总结」开关 + 三个文档按钮（通过 reader 服务打开 `instant_note_*.md`）。没有「立即总结」按钮——总结只按时间/阈值自动触发。
+- 依赖 `settings`、`notes-pipeline`、`reader`，负责分段预览页面和开关．直播与录播均支持分段整理．
+- `instant-summarize.enabled=false` 关闭主动片段整理与预览发布，来源日志继续保存．整课请求仍使用完整来源．
+- 保留 `model`、`max_steps`、`max_tool_output`、`retry_max` 设置．每次重试使用独立私有输出，成功后才提交．
+- 公开文件为 `notes/instant_note_knowledge.md`、`notes/instant_note_gossip.md`、`notes/instant_note_notice.md`．页面标记未审阅并显示缺口．
+- reader 页面键为 `<sid>:instant-summarize`，课堂讲义页面键为 `<sid>:summarize`．两类页面可以同时打开．
 
 ### 7.10 reader（文稿阅读）
 
@@ -691,8 +673,6 @@ SettingsSpec(
 - **选中菜单**：用户选中页面正文后会浮出一个小菜单，项由 `reader.register_selection_action(page, item, owner=...)` 注册。`page` 可以是页面 id / page key（按 owner 过滤，只在对应插件提供的文档上出现），也可以是空串 / `"*"`（全局项，任何笔记页都出现）。`ask` 用全局注册提供「💬 提问」。item 形如 `{id,label,icon,kind:"prompt",action,placeholder,intensities}`；`kind="prompt"` 时前端先弹输入框（含强度选择）再连同选中文本一起 post 给插件 action。
 - **内联问答块（qa）**：问答对直接写进笔记文件，用一对 HTML 注释包住：`<!-- qa:begin {"id","ts","status","intensity","collapsed"} -->` … `<!-- qa:end -->`，中间是 `**❓ 提问（时间）**`、问题、`**🤖 回答**`、回答（都是 Markdown）。普通 Markdown 阅读器里问题和回答照常可见，只是标记隐藏；reader 把它从 Markdown 流里摘出来渲染成独立组件（两侧不同配色、可折叠、一键删除）。`collapsed` 就是折叠状态的持久化位置（`reader.qa_collapse` 负责改它，`refresh=false`，不触发重渲染）；删除由 `reader.qa_delete` 做确定性的文本切除。reader 还负责把浏览器选中的渲染文本定位回原始 Markdown 段落（精确 → 去空白/去标记 → 行前缀逐级回退），定位失败才附到文末并提示。
 - **流式问答**：问答进行中，`ask` 通过 `ui.notify("qa.live", ...)` 把正文/思考增量、工具调用和最终 HTML 推到浏览器；前端按 `data-qa-id` / `data-qa-path` 原地 patch 该块，不做整页刷新。页面轮询命中同一条消息时，key 里忽略 `collapsed`，折叠切换不会触发重渲染。
-
-
 
 ```text
 data/agent/

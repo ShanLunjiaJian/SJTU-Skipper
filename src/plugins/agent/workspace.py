@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import os
 import tempfile
-import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
+
+from core.file_access import path_lock
 
 
 class FileWorkspace:
@@ -30,11 +31,12 @@ class FileWorkspace:
         files: Mapping[str, str | Path] | None = None,
         *,
         cache_dir: str | Path | None = None,
+        readonly: Iterable[str] = (),
     ) -> None:
         self._files: dict[str, Path] = {}
         self._hidden: set[str] = set()
+        self._readonly: set[str] = set(readonly)
         self._cache_dir = Path(cache_dir) if cache_dir is not None else None
-        self._spill_seq = 0
         if files:
             for name, path in files.items():
                 self.register(name, path)
@@ -43,7 +45,12 @@ class FileWorkspace:
     # Registration
     # ------------------------------------------------------------------
     def register(
-        self, name: str, path: str | Path, *, hidden: bool = False
+        self,
+        name: str,
+        path: str | Path,
+        *,
+        hidden: bool = False,
+        readonly: bool = False,
     ) -> None:
         """Map *name* to *path*, validating the name first.
 
@@ -54,6 +61,8 @@ class FileWorkspace:
         self._validate_name(name)
         resolved = Path(path).resolve()
         self._files[name] = resolved
+        if readonly:
+            self._readonly.add(name)
         if hidden:
             self._hidden.add(name)
         else:
@@ -65,6 +74,8 @@ class FileWorkspace:
         if name not in self._files:
             raise KeyError(f"workspace file {name!r} not registered")
         path = self._files[name]
+        if name in self._readonly and not path.exists():
+            raise PermissionError(f"File is read-only: {name}")
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
             path.write_text("", encoding="utf-8")
@@ -86,8 +97,6 @@ class FileWorkspace:
     def spill(self, content: str, *, prefix: str = "tool-output") -> str:
         """Persist *content* as a hidden workspace file; return its name."""
 
-        self._spill_seq += 1
-        name = f"{prefix}-{int(time.time() * 1000)}-{self._spill_seq:03d}.md"
         directory = self._cache_dir
         if directory is None:
             if self._files:
@@ -95,7 +104,12 @@ class FileWorkspace:
             else:
                 directory = Path(tempfile.gettempdir()) / "agent-cache"
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / name
+        fd, temporary = tempfile.mkstemp(
+            dir=directory, prefix=f"{prefix}-", suffix=".md"
+        )
+        os.close(fd)
+        path = Path(temporary)
+        name = path.name
         self.register(name, path, hidden=True)
         self.write(name, content)
         return name
@@ -130,25 +144,28 @@ class FileWorkspace:
     # ------------------------------------------------------------------
     # Atomic write
     # ------------------------------------------------------------------
+    def _check_writable(self, name: str) -> None:
+        if name in self._readonly:
+            raise PermissionError(f"File is read-only: {name}")
+
     def write(self, name: str, content: str) -> None:
         """Atomically replace the file content (ensures parent dirs)."""
+        self._check_writable(name)
         path = self.ensure(name)
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
-        )
-        tmp_path = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_path, path)
-        except Exception:
+        with path_lock(path):
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+            )
+            tmp_path = Path(tmp_name)
             try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-            raise
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, path)
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
 
     # ------------------------------------------------------------------
     # Line-oriented I/O (1-based)
@@ -189,31 +206,33 @@ class FileWorkspace:
         appears zero times or more than once.  The error message includes
         the count and, for multiple matches, the line numbers.
         """
+        self._check_writable(name)
         path = self.ensure(name)
-        text = path.read_text(encoding="utf-8")
-        count = text.count(old)
-        if count == 0:
-            raise ValueError(f"未找到要替换的文本（出现 0 次）")
-        if count > 1:
-            line_nos = _find_line_numbers(text, old)
-            line_str = ", ".join(str(ln) for ln in line_nos)
-            raise ValueError(
-                f"替换文本出现 {count} 次（行 {line_str}），"
-                f"请提供更具体的上下文以确保唯一"
-            )
-        new_text = text.replace(old, new, 1)
-        self.write(name, new_text)
-        return "已替换 1 处"
+        with path_lock(path):
+            text = path.read_text(encoding="utf-8")
+            count = text.count(old)
+            if count == 0:
+                raise ValueError("未找到要替换的文本（出现 0 次）")
+            if count > 1:
+                line_nos = _find_line_numbers(text, old)
+                line_str = ", ".join(str(ln) for ln in line_nos)
+                raise ValueError(
+                    f"替换文本出现 {count} 次（行 {line_str}），请提供更具体的上下文以确保唯一"
+                )
+            self.write(name, text.replace(old, new, 1))
+            return "已替换 1 处"
 
     def append_line(self, name: str, text: str) -> str:
         """Append *text* as a new line at the end, ensuring a trailing newline."""
+        self._check_writable(name)
         path = self.ensure(name)
-        content = path.read_text(encoding="utf-8")
-        if content and not content.endswith("\n"):
-            content += "\n"
-        content += text + "\n"
-        self.write(name, content)
-        return f"已追加 1 行到 {name}"
+        with path_lock(path):
+            content = path.read_text(encoding="utf-8")
+            if content and not content.endswith("\n"):
+                content += "\n"
+            content += text + "\n"
+            self.write(name, content)
+            return f"已追加 1 行到 {name}"
 
     def text(self, name: str) -> str:
         """Return full file content, or ``""`` if missing."""
@@ -229,6 +248,7 @@ class FileWorkspace:
         """Return a shallow clone with the same logical→path mapping."""
         clone = FileWorkspace(dict(self._files), cache_dir=self._cache_dir)
         clone._hidden = set(self._hidden)
+        clone._readonly = set(self._readonly)
         return clone
 
 

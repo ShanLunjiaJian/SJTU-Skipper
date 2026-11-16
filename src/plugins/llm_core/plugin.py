@@ -105,7 +105,7 @@ class LLMPlugin(Plugin):
                 type="string",
                 default=_DEFAULT_BASE_URL,
                 group="LLM",
-                description="OpenAI 兼容 Base URL；缺少 /v1 时会自动补全。",
+                description="OpenAI 兼容接口根地址．",
                 env=_ENV_BASE_URL_KEYS,
                 visible_when=("llm.mode", (_MODE_OPENAI,)),
                 order=1,
@@ -201,6 +201,7 @@ class LLMPlugin(Plugin):
                 label="采样温度",
                 type="float",
                 default=_DEFAULT_TEMPERATURE,
+                nullable=True,
                 group="LLM",
                 description="采样温度；留空使用模型默认。",
                 order=10,
@@ -210,6 +211,7 @@ class LLMPlugin(Plugin):
                 label="最大 Token 数",
                 type="int",
                 default=_DEFAULT_MAX_TOKENS,
+                nullable=True,
                 group="LLM",
                 description="最大生成 Token 数；留空使用模型默认。",
                 order=11,
@@ -231,6 +233,27 @@ class LLMPlugin(Plugin):
                 group="LLM",
                 description="瞬时错误自动重试次数。",
                 order=13,
+            ),
+            SettingsSpec(
+                key="llm.reasoning_effort",
+                label="推理强度",
+                type="select",
+                default="max",
+                options=[
+                    (level, level)
+                    for level in (
+                        "none",
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                    )
+                ],
+                group="LLM",
+                description="所有 LLM 调用使用此推理强度；可用等级由服务端模型决定．",
+                order=14,
             ),
             SettingsSpec(
                 key="llm.extra_body",
@@ -259,7 +282,9 @@ class LLMPlugin(Plugin):
 
         def _config_provider(profile: str) -> ProviderConfig:
             try:
-                mode = str(settings.get("llm.mode", _MODE_OPENAI) or _MODE_OPENAI).lower()
+                mode = str(
+                    settings.get("llm.mode", _MODE_OPENAI) or _MODE_OPENAI
+                ).lower()
                 temperature = settings.get("llm.temperature", _DEFAULT_TEMPERATURE)
                 max_tokens = settings.get("llm.max_tokens", _DEFAULT_MAX_TOKENS)
                 timeout = settings.get("llm.timeout", _DEFAULT_TIMEOUT)
@@ -270,6 +295,10 @@ class LLMPlugin(Plugin):
                         extra_body = json.loads(extra_body)
                     except json.JSONDecodeError:
                         extra_body = {}
+                extra_body = {
+                    "reasoning_effort": settings.get("llm.reasoning_effort", "max"),
+                    **dict(extra_body or {}),
+                }
             except Exception:
                 logger.exception("failed to read settings for profile %s", profile)
                 return ProviderConfig()
@@ -284,7 +313,9 @@ class LLMPlugin(Plugin):
                     extra_body=extra_body,
                 )
 
-            base_url = str(settings.get("llm.base_url", _DEFAULT_BASE_URL) or _DEFAULT_BASE_URL)
+            base_url = str(
+                settings.get("llm.base_url", _DEFAULT_BASE_URL) or _DEFAULT_BASE_URL
+            )
             api_key = str(settings.get("llm.api_key", "") or "")
             extra_headers = settings.get("llm.extra_headers", {})
             if isinstance(extra_headers, str):
@@ -387,9 +418,7 @@ class LLMPlugin(Plugin):
             max_tokens=max_tokens,
             timeout=float(timeout) if timeout else _DEFAULT_TIMEOUT,
             max_retries=(
-                int(max_retries)
-                if max_retries is not None
-                else _DEFAULT_MAX_RETRIES
+                int(max_retries) if max_retries is not None else _DEFAULT_MAX_RETRIES
             ),
             extra_headers={
                 "x-opencode-org-id": org_id,

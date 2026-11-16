@@ -13,9 +13,13 @@ from applog import setup_logging
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--data-dir", type=Path, default=None, help="runtime data directory")
+    parser.add_argument(
+        "--data-dir", type=Path, default=None, help="runtime data directory"
+    )
     parser.add_argument("--host", default=None, help="bind host (default 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=None, help="bind port (default 8765)")
+    parser.add_argument(
+        "--port", type=int, default=None, help="bind port (default 8765)"
+    )
     parser.add_argument("--config", type=Path, default=None, help="agent.toml path")
     parser.add_argument("--log-level", default=None, help="DEBUG/INFO/WARNING/ERROR")
 
@@ -77,7 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = sub.add_parser("serve", help="start the web UI with all plugins")
     _add_common(serve)
-    serve.add_argument("--plugin", action="append", default=[], help="extra plugin module:Class")
+    serve.add_argument(
+        "--plugin", action="append", default=[], help="extra plugin module:Class"
+    )
     serve.set_defaults(func=cmd_serve)
 
     check = sub.add_parser("check", help="load plugins and print the topological order")

@@ -41,9 +41,7 @@ from .models import (
     User,
 )
 
-ParamInput = Optional[
-    Union[Mapping[str, Any], Sequence[Tuple[str, Any]]]
-]
+ParamInput = Optional[Union[Mapping[str, Any], Sequence[Tuple[str, Any]]]]
 T = TypeVar("T")
 
 
@@ -112,7 +110,9 @@ class CanvasClient:
                 request = self._client.build_request(
                     method, url, params=params, headers=self._headers(headers)
                 )
-                response = self._client.send(request, stream=True, follow_redirects=True)
+                response = self._client.send(
+                    request, stream=True, follow_redirects=True
+                )
                 try:
                     self._raise_for_status(response)
                 except Exception:
@@ -144,7 +144,9 @@ class CanvasClient:
             raise CanvasPermissionError(403, f"Canvas denied access: {message}")
         if response.status_code == 404:
             raise CanvasNotFoundError(404, f"Canvas resource not found: {message}")
-        raise CanvasAPIError(response.status_code, f"Canvas API error {response.status_code}: {message}")
+        raise CanvasAPIError(
+            response.status_code, f"Canvas API error {response.status_code}: {message}"
+        )
 
     @staticmethod
     def _safe_error_message(response: httpx.Response) -> str:
@@ -180,7 +182,9 @@ class CanvasClient:
         try:
             return response.json()
         except json.JSONDecodeError as exc:
-            raise CanvasAPIError(response.status_code, "Canvas returned invalid JSON.") from exc
+            raise CanvasAPIError(
+                response.status_code, "Canvas returned invalid JSON."
+            ) from exc
 
     def _get_model(self, path: str, model: Type[T], *, params: ParamInput = None) -> T:
         return model.model_validate(self._get_json(path, params=params))  # type: ignore[attr-defined]
@@ -201,7 +205,9 @@ class CanvasClient:
             try:
                 items = response.json()
             except json.JSONDecodeError as exc:
-                raise CanvasAPIError(response.status_code, "Canvas returned invalid JSON.") from exc
+                raise CanvasAPIError(
+                    response.status_code, "Canvas returned invalid JSON."
+                ) from exc
             if not isinstance(items, list):
                 raise CanvasAPIError(
                     response.status_code,
@@ -246,19 +252,31 @@ class CanvasClient:
         )
 
     def list_course_folders(self, course_id: int) -> List[Folder]:
-        return self._get_paginated_models(f"/api/v1/courses/{course_id}/folders", Folder)
+        return self._get_paginated_models(
+            f"/api/v1/courses/{course_id}/folders", Folder
+        )
 
     def list_folder_files(self, folder_id: int) -> List[CanvasFile]:
-        return self._get_paginated_models(f"/api/v1/folders/{folder_id}/files", CanvasFile)
+        return self._get_paginated_models(
+            f"/api/v1/folders/{folder_id}/files", CanvasFile
+        )
 
     def list_folder_folders(self, folder_id: int) -> List[Folder]:
-        return self._get_paginated_models(f"/api/v1/folders/{folder_id}/folders", Folder)
+        return self._get_paginated_models(
+            f"/api/v1/folders/{folder_id}/folders", Folder
+        )
 
     def list_course_files(self, course_id: int) -> List[CanvasFile]:
-        return self._get_paginated_models(f"/api/v1/courses/{course_id}/files", CanvasFile)
+        return self._get_paginated_models(
+            f"/api/v1/courses/{course_id}/files", CanvasFile
+        )
 
-    def list_modules(self, course_id: int, *, include_items: bool = True) -> List[Module]:
-        modules = self._get_paginated_models(f"/api/v1/courses/{course_id}/modules", Module)
+    def list_modules(
+        self, course_id: int, *, include_items: bool = True
+    ) -> List[Module]:
+        modules = self._get_paginated_models(
+            f"/api/v1/courses/{course_id}/modules", Module
+        )
         if include_items:
             for module in modules:
                 module.items = self.list_module_items(course_id, module.id)
@@ -305,7 +323,9 @@ class CanvasClient:
             params=params,
         )
 
-    def list_my_submissions(self, course_id: int) -> List[Tuple[Assignment, Submission]]:
+    def list_my_submissions(
+        self, course_id: int
+    ) -> List[Tuple[Assignment, Submission]]:
         records: List[Tuple[Assignment, Submission]] = []
         for assignment in self.list_assignments(course_id):
             records.append(

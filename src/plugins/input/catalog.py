@@ -67,9 +67,7 @@ class Catalog:
 
     # -- Recordings -------------------------------------------------------
 
-    def list_recordings(
-        self, course_id: str, limit: int = 50
-    ) -> list[dict[str, Any]]:
+    def list_recordings(self, course_id: str, limit: int = 50) -> list[dict[str, Any]]:
         return self._cached(
             ("recordings", str(course_id), int(limit)),
             30.0,
@@ -83,9 +81,7 @@ class Catalog:
             lambda: self._cat().get_recording_url(course_id, video_id),
         )
 
-    def get_recording_streams(
-        self, course_id: str, video_id: str
-    ) -> dict[str, str]:
+    def get_recording_streams(self, course_id: str, video_id: str) -> dict[str, str]:
         """Per-view URLs (``"1"``=课堂, ``"2"``=屏幕)."""
 
         return self._cached(

@@ -336,7 +336,12 @@ class VideoInfo(CanvasModel):
             if item.get("viewNum") == view_num and item.get("url"):
                 return str(item["url"])
         for item in self.play_items:
-            url = item.get("url") or item.get("playUrl") or item.get("videoUrl") or item.get("hlsUrl")
+            url = (
+                item.get("url")
+                or item.get("playUrl")
+                or item.get("videoUrl")
+                or item.get("hlsUrl")
+            )
             if url:
                 return str(url)
         return None

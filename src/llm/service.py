@@ -7,6 +7,7 @@ stays decoupled from any particular settings plugin.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -71,7 +72,11 @@ def _coerce_message(msg: MessageInput) -> Message:
             TC(
                 id=tc.get("id", ""),
                 name=tc.get("function", {}).get("name", ""),
-                arguments=tc.get("function", {}).get("arguments", {}),
+                arguments=(
+                    json.loads(tc.get("function", {}).get("arguments", "{}"))
+                    if isinstance(tc.get("function", {}).get("arguments"), str)
+                    else tc.get("function", {}).get("arguments", {})
+                ),
             )
             for tc in tool_calls_raw
         ]
@@ -139,7 +144,9 @@ class LLMService:
         registry: ProviderRegistry | None = None,
     ) -> None:
         self._config_provider: ConfigCallback = (
-            config_provider if config_provider is not None else (lambda _: _DEFAULT_CONFIG)
+            config_provider
+            if config_provider is not None
+            else (lambda _: _DEFAULT_CONFIG)
         )
         self._default_provider = str(default_provider or "openai")
         self._on_event = on_event
@@ -203,7 +210,9 @@ class LLMService:
         """Copy of the per-model token totals (safe to hand to the UI)."""
 
         with self._usage_lock:
-            return {model: dict(totals) for model, totals in self._usage_by_model.items()}
+            return {
+                model: dict(totals) for model, totals in self._usage_by_model.items()
+            }
 
     def _provider_for(self, config: ProviderConfig) -> Provider:
         provider = self._registry.require(config.provider or self._default_provider)
@@ -211,7 +220,6 @@ class LLMService:
         if callable(reconfigure):
             reconfigure(config)
         return provider
-
 
     # ------------------------------------------------------------------
     # chat / stream
@@ -251,14 +259,17 @@ class LLMService:
         )
 
         if self._on_event:
-            self._on_event("llm.request", {
-                "profile": profile,
-                "model": request.model,
-                "message_count": len(coerced),
-                "tool_count": len(request.tools),
-                "stream": False,
-                "session_id": session_id,
-            })
+            self._on_event(
+                "llm.request",
+                {
+                    "profile": profile,
+                    "model": request.model,
+                    "message_count": len(coerced),
+                    "tool_count": len(request.tools),
+                    "stream": False,
+                    "session_id": session_id,
+                },
+            )
 
         call = self._trace_start("chat", profile, request, config)
         try:
@@ -278,21 +289,24 @@ class LLMService:
         if call is not None:
             call.finish(response)
         if self._on_event:
-            self._on_event("llm.response", {
-                "profile": profile,
-                "model": response.model,
-                "finish_reason": response.finish_reason,
-                "content_len": len(response.content),
-                "tool_calls": len(response.tool_calls),
-                "session_id": session_id,
-                "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                    "cached_tokens": response.usage.cached_tokens,
+            self._on_event(
+                "llm.response",
+                {
+                    "profile": profile,
+                    "model": response.model,
+                    "finish_reason": response.finish_reason,
+                    "content_len": len(response.content),
+                    "tool_calls": len(response.tool_calls),
+                    "session_id": session_id,
+                    "usage": {
+                        "prompt_tokens": response.usage.prompt_tokens,
+                        "completion_tokens": response.usage.completion_tokens,
+                        "total_tokens": response.usage.total_tokens,
+                        "cached_tokens": response.usage.cached_tokens,
+                    },
+                    "usage_totals": totals,
                 },
-                "usage_totals": totals,
-            })
+            )
         return response
 
     def stream(
@@ -330,14 +344,17 @@ class LLMService:
         )
 
         if self._on_event:
-            self._on_event("llm.request", {
-                "profile": profile,
-                "model": request.model,
-                "message_count": len(coerced),
-                "tool_count": len(request.tools),
-                "stream": True,
-                "session_id": session_id,
-            })
+            self._on_event(
+                "llm.request",
+                {
+                    "profile": profile,
+                    "model": request.model,
+                    "message_count": len(coerced),
+                    "tool_count": len(request.tools),
+                    "stream": True,
+                    "session_id": session_id,
+                },
+            )
 
         call = self._trace_start("stream", profile, request, config)
         try:
@@ -362,11 +379,14 @@ class LLMService:
                     if call is not None:
                         call.on_error(event.error)
                     if self._on_event:
-                        self._on_event("llm.error", {
-                            "profile": profile,
-                            "phase": "stream",
-                            "error": str(event.error) if event.error else "",
-                        })
+                        self._on_event(
+                            "llm.error",
+                            {
+                                "profile": profile,
+                                "phase": "stream",
+                                "error": str(event.error) if event.error else "",
+                            },
+                        )
                 yield event
         except GeneratorExit:
             if call is not None:

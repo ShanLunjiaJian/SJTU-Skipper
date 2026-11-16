@@ -49,9 +49,7 @@ def test_poll_pending_then_token(monkeypatch) -> None:
     def fake_post(url, *, json, timeout):
         calls["n"] += 1
         if calls["n"] == 1:
-            return httpx.Response(
-                400, json={"error": "authorization_pending"}
-            )
+            return httpx.Response(400, json={"error": "authorization_pending"})
         return httpx.Response(
             200,
             json={

@@ -14,6 +14,7 @@ from plugins.instant_summarize.plugin import InstantSummarizePlugin
 from plugins.reader import ReaderPlugin
 from plugins.settings.plugin import SettingsPlugin
 from plugins.summarize.plugin import SummarizePlugin
+from plugins.notes_pipeline import NotesPipelinePlugin
 
 from support import FakeLLM, FakeResponse, FakeToolCall
 
@@ -37,7 +38,13 @@ def _wait_until(predicate, timeout: float = 8.0, interval: float = 0.05) -> bool
     return False
 
 
-def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
+def test_instant_summarize_writes_three_files(tmp_path: Path, monkeypatch) -> None:
+    # Test the runtime consumers with FakeLLM. Worker IPC has separate HTTP tests.
+    monkeypatch.setattr(
+        NotesPipelinePlugin,
+        "_agent_run",
+        lambda self, sid, agent_id, instruction: self.agent.run(agent_id, instruction),
+    )
     cfg = load_config(data_dir=tmp_path)
     script = [
         FakeResponse(
@@ -45,17 +52,17 @@ def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
                 FakeToolCall(
                     "c1",
                     "append",
-                    {"file": "instant_note_knowledge.md", "text": "- 留数定理" * 5},
+                    {"file": "note_knowledge.md", "text": "- 留数定理" * 5},
                 ),
                 FakeToolCall(
                     "c2",
                     "append",
-                    {"file": "instant_note_gossip.md", "text": "- 老师聊到 AI" * 3},
+                    {"file": "note_gossip.md", "text": "- 老师聊到 AI" * 3},
                 ),
                 FakeToolCall(
                     "c3",
                     "append",
-                    {"file": "instant_note_notice.md", "text": "- 作业 3.1" * 3},
+                    {"file": "note_notice.md", "text": "- 作业 3.1" * 3},
                 ),
             ]
         ),
@@ -64,12 +71,18 @@ def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
     llm = FakeLLM(script)
     runtime = build_runtime(
         cfg,
-        plugins=[SettingsPlugin(), StubLLM(), AgentPlugin(), ReaderPlugin(), InstantSummarizePlugin()],
+        plugins=[
+            SettingsPlugin(),
+            StubLLM(),
+            AgentPlugin(),
+            ReaderPlugin(),
+            NotesPipelinePlugin(),
+            InstantSummarizePlugin(),
+        ],
         llm=llm,
     )
     runtime.start()
-    runtime.services.require("settings").set("instant-summarize.trigger_chars", 100)
-    runtime.services.require("settings").set("instant-summarize.trigger_audio_seconds", 1)
+    runtime.services.require("settings").set("notes.chunk_seconds", 60)
     try:
         session = runtime.hub.start_session(meta={"course": "集成测试"})
         session.transcript.append(
@@ -84,13 +97,16 @@ def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
             end=60.0,
             source="vlm",
         )
+        runtime.hub.end_session()
         assert runtime.bus.flush(2.0)
 
         notes = tmp_path / "sessions" / session.session_id / "notes"
         assert _wait_until(
-            lambda: (notes / "instant_note_knowledge.md").exists()
-            and "留数定理"
-            in (notes / "instant_note_knowledge.md").read_text(encoding="utf-8")
+            lambda: (
+                (notes / "instant_note_knowledge.md").exists()
+                and "留数定理"
+                in (notes / "instant_note_knowledge.md").read_text(encoding="utf-8")
+            )
         ), "instant_note_knowledge.md was not written"
         assert "AI" in (notes / "instant_note_gossip.md").read_text(encoding="utf-8")
         assert "作业" in (notes / "instant_note_notice.md").read_text(encoding="utf-8")
@@ -99,8 +115,14 @@ def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
         runtime.stop()
 
 
-def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
+def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path, monkeypatch) -> None:
     """The non-instant plugin lets the agent write the three notes."""
+    # Test the runtime consumers with FakeLLM. Worker IPC has separate HTTP tests.
+    monkeypatch.setattr(
+        NotesPipelinePlugin,
+        "_agent_run",
+        lambda self, sid, agent_id, instruction: self.agent.run(agent_id, instruction),
+    )
     cfg = load_config(data_dir=tmp_path)
     outline = (
         "# 课堂讲义：知识\n\n"
@@ -119,7 +141,10 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
                 FakeToolCall(
                     "w2",
                     "append",
-                    {"file": "note_notice.md", "text": "# 通知\n\n## 作业\n\n- 习题 3.1\n"},
+                    {
+                        "file": "note_notice.md",
+                        "text": "# 通知\n\n## 作业\n\n- 习题 3.1\n",
+                    },
                 ),
             ]
         ),
@@ -128,12 +153,20 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
     llm = FakeLLM(script)
     runtime = build_runtime(
         cfg,
-        plugins=[SettingsPlugin(), StubLLM(), AgentPlugin(), ReaderPlugin(), SummarizePlugin()],
+        plugins=[
+            SettingsPlugin(),
+            StubLLM(),
+            AgentPlugin(),
+            ReaderPlugin(),
+            NotesPipelinePlugin(),
+            SummarizePlugin(),
+        ],
         llm=llm,
     )
     runtime.start()
-    runtime.services.require("settings").set("instant-summarize.trigger_chars", 100)
-    runtime.services.require("settings").set("instant-summarize.trigger_audio_seconds", 1)
+    runtime.services.require("settings").set("instant-summarize.enabled", False)
+    runtime.services.require("settings").set("summarize.review_enabled", False)
+    runtime.services.require("settings").set("summarize.on_stop", "skip")
     try:
         session = runtime.hub.start_session(meta={"course": "集成测试"})
         session.transcript.append(
@@ -142,16 +175,19 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
             end=60.0,
             source="stt",
         )
+        runtime.hub.end_session()
         assert runtime.bus.flush(1.0)
 
-        result = runtime.ui.dispatch_action("summarize.full", {})
+        result = runtime.ui.dispatch_action("summarize.regenerate", {})
         assert result.ok
 
         notes = tmp_path / "sessions" / session.session_id / "notes"
         knowledge = notes / "note_knowledge.md"
         assert _wait_until(
-            lambda: knowledge.exists()
-            and "### 定义" in knowledge.read_text(encoding="utf-8")
+            lambda: (
+                knowledge.exists()
+                and "### 定义" in knowledge.read_text(encoding="utf-8")
+            )
         ), "note_knowledge.md outline was not written"
 
         content = knowledge.read_text(encoding="utf-8")
@@ -161,7 +197,6 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
         assert llm.calls, "summarize never called the LLM"
     finally:
         runtime.stop()
-
 
 
 def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
@@ -178,6 +213,7 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
             StubLLM(),
             AgentPlugin(),
             ReaderPlugin(),
+            NotesPipelinePlugin(),
             AskPlugin(),
             SummarizePlugin(),
         ],
@@ -189,10 +225,9 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
         assert runtime.bus.flush(1.0)
         sid = session.session_id
         knowledge = tmp_path / "sessions" / sid / "notes" / "note_knowledge.md"
+        knowledge.parent.mkdir(parents=True, exist_ok=True)
         knowledge.write_text(
-            knowledge.read_text(encoding="utf-8")
-            + "## 第一节\n\n这是第一段笔记内容。\n\n第二段笔记内容。\n",
-            encoding="utf-8",
+            "## 第一节\n\n这是第一段笔记内容。\n\n第二段笔记内容。\n", encoding="utf-8"
         )
         open_result = runtime.ui.dispatch_action("summarize.read", {"doc": "knowledge"})
         assert open_result.ok

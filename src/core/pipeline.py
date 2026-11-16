@@ -146,9 +146,7 @@ class OrderedWindowPool:
         try:
             return self._process(start, end)
         except Exception as exc:  # noqa: BLE001 - reported through commit
-            logger.warning(
-                "%s window %.1f-%.1f failed: %s", self.name, start, end, exc
-            )
+            logger.warning("%s window %.1f-%.1f failed: %s", self.name, start, end, exc)
             return WindowError(exc)
 
     def poll(self, timeout: float | None = None) -> int:

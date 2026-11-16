@@ -170,10 +170,7 @@ class SettingsPlugin(Plugin):
             return [
                 {
                     "type": "markdown",
-                    "text": (
-                        "### 设置\n\n"
-                        "暂无设置项。"
-                    ),
+                    "text": ("### 设置\n\n暂无设置项。"),
                 }
             ]
         tabs: list[dict[str, Any]] = []
@@ -212,9 +209,7 @@ class SettingsPlugin(Plugin):
             # Secrets are write-only: never send the real value or a fake
             # six-character mask to the browser.
             "value": "" if spec.secret else value,
-            "secret_length": (
-                len(str(raw)) if spec.secret and configured else 0
-            ),
+            "secret_length": (len(str(raw)) if spec.secret and configured else 0),
             "options": options,
             "option_items": [
                 {"value": option, "label": label}

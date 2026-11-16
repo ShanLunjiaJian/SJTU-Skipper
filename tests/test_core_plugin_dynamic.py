@@ -37,7 +37,9 @@ class ScopedPlugin(Plugin):
         ctx.meta.register("scoped", lambda: "ok")
 
 
-def test_context_injects_plugin_id_and_cleanup_removes_everything(tmp_path: Path) -> None:
+def test_context_injects_plugin_id_and_cleanup_removes_everything(
+    tmp_path: Path,
+) -> None:
     runtime = build_runtime(load_config(data_dir=tmp_path), plugins=[ScopedPlugin()])
     runtime.start()
     try:
@@ -91,7 +93,9 @@ def test_declared_soft_dependency_allows_access(tmp_path: Path) -> None:
     )
     runtime.start()
     try:
-        assert runtime.plugins.order.index("scoped") < runtime.plugins.order.index("snoop")
+        assert runtime.plugins.order.index("scoped") < runtime.plugins.order.index(
+            "snoop"
+        )
         assert seen
     finally:
         runtime.stop()
@@ -191,11 +195,17 @@ def test_event_bus_drops_subscriptions_physically() -> None:
 def test_stream_hub_media_consumers() -> None:
     hub = StreamHub()
     hub.register_consumer(
-        "stt", "audio", cursor_fn=lambda: 4.0, busy_fn=lambda: True,
+        "stt",
+        "audio",
+        cursor_fn=lambda: 4.0,
+        busy_fn=lambda: True,
         gate_limit_fn=lambda: 30.0,
     )
     hub.register_consumer(
-        "vlm", "audio", cursor_fn=lambda: 2.0, busy_fn=lambda: False,
+        "vlm",
+        "audio",
+        cursor_fn=lambda: 2.0,
+        busy_fn=lambda: False,
         gate_limit_fn=lambda: 60.0,
     )
     assert hub.consumer_cursor("audio") == 2.0

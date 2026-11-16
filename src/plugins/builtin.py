@@ -22,6 +22,7 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
     from .input.plugin import InputPlugin
     from .instant_summarize.plugin import InstantSummarizePlugin
     from .llm_core.plugin import LLMPlugin
+    from .notes_pipeline import NotesPipelinePlugin
     from .reader.plugin import ReaderPlugin
     from .settings.plugin import SettingsPlugin
     from .stt import STTPlugin
@@ -41,6 +42,8 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
         plugins.append(STTPlugin())
     if config.enable_vlm:
         plugins.append(VLMPlugin())
+    if config.enable_summarize or config.enable_instant_summarize:
+        plugins.append(NotesPipelinePlugin())
     if config.enable_summarize:
         plugins.append(SummarizePlugin())
     if config.enable_instant_summarize:

@@ -19,7 +19,9 @@ RESERVED_WINDOWS_NAMES = {
 }
 
 
-def safe_path_segment(value: object, *, fallback: str = "_", max_length: int = 120) -> str:
+def safe_path_segment(
+    value: object, *, fallback: str = "_", max_length: int = 120
+) -> str:
     """Return a cross-platform safe single path segment."""
 
     text = str(value or "").strip()
@@ -43,7 +45,9 @@ def safe_path_segment(value: object, *, fallback: str = "_", max_length: int = 1
 
 
 def course_dir_name(course: Course) -> str:
-    return safe_path_segment(f"{course.display_name} [{course.id}]", fallback=f"course-{course.id}")
+    return safe_path_segment(
+        f"{course.display_name} [{course.id}]", fallback=f"course-{course.id}"
+    )
 
 
 def folder_relative_parts(folder: Optional[Folder]) -> List[str]:
@@ -69,11 +73,15 @@ def planned_file_path(
     folder = folder_map.get(file.folder_id or -1)
     for part in folder_relative_parts(folder):
         parts.append(Path(part))
-    parts.append(Path(safe_path_segment(file.effective_name, fallback=f"file-{file.id}")))
+    parts.append(
+        Path(safe_path_segment(file.effective_name, fallback=f"file-{file.id}"))
+    )
     return Path(*parts)
 
 
-def unique_path_for_conflict(path: Path, used_paths: Iterable[Path], identifier: object) -> Path:
+def unique_path_for_conflict(
+    path: Path, used_paths: Iterable[Path], identifier: object
+) -> Path:
     """Return a deterministic non-conflicting path for a file name collision."""
 
     used = {p.resolve() for p in used_paths if p.exists() or p == path}

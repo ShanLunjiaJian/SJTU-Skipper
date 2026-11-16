@@ -145,7 +145,9 @@ def _match_course(name: str, courses: list[dict[str, Any]]) -> dict[str, Any] | 
     return None
 
 
-def _recording_overlaps(live_begin: datetime | None, groups: list[dict[str, Any]]) -> bool:
+def _recording_overlaps(
+    live_begin: datetime | None, groups: list[dict[str, Any]]
+) -> bool:
     if live_begin is None:
         return False
     window = timedelta(minutes=40)
@@ -249,9 +251,7 @@ def _live_group_child(
     """One class node for a merged run of live periods."""
 
     parts: list[dict[str, Any]] = group["parts"]
-    states = [
-        live_state(part.get("begin"), part.get("end"), now=now) for part in parts
-    ]
+    states = [live_state(part.get("begin"), part.get("end"), now=now) for part in parts]
     if not any(states):
         return None
     if "直播中" in states:
@@ -378,9 +378,7 @@ def build_tree(
         for group in merge_live_periods(
             items, max_gap_minutes=max_gap_minutes, max_parts=max_parts
         ):
-            child = _live_group_child(
-                cid, names_by_course.get(cid, ""), group, now=now
-            )
+            child = _live_group_child(cid, names_by_course.get(cid, ""), group, now=now)
             if child is not None:
                 groups_by_course.setdefault(cid, [])
                 groups_by_course[cid].append(

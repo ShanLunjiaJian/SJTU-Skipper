@@ -51,7 +51,9 @@ class ProviderRegistry:
     def require(self, name: str) -> Provider:
         provider = self.get(name)
         if provider is None:
-            raise KeyError(f"provider {name!r} is not registered; available: {self.names()}")
+            raise KeyError(
+                f"provider {name!r} is not registered; available: {self.names()}"
+            )
         return provider
 
     def names(self) -> list[str]:

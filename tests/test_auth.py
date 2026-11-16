@@ -14,9 +14,7 @@ from ui.auth import AuthStore, COOKIE_NAME, hash_password, install, verify_passw
 
 def _write_auth(tmp_path: Path, password: str = "p") -> Path:
     path = tmp_path / "auth.json"
-    path.write_text(
-        json.dumps({"users": {"u": {"password": password}}}), "utf-8"
-    )
+    path.write_text(json.dumps({"users": {"u": {"password": password}}}), "utf-8")
     return path
 
 
@@ -82,14 +80,16 @@ def test_login_flow(tmp_path: Path) -> None:
         assert client.get("/api/thing").status_code == 401
 
         bad = client.post(
-            "/login", data={"username": "u", "password": "nope"},
+            "/login",
+            data={"username": "u", "password": "nope"},
             follow_redirects=False,
         )
         assert bad.status_code == 401
         assert COOKIE_NAME not in bad.cookies
 
         good = client.post(
-            "/login", data={"username": "u", "password": "p"},
+            "/login",
+            data={"username": "u", "password": "p"},
             follow_redirects=False,
         )
         assert good.status_code == 303
@@ -104,12 +104,17 @@ def test_login_is_rate_limited(tmp_path: Path) -> None:
     install(app, tmp_path)
     with TestClient(app) as client:
         for _ in range(5):
-            assert client.post(
-                "/login", data={"username": "u", "password": "bad"},
-                follow_redirects=False,
-            ).status_code == 401
+            assert (
+                client.post(
+                    "/login",
+                    data={"username": "u", "password": "bad"},
+                    follow_redirects=False,
+                ).status_code
+                == 401
+            )
         blocked = client.post(
-            "/login", data={"username": "u", "password": "p"},
+            "/login",
+            data={"username": "u", "password": "p"},
             follow_redirects=False,
         )
         assert blocked.status_code == 429

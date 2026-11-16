@@ -31,7 +31,11 @@ class DemoUI(Plugin):
         )
         ctx.ui.add_page("test.page", "测试页", render=lambda: "# 页面\n\nhello")
         ctx.ui.open_page("test.page")
-        ctx.ui.register_action("test.ping", lambda payload: {"ok": True, "message": "pong"}, plugin_id=self.id)
+        ctx.ui.register_action(
+            "test.ping",
+            lambda payload: {"ok": True, "message": "pong"},
+            plugin_id=self.id,
+        )
 
 
 @pytest.fixture()
@@ -61,7 +65,9 @@ def test_state_and_action(client) -> None:
     assert state["active_page"] == "test.page"
     assert "<h1>" in state["page_content"]["test.page"][0]["html"]
 
-    response = test_client.post("/api/ui/action", json={"action": "test.ping", "values": {"x": 1}})
+    response = test_client.post(
+        "/api/ui/action", json={"action": "test.ping", "values": {"x": 1}}
+    )
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True
@@ -117,8 +123,18 @@ def test_websocket_forwards_ui_notify(client) -> None:
 
 def test_media_relay_rejects_foreign_hosts(client) -> None:
     test_client, _cfg = client
-    assert test_client.get("/api/media", params={"src": "https://example.com/a.mp4"}).status_code == 400
-    assert test_client.get("/api/media", params={"src": "ftp://live.sjtu.edu.cn/a.mp4"}).status_code == 400
+    assert (
+        test_client.get(
+            "/api/media", params={"src": "https://example.com/a.mp4"}
+        ).status_code
+        == 400
+    )
+    assert (
+        test_client.get(
+            "/api/media", params={"src": "ftp://live.sjtu.edu.cn/a.mp4"}
+        ).status_code
+        == 400
+    )
 
 
 def test_media_relay_forwards_range(tmp_path: Path) -> None:
