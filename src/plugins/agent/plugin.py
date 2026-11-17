@@ -13,7 +13,7 @@ from core.settings_spec import SettingsSpec
 
 from .prompts import DEFAULT_SYSTEM_PROMPT
 from .session import AgentSession
-from .workspace import FileWorkspace
+from core.workspace import FileWorkspace
 
 _FILE_TOOLS = ("read", "grep", "glob", "edit", "write")
 

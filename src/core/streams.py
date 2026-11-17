@@ -1046,11 +1046,10 @@ class StreamHub:
                 values.append(float(fn() or 0.0))
             except Exception:  # noqa: BLE001 - a broken consumer must not stall input
                 _log.exception("consumer cursor failed for kind=%s", kind)
-        positive = [value for value in values if value > 0.0]
-        return min(positive) if positive else 0.0
+        return min(values) if values else 0.0
 
     def consumer_gate_limit(self, kind: str) -> float:
-        """Largest backlog (seconds) the ``kind`` consumers allow, else ``0.0``."""
+        """Return the strictest positive consumer backlog limit, or zero."""
 
         limits: list[float] = []
         for fn in self._consumer_fns(kind, "gate_limit_fn"):
@@ -1061,7 +1060,7 @@ class StreamHub:
                 continue
             if limit > 0.0:
                 limits.append(limit)
-        return max(limits) if limits else 0.0
+        return min(limits) if limits else 0.0
 
     def consumers_busy(self) -> list[str]:
         """Plugin ids whose consumer currently reports itself busy."""

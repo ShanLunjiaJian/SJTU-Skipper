@@ -1411,8 +1411,6 @@ class TestClassPlayer:
         plugin.setup(ctx)
         monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
         self._open_class(ctx, plugin, kind=kind)
-        ctx.require("settings").set("stt.batch_seconds", 120.0)
-        ctx.require("settings").set("stt.concurrency", 2)
         ctx.streams.register_consumer("vlm", "video", gate_limit_fn=lambda: 75.0)
         plugin._class_streams = {"main": "https://example.com/main.m3u8"}
         plugin._streams_loading = False
@@ -1927,8 +1925,7 @@ def test_manual_source_combines_audio_transport_and_video_consumer_gates(
     ctx = _make_context()
     plugin = InputPlugin()
     plugin.setup(ctx)
-    ctx.require("settings").set("stt.batch_seconds", 120.0)
-    ctx.require("settings").set("stt.concurrency", 2)
+    ctx.streams.register_consumer("stt", "audio", gate_limit_fn=lambda: 37.0)
     ctx.streams.register_consumer("vlm", "video", gate_limit_fn=lambda: 75.0)
     started = []
     ready = threading.Event()
@@ -1945,7 +1942,7 @@ def test_manual_source_combines_audio_transport_and_video_consumer_gates(
         )
         assert result.ok
         assert ready.wait(5.0)
-        assert started[0].audio_gate_limit == (10.0 if kind == "live" else 362.0)
+        assert started[0].audio_gate_limit == 37.0
         assert started[0].video_gate_limit == (0.0 if kind == "live" else 75.0)
     finally:
         plugin.teardown()
@@ -1957,8 +1954,7 @@ def test_gap_fill_combines_audio_transport_and_video_consumer_gates(
     ctx = _make_context(tmp_path)
     plugin = InputPlugin()
     plugin.setup(ctx)
-    ctx.require("settings").set("stt.batch_seconds", 120.0)
-    ctx.require("settings").set("stt.concurrency", 2)
+    ctx.streams.register_consumer("stt", "audio", gate_limit_fn=lambda: 43.0)
     ctx.streams.register_consumer("vlm", "video", gate_limit_fn=lambda: 75.0)
     plugin._fill_course = {"course_id": "1"}
     plugin._fill_target = "live-session"
@@ -1971,19 +1967,11 @@ def test_gap_fill_combines_audio_transport_and_video_consumer_gates(
     monkeypatch.setattr(plugin, "_start_source", lambda spec: started.append(spec))
     try:
         assert plugin._start_fill_part({"video_id": "v1"}, continue_session=False)
-        assert started[0].audio_gate_limit == 362.0
+        assert started[0].audio_gate_limit == 43.0
         assert started[0].video_gate_limit == 75.0
         assert started[0].meta["fill_for"] == "live-session"
     finally:
         plugin.teardown()
-
-
-def test_audio_gate_uses_transport_batch_and_live_limit() -> None:
-    plugin = InputPlugin()
-    settings = FakeSettings({"stt.batch_seconds": 120.0, "stt.concurrency": 2})
-    plugin._ctx = SimpleNamespace(require=lambda name: settings)
-    assert plugin._audio_gate_limit() == 362.0
-    assert plugin._audio_gate_limit(realtime=True) == 10.0
 
 
 def test_audio_enabled_uses_public_service_only() -> None:

@@ -8,7 +8,7 @@ from typing import Any
 from config import load_config
 from core.runtime import build_runtime
 from plugins.reader import ReaderPlugin
-from plugins.reader import qa
+from core import note_document as qa
 
 
 def _make_runtime(tmp_path: Path):

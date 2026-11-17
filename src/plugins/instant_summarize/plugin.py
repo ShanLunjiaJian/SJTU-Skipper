@@ -1,8 +1,6 @@
 """Display incremental notes from the shared pipeline."""
 
 from core.plugin import Plugin
-from core.settings_spec import SettingsSpec
-from plugins.notes_pipeline.prompts import SYSTEM
 
 
 class InstantSummarizeService:
@@ -28,19 +26,6 @@ class InstantSummarizePlugin(Plugin):
         self.ctx = ctx
         self.settings = ctx.require("settings")
         self.pipeline = ctx.require("notes-pipeline")
-        for key, default, kind, label in (
-            ("system_prompt", SYSTEM, "string", "系统提示词"),
-            ("enabled", True, "bool", "分段笔记"),
-        ):
-            self.settings.register(
-                SettingsSpec(
-                    key=f"instant-summarize.{key}",
-                    default=default,
-                    type=kind,
-                    label=label,
-                    group="Instant Summarize",
-                )
-            )
         ctx.register_service(self.id, InstantSummarizeService(self.pipeline))
         if not ctx.ui.has_tab("note"):
             ctx.ui.add_tab("right", "note", "笔记", order=20, plugin_id=self.id)

@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 
 from core.streams import StreamHub
-from plugins.agent import AgentService, FileWorkspace
+from core.workspace import FileWorkspace
+from plugins.agent import AgentService
 from plugins.notes_pipeline.plugin import NotesPipelinePlugin
 from plugins.notes_pipeline.prompts import NOTE_HEADERS, SOURCE_FILENAME
 from tests.support import FakeSettings

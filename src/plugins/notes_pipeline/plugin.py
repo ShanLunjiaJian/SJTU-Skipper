@@ -15,8 +15,8 @@ from typing import Any
 from core.file_access import publication_lock
 from core.plugin import Plugin
 from core.settings_spec import SettingsSpec
-from plugins.agent.workspace import FileWorkspace
-from plugins.reader.qa import parse_blocks, strip_blocks
+from core.workspace import FileWorkspace
+from core.note_document import parse_blocks, strip_blocks
 
 from .material import chunk_material, collect_material, digest, render
 from .prompts import (
@@ -86,6 +86,42 @@ class NotesPipelinePlugin(Plugin):
                     type="int",
                     label=label,
                     group="Notes",
+                    description="修改后重启服务生效" if key == "concurrency" else "",
+                )
+            )
+        for key, default, kind, label, group in (
+            ("summarize.system_prompt", SYSTEM, "string", "system_prompt", "Summarize"),
+            (
+                "summarize.reviewer_prompt",
+                REVIEW_SYSTEM,
+                "string",
+                "reviewer_prompt",
+                "Summarize",
+            ),
+            ("summarize.review_enabled", True, "bool", "review_enabled", "Summarize"),
+            ("summarize.review_max_rounds", 0, "int", "review_max_rounds", "Summarize"),
+            (
+                "instant-summarize.system_prompt",
+                SYSTEM,
+                "string",
+                "系统提示词",
+                "Instant Summarize",
+            ),
+            (
+                "instant-summarize.enabled",
+                True,
+                "bool",
+                "分段笔记",
+                "Instant Summarize",
+            ),
+        ):
+            self.settings.register(
+                SettingsSpec(
+                    key=key,
+                    default=default,
+                    type=kind,
+                    label=label,
+                    group=group,
                 )
             )
         self.condition = threading.Condition(threading.RLock())

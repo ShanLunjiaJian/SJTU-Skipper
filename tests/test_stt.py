@@ -293,7 +293,7 @@ def test_accepted_and_partial_do_not_commit_or_trim(
     )
     assert plugin._coverage(session).covered_seconds("audio") == 0
     assert session.audio.earliest_time == 0
-    assert session.audio_gate.released == 4
+    assert session.audio_gate.released == 0
     assert len(session.transcript) == 0
     assert plugin.status()["cursor"] == 0
     assert any("临时" in b.get("text", "") for b in plugin._render_page())

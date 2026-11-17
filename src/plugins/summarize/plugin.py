@@ -4,7 +4,6 @@ import json
 import threading
 from core.plugin import Plugin
 from core.settings_spec import SettingsSpec
-from plugins.notes_pipeline.prompts import SYSTEM, REVIEW_SYSTEM
 
 
 def note_log_blocks(state):
@@ -86,10 +85,6 @@ class SummarizePlugin(Plugin):
         self.fill_threads = []
         self.log_pages = set()
         for key, default, kind in (
-            ("system_prompt", SYSTEM, "string"),
-            ("reviewer_prompt", REVIEW_SYSTEM, "string"),
-            ("review_enabled", True, "bool"),
-            ("review_max_rounds", 0, "int"),
             ("fill_wait_minutes", 20, "int"),
             ("fill_max_attempts", 6, "int"),
         ):

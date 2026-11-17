@@ -288,7 +288,7 @@ API key 按提供方写入项目 OMP `AuthStorage`（`llm_runtime/credentials.db
 
 ```python
 from core.agent_types import AgentProfile, AgentTool
-from plugins.agent import FileWorkspace
+from core.workspace import FileWorkspace
 
 agent = ctx.require("agent")
 agent.register_agent(AgentProfile(

@@ -177,17 +177,10 @@ class STTPlugin(Plugin):
         self._consumer_registered = True
 
     def _gate_limit(self) -> float:
-        """Return the maximum audio backlog for the current transport mode."""
+        """Return the local unprocessed audio limit in seconds."""
         if not self.enabled():
             return 0.0
-        if (
-            self._ctx is not None
-            and str(self._ctx.streams.current.meta.get("mode", "")) != "fast"
-        ):
-            return 10.0
-        batch = min(120.0, max(0.2, float(self._setting("stt.batch_seconds", 120.0))))
-        concurrency = max(1, int(self._setting("stt.concurrency", 1)))
-        return batch * (concurrency + 1) + 2.0
+        return max(0.2, float(self._setting("stt.buffer_seconds", 240.0)))
 
     # ------------------------------------------------------------------
     # Settings
@@ -219,13 +212,26 @@ class STTPlugin(Plugin):
             ("context", "转写提示", "text", "", "留空使用无提示转写"),
             ("timeout", "请求超时（秒）", "float", 60.0, "单次请求的超时时间"),
             (
-                "batch_seconds",
-                "传输缓冲（秒）",
+                "send_window_seconds",
+                "发送确认窗口（秒）",
                 "float",
                 120.0,
-                "录播传输信用上限，最多 120 秒；服务负责语音分段",
+                "录播已发送但未确认接收的音频上限；服务负责语音分段",
             ),
-            ("concurrency", "录播并发数", "int", 1, "录播服务允许的活动推理数"),
+            (
+                "buffer_seconds",
+                "本地音频缓冲（秒）",
+                "float",
+                240.0,
+                "暂停读取前允许保留的未处理音频时长",
+            ),
+            (
+                "concurrency",
+                "服务端录播并发数",
+                "int",
+                1,
+                "请求的活动推理数，由服务端限制到可用容量",
+            ),
         )
         for order, (suffix, label, kind, default, description) in enumerate(entries):
             settings.register(
@@ -565,7 +571,9 @@ class STTPlugin(Plugin):
                 credit = (
                     min(
                         120.0,
-                        max(0.2, float(self._setting("stt.batch_seconds", 120.0))),
+                        max(
+                            0.2, float(self._setting("stt.send_window_seconds", 120.0))
+                        ),
                     )
                     if mode == "offline"
                     else 1.0
@@ -626,7 +634,6 @@ class STTPlugin(Plugin):
             end = min(connection["sent"], float(event["received_ms"]) / 1000)
             state.received = max(state.received, end)
             connection["received"] = max(connection["received"], end)
-            session.audio_gate.release(end)
         elif kind == "partial":
             state.partial = dict(event)
             self._ctx.events.emit(

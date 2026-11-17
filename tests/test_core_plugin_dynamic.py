@@ -210,9 +210,12 @@ def test_stream_hub_media_consumers() -> None:
         gate_limit_fn=lambda: 60.0,
     )
     assert hub.consumer_cursor("audio") == 2.0
-    assert hub.consumer_gate_limit("audio") == 60.0
+    assert hub.consumer_gate_limit("audio") == 30.0
     assert hub.consumers_busy() == ["stt"]
     assert hub.consumer_cursor("video") == 0.0
+    hub.register_consumer("waiting", "audio", cursor_fn=lambda: 0.0)
+    assert hub.consumer_cursor("audio") == 0.0
+    hub.remove_plugin("waiting")
 
     hub.remove_plugin("stt")
     assert hub.consumers_busy() == []

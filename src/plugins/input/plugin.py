@@ -855,7 +855,7 @@ class InputPlugin(Plugin):
             continue_session=continue_session,
             realtime=False,
             download=not url.startswith(("file://", "/")),
-            audio_gate_limit=self._audio_gate_limit(),
+            audio_gate_limit=self._gate_limit("audio"),
             video_gate_limit=self._gate_limit("video"),
             final_part=not self._fill_queue,
             meta={
@@ -2395,7 +2395,7 @@ class InputPlugin(Plugin):
             # Recordings are always processed at full speed; live is 1:1.
             realtime=live,
             download=not live and not url.startswith(("file://", "/")),
-            audio_gate_limit=self._audio_gate_limit(realtime=live),
+            audio_gate_limit=self._gate_limit("audio"),
             video_gate_limit=self._gate_limit("video") if not live else 0.0,
             course={
                 "course_id": str(cls.get("course", "")),
@@ -2733,21 +2733,8 @@ class InputPlugin(Plugin):
         service = self._ctx.service("stt")
         return bool(service is not None and service.enabled())
 
-    def _audio_gate_limit(self, *, realtime: bool = False) -> float:
-        """Bound audio by transport concurrency, or ten seconds in realtime."""
-        if realtime:
-            return 10.0
-        settings = self._ctx.require("settings")
-        batch = max(0.0, float(settings.get("stt.batch_seconds", 120.0)))
-        concurrency = max(1, int(settings.get("stt.concurrency", 1)))
-        return batch * (concurrency + 1) + 2.0
-
     def _gate_limit(self, kind: str) -> float:
-        """Return the backlog limit published by registered media consumers.
-
-        Video uses this limit. Audio uses the STT transport limit instead.
-        A limit of ``0.0`` disables the gate.
-        """
+        """Return the backlog limit published by registered media consumers."""
 
         ctx = self._ctx
         hub = ctx.streams if ctx is not None else None
@@ -3023,7 +3010,7 @@ class InputPlugin(Plugin):
             title=title,
             realtime=live,
             download=not live and url.startswith(("http://", "https://")),
-            audio_gate_limit=self._audio_gate_limit(realtime=live),
+            audio_gate_limit=self._gate_limit("audio"),
             video_gate_limit=self._gate_limit("video") if not live else 0.0,
         )
         with self._class_lock:

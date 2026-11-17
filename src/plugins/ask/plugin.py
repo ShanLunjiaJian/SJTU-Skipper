@@ -20,7 +20,7 @@ from core.plugin import Plugin, PluginContext
 from core.settings_spec import SettingsSpec
 from core.ui import render_markdown
 from core.file_access import publication_lock
-from plugins.agent.workspace import FileWorkspace
+from core.workspace import FileWorkspace
 
 from .prompts import ASK_PROMPT_TEMPLATE, INSTANT_SYSTEM_PROMPT, RESEARCH_SYSTEM_PROMPT
 

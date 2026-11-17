@@ -10,7 +10,8 @@ from config import load_config
 from core.agent_types import AgentProfile, AgentTool
 from core.plugin import Plugin
 from core.runtime import build_runtime
-from plugins.agent import AgentPlugin, FileWorkspace
+from core.workspace import FileWorkspace
+from plugins.agent import AgentPlugin
 from tests.support import FakeLLM, FakeSettings
 
 

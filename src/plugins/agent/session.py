@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from .workspace import FileWorkspace
+from core.workspace import FileWorkspace
 
 
 @dataclass(slots=True)

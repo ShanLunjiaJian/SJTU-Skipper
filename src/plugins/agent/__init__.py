@@ -12,7 +12,6 @@ from .plugin import (
 )
 from .prompts import DEFAULT_SYSTEM_PROMPT
 from .session import AgentSession
-from .workspace import FileWorkspace
 
 __all__ = [
     "AgentEvent",
@@ -23,5 +22,4 @@ __all__ = [
     "AgentSession",
     "AgentTool",
     "DEFAULT_SYSTEM_PROMPT",
-    "FileWorkspace",
 ]

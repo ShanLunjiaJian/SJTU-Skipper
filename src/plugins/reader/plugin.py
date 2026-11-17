@@ -12,7 +12,7 @@ per page, not global: ``summarize`` registers "提问" on the pages it opens, so
 the same page re-used by ``instant-summarize`` shows no summarize menu item.
 
 Q&A pairs written by such a menu item live *inside* the note file as
-``qa`` blocks (see :mod:`plugins.reader.qa`); the reader renders them with its
+``qa`` blocks (see :mod:`core.note_document`); the reader renders them with its
 own collapsible component and offers one-click deletion.
 """
 
@@ -29,7 +29,7 @@ from core.file_access import path_lock, publication_lock
 from contextlib import ExitStack
 from core.ui import render_markdown
 
-from . import qa
+from core import note_document as qa
 
 PAGE_ID = "reader:main"
 PAGE_PREFIX = "reader:notes:"
