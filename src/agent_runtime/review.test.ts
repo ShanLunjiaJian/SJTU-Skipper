@@ -15,6 +15,7 @@ test("edits require the unified reviewer again", async () => {
     ])
       await Bun.write(path.join(directory, name), "Original");
     const seen: string[] = [];
+    const prompts: string[] = [];
     let fail = true;
     const gate = new ReviewGate(
       directory,
@@ -23,8 +24,9 @@ test("edits require the unified reviewer again", async () => {
         system: "Review",
         maxRounds: 3,
       },
-      async (role, _prompt, files) => {
+      async (role, prompt, files) => {
         seen.push(`${role}:${await Bun.file(files["note_knowledge.md"]!).text()}`);
+        prompts.push(prompt);
         const incorrect = fail;
         return JSON.stringify({
           overall_correctness: incorrect ? "incorrect" : "correct",
@@ -61,7 +63,15 @@ test("edits require the unified reviewer again", async () => {
     // A writer's final reply does not change the gate.
     expect(await gate.satisfied()).toBe(false);
     fail = false;
-    await run();
+    await tool.execute(
+      "review",
+      { message: "Restored the source condition. Recheck the theorem." },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(prompts[1]).toContain("Restored the source condition. Recheck the theorem.");
+    expect(prompts[1]).toContain("Missing theorem condition");
     expect(await gate.satisfied()).toBe(true);
     await Bun.write(path.join(directory, "note_notice.md"), "Changed after passing");
     expect(await gate.satisfied()).toBe(false);
