@@ -178,13 +178,38 @@ class NotesPipelinePlugin(Plugin):
                 if state["phase"] not in ("published", "deleted"):
                     state["phase"] = "cancelled"
                 state["restart_cancelled"] = True
-            state["generation_state"] = (
-                "finished"
-                if restored and state["phase"] != "deleted"
-                else "not_started"
-            )
             self.sessions[sid] = state
         return self.sessions[sid]
+
+    def _generation_state(self, sid):
+        state = self._state(sid)
+        if any(task[0] == sid for task in self.queue) or any(
+            task["session_id"] == sid
+            for task in (*self.active.values(), *self.agent_tasks.values())
+        ):
+            return "generating"
+        if state.get("deleted"):
+            return "not_started"
+        session = self.ctx.streams.get_session(sid)
+        cancelled = session is not None and (
+            session.meta.get("input_failed") or session.meta.get("processing_cancelled")
+        )
+        if (
+            state.get("restart_cancelled")
+            or cancelled
+            or state["phase"] in ("published", "failed", "cancelled")
+        ):
+            return "finished"
+        if any(chunk["state"] in ("pending", "running") for chunk in state["chunks"]):
+            return "generating"
+        _, final = self._readiness(sid, [])
+        if state["finalize_requested"] or (
+            not final
+            and self.setting("instant-summarize.enabled", True)
+            and session is not None
+        ):
+            return "generating"
+        return "finished" if state["chunks"] else "not_started"
 
     def _save(self, state):
         directory = self._directory(state["session_id"])
@@ -235,9 +260,8 @@ class NotesPipelinePlugin(Plugin):
             if self.closed:
                 return False
             state = self._state(sid)
-            if state["generation_state"] != "not_started":
+            if self._generation_state(sid) != "not_started":
                 return False
-            state["generation_state"] = "generating"
             state["deleted"] = False
             state.pop("restart_cancelled", None)
             state["phase"] = "collecting"
@@ -252,11 +276,10 @@ class NotesPipelinePlugin(Plugin):
             state = self._state(sid)
             if (
                 state.get("restart_cancelled")
-                or state["generation_state"] == "finished"
+                or state["phase"] in ("published", "failed", "cancelled")
                 or state.get("deleted")
             ):
                 return False
-            state["generation_state"] = "generating"
             state["finalize_requested"] = True
             self.condition.notify_all()
         return True
@@ -265,7 +288,7 @@ class NotesPipelinePlugin(Plugin):
         sid = self._sid(session_id)
         with self.condition:
             state = self._state(sid)
-            if state["generation_state"] != "generating":
+            if self._generation_state(sid) != "generating":
                 return False
             state["restart_cancelled"] = True
             state["finalize_requested"] = False
@@ -290,7 +313,6 @@ class NotesPipelinePlugin(Plugin):
                     )
                 )
             )
-            state["generation_state"] = "finished"
             state["phase"] = "cancelled"
             self._save(state)
         self.ctx.ui.refresh("notes.stopped")
@@ -300,7 +322,7 @@ class NotesPipelinePlugin(Plugin):
         sid = self._sid(session_id)
         with self.condition:
             state = self._state(sid)
-            if state["generation_state"] != "finished":
+            if self._generation_state(sid) != "finished":
                 return False
             notes = self.ctx.data_dir / "sessions" / sid / "notes"
             with publication_lock(notes):
@@ -319,7 +341,6 @@ class NotesPipelinePlugin(Plugin):
                 deleted=True,
                 finalize_requested=False,
                 last_agent_tasks=[],
-                generation_state="not_started",
             )
             self._save(state)
         self.ctx.ui.refresh("notes.deleted")
@@ -343,7 +364,7 @@ class NotesPipelinePlugin(Plugin):
             )
             return {
                 "session_id": sid,
-                "generation_state": state["generation_state"],
+                "generation_state": self._generation_state(sid),
                 "phase": state["phase"],
                 "pending_chunks": sum(c["state"] == "pending" for c in state["chunks"]),
                 "running_chunks": sum(c["state"] == "running" for c in state["chunks"]),
@@ -458,9 +479,11 @@ class NotesPipelinePlugin(Plugin):
 
     def _schedule(self, sid):
         state = self._state(sid)
-        if state.get("deleted") or state.get("restart_cancelled"):
-            return
-        if state["generation_state"] == "finished":
+        if (
+            state.get("deleted")
+            or state.get("restart_cancelled")
+            or state["phase"] in ("published", "failed", "cancelled")
+        ):
             return
         session = self.ctx.streams.get_session(sid)
         if session is not None and (
@@ -469,6 +492,10 @@ class NotesPipelinePlugin(Plugin):
             return
         records = collect_material(self.ctx, sid)
         before, final = self._readiness(sid, records)
+        if final and not records:
+            state["finalize_requested"] = False
+            self._save(state)
+            return
         seconds = max(1, float(self.setting("notes.chunk_seconds", 600)))
         end = max(
             (
@@ -573,7 +600,6 @@ class NotesPipelinePlugin(Plugin):
                     state = self._state(sid)
                     if state.get("deleted") or state.get("restart_cancelled"):
                         continue
-                    state["generation_state"] = "generating"
                     if kind == "chunk":
                         state["chunks"][index]["state"] = "running"
                         state["phase"] = "chunking"
@@ -615,7 +641,6 @@ class NotesPipelinePlugin(Plugin):
                 else:
                     state["error"] = str(exc)
                     state["phase"] = "failed"
-                    state["generation_state"] = "finished"
                 self._save(state)
         finally:
             with self.condition:
@@ -765,7 +790,6 @@ class NotesPipelinePlugin(Plugin):
             session = self.agent.get_session(session_id)
             with self.condition:
                 self._check_running(sid)
-                self._state(sid)["generation_state"] = "generating"
                 self.agent_tasks[session_id] = {
                     "id": f"notes-agent:{session_id}",
                     "session_id": sid,
@@ -1068,7 +1092,6 @@ class NotesPipelinePlugin(Plugin):
                     phase="published",
                     review_status=review_status,
                     finalize_requested=False,
-                    generation_state="finished",
                 )
                 self._save(state)
                 self.ctx.ui.refresh("notes.published")

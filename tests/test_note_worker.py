@@ -76,7 +76,7 @@ def test_stop_cancels_all_active_sdk_sessions(tmp_path):
         assert all(sdk.cancelled[sid].is_set() for sid in ids)
         assert errors.qsize() == 2
         assert not pipeline.agent_tasks
-        assert pipeline._state("lecture")["generation_state"] == "finished"
+        assert pipeline.status("lecture")["generation_state"] == "finished"
 
 
 def test_writer_preview_is_published_before_terminal_result(tmp_path):
@@ -143,3 +143,37 @@ def test_note_runs_send_only_session_and_instruction(tmp_path):
             assert "lecture" in sdk.runs[0]["instruction"]
         finally:
             agent.close(session.id)
+
+
+def test_empty_finalization_releases_generation(tmp_path):
+    with pipeline_context(tmp_path, None) as (pipeline, agent, sdk):
+        session = pipeline.ctx.streams.start_session()
+        session.input_done = True
+        with pipeline.condition:
+            assert pipeline.finalize(session.session_id)
+            pipeline._schedule(session.session_id)
+            assert (
+                pipeline.status(session.session_id)["generation_state"] == "not_started"
+            )
+            assert not pipeline.queue
+            assert not pipeline.stop(session.session_id)
+
+
+def test_chunk_only_completion_releases_generation(tmp_path):
+    with pipeline_context(tmp_path, None) as (pipeline, agent, sdk):
+        pipeline.settings.set("instant-summarize.enabled", True)
+        pipeline.settings.set("summarize.on_stop", "skip")
+        session = pipeline.ctx.streams.start_session()
+        with pipeline.condition:
+            state = pipeline._state(session.session_id)
+            assert (
+                pipeline.status(session.session_id)["generation_state"] == "generating"
+            )
+            state["chunks"] = [{"state": "empty", "index": 0, "end": 600}]
+            session.input_done = True
+            assert pipeline.status(session.session_id)["generation_state"] == "finished"
+            assert not pipeline.stop(session.session_id)
+            assert pipeline.delete(session.session_id)
+            assert (
+                pipeline.status(session.session_id)["generation_state"] == "not_started"
+            )
