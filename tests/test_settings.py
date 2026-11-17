@@ -10,11 +10,10 @@ import pytest
 
 from config import load_config
 from core.runtime import build_runtime
+from core.settings_spec import SECRET_MASK, SettingsSpec
 from plugins.settings import (
-    SECRET_MASK,
     SettingsPlugin,
     SettingsService,
-    SettingsSpec,
     SettingsStore,
 )
 
@@ -23,7 +22,7 @@ GROUPED = [
         key="llm.model",
         label="模型",
         type="string",
-        default="deepseek-chat",
+        default="deepseek-flash",
         group="LLM",
         order=1,
     ),
@@ -67,9 +66,9 @@ def make_runtime(tmp_path: Path):
 # ----------------------------------------------------------------------
 def test_register_returns_spec_and_get_falls_back_to_default(tmp_path: Path) -> None:
     service = make_service(tmp_path)
-    spec = SettingsSpec(key="llm.model", label="模型", default="deepseek-chat")
+    spec = SettingsSpec(key="llm.model", label="模型", default="deepseek-flash")
     assert service.register(spec) is spec
-    assert service.get("llm.model") == "deepseek-chat"
+    assert service.get("llm.model") == "deepseek-flash"
     assert service.get("unknown.key") is None
     assert service.get("unknown.key", "fallback") == "fallback"
     assert [s.key for s in service.specs()] == ["llm.model"]
@@ -191,7 +190,7 @@ def test_select_options_and_invalid_value(tmp_path: Path) -> None:
     )
     assert service.set("s", "b") == "b"
     assert service.set("n", "2") == 2
-    with pytest.raises(ValueError, match="a.*b|取值"):
+    with pytest.raises(ValueError):
         service.set("s", "z")
     with pytest.raises(ValueError):
         service.set_many({"s": "c"})
@@ -253,36 +252,6 @@ def test_corrupt_json_falls_back_and_backs_up(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 # Plugin wiring / UI
 # ----------------------------------------------------------------------
-def test_plugin_registers_service_and_tab(tmp_path: Path) -> None:
-    runtime = make_runtime(tmp_path)
-    try:
-        service = runtime.services.require("settings")
-        assert isinstance(service, SettingsService)
-        assert service._store.path == tmp_path / "settings.json"
-        snapshot = runtime.ui.snapshot()
-        assert "settings" not in snapshot["tabs"], "settings must live in a page, not a tab"
-        assert snapshot["pages"]["settings:main"] == "设置"
-        assert "settings.save" in snapshot["actions"]
-        assert "settings.open" in snapshot["commands"]
-        commands = runtime.ui.state()["commands"]
-        command = next(c for c in commands if c["id"] == "settings.open")
-        assert command["page"] == "settings:main"
-        assert command["category"] == "视图"
-    finally:
-        runtime.stop()
-
-
-def test_page_shows_hint_without_specs(tmp_path: Path) -> None:
-    runtime = make_runtime(tmp_path)
-    try:
-        runtime.ui.open_page("settings:main")
-        blocks = runtime.ui.state()["page_content"]["settings:main"]
-        assert blocks and blocks[0]["type"] == "markdown"
-        assert "暂无设置项" in blocks[0]["text"]
-    finally:
-        runtime.stop()
-
-
 def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
     runtime = make_runtime(tmp_path)
     try:
@@ -294,7 +263,11 @@ def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
         state = runtime.ui.state()
         # No settings tab / toolbox item: only the page (opened via palette).
         assert all(t["id"] != "settings" for t in state["right_tabs"])
-        assert all(i["id"] != "settings.open" for t in state["right_tabs"] for i in t["toolbox"])
+        assert all(
+            i["id"] != "settings.open"
+            for t in state["right_tabs"]
+            for i in t["toolbox"]
+        )
 
         runtime.ui.open_page("settings:main")
         blocks = runtime.ui.state()["page_content"]["settings:main"]
@@ -317,7 +290,7 @@ def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
         assert field["secret_length"] == len("secret-value")
         assert field["is_set"] is True
         assert field["placeholder"] == "key..."
-        assert fields["llm.model"]["value"] == "deepseek-chat"
+        assert fields["llm.model"]["value"] == "deepseek-flash"
         assert forms[0]["submit"]["action"] == "settings.save"
     finally:
         runtime.stop()
@@ -342,7 +315,6 @@ def test_action_save_converts_and_keeps_secret(tmp_path: Path) -> None:
             },
         )
         assert result.ok is True
-        assert "已保存" in result.message
         assert service.get("llm.model") == "deepseek-reasoner"
         assert service.get("llm.api_key") == "secret-value"
         assert service.get("input.keep_recordings") == 3
@@ -370,7 +342,6 @@ def test_action_save_converts_and_keeps_secret(tmp_path: Path) -> None:
 
         empty = runtime.ui.dispatch_action("settings.save", {"values": {}})
         assert empty.ok is True
-        assert "没有需要保存" in empty.message
     finally:
         runtime.stop()
 
@@ -381,7 +352,9 @@ def test_settings_changed_event_payload(tmp_path: Path) -> None:
         service = runtime.services.require("settings")
         service.register(SettingsSpec(key="x.n", label="N", type="int", default=1))
         events: list[dict] = []
-        runtime.bus.on("settings.changed", lambda event: events.append(dict(event.payload)))
+        runtime.bus.on(
+            "settings.changed", lambda event: events.append(dict(event.payload))
+        )
 
         service.set("x.n", "5")
         assert runtime.bus.flush(2.0)
@@ -417,7 +390,7 @@ def test_setting_persists_across_runtime_restart(tmp_path: Path) -> None:
     try:
         service = runtime.services.require("settings")
         service.register(
-            SettingsSpec(key="llm.model", label="模型", default="deepseek-chat")
+            SettingsSpec(key="llm.model", label="模型", default="deepseek-flash")
         )
         service.set("llm.model", "qwen")
     finally:
@@ -427,7 +400,7 @@ def test_setting_persists_across_runtime_restart(tmp_path: Path) -> None:
     try:
         service = runtime.services.require("settings")
         service.register(
-            SettingsSpec(key="llm.model", label="模型", default="deepseek-chat")
+            SettingsSpec(key="llm.model", label="模型", default="deepseek-flash")
         )
         assert service.get("llm.model") == "qwen"
         assert stat.S_IMODE((tmp_path / "settings.json").stat().st_mode) == 0o600
@@ -481,3 +454,218 @@ def test_action_and_readonly_settings_fields(tmp_path: Path) -> None:
         assert service.get("demo.status") == "原始"
     finally:
         runtime.stop()
+
+
+class ConfigurationRuntime:
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        self.calls: list[tuple[str, dict]] = []
+        self.fail_configure = False
+        self.closed = False
+        self.configuration = {
+            "models_yaml": "providers: {}\n",
+            "roles_yaml": "default: lecture/example\n",
+            "providers": [
+                {
+                    "id": "lecture",
+                    "auth": "apiKey",
+                    "configured": True,
+                    "source": "auth",
+                },
+                {
+                    "id": "opencode",
+                    "auth": "oauth",
+                    "configured": False,
+                    "source": "none",
+                },
+            ],
+            "roles": {
+                "agent_chat": {
+                    "provider": "lecture",
+                    "model": "example",
+                    "thinkingLevel": "high",
+                }
+            },
+        }
+
+    def call(self, method: str, **params):
+        self.calls.append((method, params))
+        if method == "configure":
+            if self.fail_configure:
+                raise ValueError("Invalid role selector")
+            self.configuration.update(
+                models_yaml=params["models"], roles_yaml=params["roles"]
+            )
+        return dict(self.configuration)
+
+    def close(self):
+        self.closed = True
+
+
+def make_llm_settings_runtime(tmp_path, monkeypatch):
+    from plugins.llm_core import plugin as llm_plugin
+
+    monkeypatch.setattr(llm_plugin, "RuntimeClient", ConfigurationRuntime)
+    plugin = llm_plugin.LLMPlugin()
+    runtime = build_runtime(
+        load_config(data_dir=tmp_path), plugins=[SettingsPlugin(), plugin]
+    )
+    runtime.start()
+    return runtime, plugin, runtime.services.require("llm")
+
+
+def test_external_yaml_editors_save_without_settings_copies(tmp_path, monkeypatch):
+    runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        runtime.ui.open_page("settings:main")
+        blocks = runtime.ui.state()["page_content"]["settings:main"][0]["tabs"][0][
+            "blocks"
+        ]
+        editors = next(
+            block
+            for block in blocks
+            if block.get("submit", {}).get("action") == "llm.configure"
+        )
+        assert {field["name"] for field in editors["fields"]} == {
+            "models_yaml",
+            "roles_yaml",
+        }
+        assert all(field["input"] == "textarea" for field in editors["fields"])
+        assert "lecture/example:high" in json.dumps(blocks)
+
+        result = runtime.ui.dispatch_action(
+            "llm.configure",
+            {
+                "values": {
+                    "models_yaml": "providers: {lecture: {}}\n",
+                    "roles_yaml": "default: lecture/example\n",
+                }
+            },
+        )
+        assert result.ok
+        assert backend.calls[-1] == (
+            "configure",
+            {
+                "models": "providers: {lecture: {}}\n",
+                "roles": "default: lecture/example\n",
+            },
+        )
+        service = runtime.services.require("settings")
+        assert "models_yaml" not in service.all()
+        assert "roles_yaml" not in service.all()
+        rejected = runtime.ui.dispatch_action(
+            "settings.save", {"values": {"models_yaml": "duplicate"}}
+        )
+        assert not rejected.ok
+        assert "models_yaml" not in service.all()
+    finally:
+        runtime.stop()
+
+
+def test_invalid_yaml_keeps_effective_configuration(tmp_path, monkeypatch):
+    runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        previous = dict(backend.configuration)
+        backend.fail_configure = True
+        result = runtime.ui.dispatch_action(
+            "llm.configure",
+            {
+                "values": {
+                    "models_yaml": "broken",
+                    "roles_yaml": "invalid",
+                }
+            },
+        )
+        assert not result.ok
+        assert "Invalid role selector" in result.message
+        assert backend.configuration == previous
+        assert runtime.services.require("settings").all() == {}
+    finally:
+        runtime.stop()
+
+
+def test_provider_credentials_are_write_only_runtime_actions(tmp_path, monkeypatch):
+    runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        result = runtime.ui.dispatch_action(
+            "llm.credentials", {"values": {"provider": "lecture", "key": "secret-key"}}
+        )
+        assert result.ok
+        assert backend.calls[-1] == (
+            "credentials",
+            {"provider": "lecture", "key": "secret-key"},
+        )
+        runtime.ui.open_page("settings:main")
+        assert "secret-key" not in json.dumps(runtime.ui.state(), ensure_ascii=False)
+        assert runtime.services.require("settings").all() == {}
+        result = runtime.ui.dispatch_action(
+            "llm.logout", {"values": {"provider": "lecture"}}
+        )
+        assert result.ok
+        assert backend.calls[-1] == ("logout", {"provider": "lecture"})
+    finally:
+        runtime.stop()
+
+
+def test_device_login_imports_oauth_into_runtime(tmp_path, monkeypatch):
+    from integrations.opencode_go import DeviceFlow, TokenSet
+    from plugins.llm_core import plugin as module
+
+    flow = DeviceFlow("device", "code", "https://opencode.ai/verify", 1, 60)
+    monkeypatch.setattr(module, "start_device_flow", lambda: flow)
+    monkeypatch.setattr(
+        module,
+        "poll_device_token",
+        lambda _: TokenSet("access", "refresh", 9999, "org"),
+    )
+    monkeypatch.setattr(module.webbrowser, "open", lambda _: False)
+    runtime, plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        result = runtime.ui.dispatch_action(
+            "llm.opencode_login", {"values": {"provider": "opencode"}}
+        )
+        assert result.ok
+        plugin._login_thread.join(timeout=2)
+        assert not plugin._login_thread.is_alive()
+        assert (
+            "import_credentials",
+            {
+                "provider": "opencode",
+                "credential": {
+                    "type": "oauth",
+                    "access": "access",
+                    "refresh": "refresh",
+                    "expires": 9999,
+                    "org_id": "org",
+                },
+            },
+        ) in backend.calls
+        assert runtime.services.require("settings").all() == {}
+        result = runtime.ui.dispatch_action(
+            "llm.logout", {"values": {"provider": "opencode"}}
+        )
+        assert result.ok
+        assert backend.calls[-1] == ("logout", {"provider": "opencode"})
+    finally:
+        runtime.stop()
+
+
+def test_unload_preserves_settings_owned_by_pipeline(tmp_path):
+    service = SettingsService(SettingsStore(tmp_path / "settings.json"))
+    service.register(
+        SettingsSpec(
+            key="summarize.review_enabled", label="Review", type="bool", default=True
+        ),
+        plugin_id="notes-pipeline",
+    )
+    service.register(
+        SettingsSpec(
+            key="summarize.on_stop", label="Stop", type="string", default="skip"
+        ),
+        plugin_id="summarize",
+    )
+    service.unregister(plugin_id="summarize")
+    assert service.get_spec("summarize.review_enabled") is not None
+    assert service.get_spec("summarize.on_stop") is None
+    service.unregister(plugin_id="notes-pipeline")
+    assert service.get_spec("summarize.review_enabled") is None

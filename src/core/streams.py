@@ -92,10 +92,6 @@ class _TimeIndexedStream:
             return self._total
 
     @property
-    def total_time(self) -> float:
-        return self.duration
-
-    @property
     def chunk_count(self) -> int:
         with self._lock:
             return len(self._chunks)
@@ -135,7 +131,9 @@ class _TimeIndexedStream:
                 self._starts.append(old_total)
                 start = old_total
             if hasattr(chunk, "index"):
-                chunk = type(chunk)(index=len(self._chunks), start=start, end=end, data=chunk.data)
+                chunk = type(chunk)(
+                    index=len(self._chunks), start=start, end=end, data=chunk.data
+                )
             else:
                 chunk = type(chunk)(start=start, end=end, data=chunk.data)
             self._chunks.append(chunk)
@@ -237,9 +235,6 @@ class AudioStream(_TimeIndexedStream):
     def bytes_per_second(self) -> int:
         return self.sample_rate * self.channels * self.sample_width
 
-    def duration_to_bytes(self, duration: float) -> int:
-        return max(0, int(round(float(duration) * self.bytes_per_second)))
-
     def bytes_to_duration(self, size: int) -> float:
         return float(size) / float(self.bytes_per_second)
 
@@ -253,7 +248,55 @@ class AudioStream(_TimeIndexedStream):
         if dur <= 0:
             raise ValueError("audio duration must be positive")
         total, _ = self.snapshot()
-        self._append(AudioChunk(start=total, end=total + dur, data=data), start=total, end=total + dur)
+        self._append(
+            AudioChunk(start=total, end=total + dur, data=data),
+            start=total,
+            end=total + dur,
+        )
+
+    def discard(self, duration: float) -> None:
+        """Advance the timeline without retaining PCM or inserting silence."""
+        duration = float(duration)
+        if duration <= 0:
+            return
+        with self._cv:
+            old_total = self._total
+            self._total += duration
+            new_total = self._total
+            count = len(self._chunks)
+            self._cv.notify_all()
+        if self._notify is not None:
+            self._notify(
+                stream=self.stream_name,
+                session_id=self.session_id,
+                old_len=old_total,
+                new_len=new_total,
+                old_count=count,
+                new_count=count,
+                first_index=count,
+                chars=0,
+            )
+
+    @property
+    def earliest_time(self) -> float:
+        """Return the first retained PCM time, or the logical end when empty."""
+        with self._lock:
+            return self._chunks[0].start if self._chunks else self._total
+
+    def buffered_ranges(
+        self, start: float = 0.0, end: float | None = None
+    ) -> list[tuple[float, float]]:
+        """Return continuous intervals that contain retained PCM."""
+        with self._lock:
+            end = self._total if end is None else float(end)
+            ranges: list[tuple[float, float]] = []
+            for chunk in self._overlapping(start, end):
+                lo, hi = max(start, chunk.start), min(end, chunk.end)
+                if ranges and lo <= ranges[-1][1] + 1e-9:
+                    ranges[-1] = (ranges[-1][0], hi)
+                else:
+                    ranges.append((lo, hi))
+            return ranges
 
     def read(self, start: float, end: float) -> bytes:
         bps = self.bytes_per_second
@@ -333,7 +376,9 @@ class VideoStream(_TimeIndexedStream):
 class TextStream(Sequence[TextItem]):
     """Append-only text stream; ``len()`` is the number of items."""
 
-    def __init__(self, session_id: str, name: str = "text", *, notify: Notify | None = None) -> None:
+    def __init__(
+        self, session_id: str, name: str = "text", *, notify: Notify | None = None
+    ) -> None:
         self.session_id = session_id
         self.name = name
         self._notify = notify
@@ -404,10 +449,6 @@ class TextStream(Sequence[TextItem]):
             )
         return item
 
-    def item_at(self, index: int) -> TextItem:
-        with self._lock:
-            return self._items[index]
-
     def text_since(self, index: int = 0) -> str:
         with self._lock:
             start = max(0, int(index))
@@ -435,9 +476,8 @@ class BacklogGate:
     the (slower) STT/VLM consumers catch up.  Readers call :meth:`wait` before
     appending; consumers call :meth:`release` after committing a window.
 
-    ``limit <= 0`` disables the gate (live playback stays realtime anyway).
-    A stalled consumer trips ``stall_timeout`` and the gate disables itself
-    instead of blocking the session forever.
+    ``limit <= 0`` disables the gate. A stalled consumer disables the gate
+    unless ``fail_closed`` requires the producer to stop instead.
     """
 
     def __init__(
@@ -454,6 +494,7 @@ class BacklogGate:
         self._released = 0.0
         self._last_release = time.monotonic()
         self._closed = False
+        self._fail_closed = False
 
     @property
     def limit(self) -> float:
@@ -465,10 +506,13 @@ class BacklogGate:
         with self._lock:
             return self._released
 
-    def configure(self, limit: float) -> None:
+    def configure(
+        self, limit: float, *, released: float = 0.0, fail_closed: bool = False
+    ) -> None:
         with self._lock:
             self._limit = max(0.0, float(limit))
-            self._released = 0.0
+            self._released = max(0.0, float(released))
+            self._fail_closed = bool(fail_closed)
             self._last_release = time.monotonic()
             self._closed = False
             self._lock.notify_all()
@@ -487,7 +531,7 @@ class BacklogGate:
     def wait(self, media_end: float) -> bool:
         """Block until ``media_end - released <= limit``.
 
-        Returns False when the gate was closed (producer should stop).
+        Returns False when the gate closes or a fail-closed gate times out.
         """
 
         with self._lock:
@@ -500,6 +544,12 @@ class BacklogGate:
                     self._stall_timeout > 0
                     and time.monotonic() - self._last_release > self._stall_timeout
                 ):
+                    if self._fail_closed:
+                        _log.error(
+                            "backlog gate %s stalled; stopping producer", self.name
+                        )
+                        self._closed = True
+                        return False
                     _log.warning(
                         "backlog gate %s stalled for %.0fs; disabling",
                         self.name,
@@ -509,6 +559,14 @@ class BacklogGate:
                     return True
                 self._lock.wait(0.2)
             return False
+
+
+@dataclass(slots=True)
+class SourceProgress:
+    before: float = 0.0
+    final: bool = False
+    enabled: bool = True
+    errors: list[dict] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -522,16 +580,16 @@ class StreamSet:
     visual: TextStream
     ended_at: float | None = None
     end_reason: str = ""
-    audio_gate: BacklogGate = field(
-        default_factory=lambda: BacklogGate("audio")
-    )
-    video_gate: BacklogGate = field(
-        default_factory=lambda: BacklogGate("video")
-    )
+    audio_gate: BacklogGate = field(default_factory=lambda: BacklogGate("audio"))
+    video_gate: BacklogGate = field(default_factory=lambda: BacklogGate("video"))
     # Set by the input plugin once all ffmpeg readers reached EOF; consumers
     # use it to drain their queues before the session is ended.
     input_done: bool = False
     input_done_at: float | None = None
+    audio_input_done: bool = False
+    video_input_done: bool = False
+    transcript_progress: SourceProgress = field(default_factory=SourceProgress)
+    visual_progress: SourceProgress = field(default_factory=SourceProgress)
 
     def stream(self, name: str) -> AudioStream | VideoStream | TextStream:
         streams: dict[str, AudioStream | VideoStream | TextStream] = {
@@ -691,7 +749,9 @@ class StreamHub:
                 previous_stopped = previous
                 previous_id = previous.session_id
             else:
-                previous_id = previous.session_id if previous.session_id != "boot" else None
+                previous_id = (
+                    previous.session_id if previous.session_id != "boot" else None
+                )
             new_set = self._create(self._new_session_id(), meta or {})
             self._current = new_set
             self._notes_session_id = new_set.session_id
@@ -780,7 +840,11 @@ class StreamHub:
         if self._emit is None:
             return
         if stream in ("audio", "video"):
-            interval = self.audio_emit_interval if stream == "audio" else self.video_emit_interval
+            interval = (
+                self.audio_emit_interval
+                if stream == "audio"
+                else self.video_emit_interval
+            )
             key = (session_id, stream)
             with self._lock:
                 last = self._last_emit.get(key, 0.0)
@@ -845,6 +909,65 @@ class StreamHub:
                 if s.session_id == session_id:
                     return s
         return None
+
+    def _text_progress_locked(self, session_id: str, stream: str) -> SourceProgress:
+        if stream not in ("transcript", "visual"):
+            raise ValueError(f"Invalid text stream: {stream}")
+        session = self.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        return getattr(session, f"{stream}_progress")
+
+    def text_progress(self, session_id: str, stream: str) -> SourceProgress:
+        with self._lock:
+            state = self._text_progress_locked(session_id, stream)
+            return SourceProgress(
+                state.before,
+                state.final,
+                state.enabled,
+                [dict(error) for error in state.errors],
+            )
+
+    def seal_text(
+        self,
+        session_id: str,
+        stream: str,
+        before: float,
+        *,
+        final: bool = False,
+        error: dict | None = None,
+    ) -> None:
+        with self._lock:
+            state = self._text_progress_locked(session_id, stream)
+            state.before = max(state.before, float(before))
+            state.final = state.final or final
+            if error is not None:
+                state.errors.append(dict(error))
+            payload = dict(
+                session_id=session_id,
+                stream=stream,
+                before=state.before,
+                final=state.final,
+                enabled=state.enabled,
+                error=error,
+            )
+        if self._emit is not None:
+            self._emit("stream.sealed", **payload)
+
+    def set_text_enabled(self, session_id: str, stream: str, enabled: bool) -> None:
+        with self._lock:
+            state = self._text_progress_locked(session_id, stream)
+            state.enabled = bool(enabled)
+            payload = dict(
+                session_id=session_id,
+                stream=stream,
+                before=state.before,
+                final=state.final,
+                enabled=state.enabled,
+                error=None,
+            )
+        if self._emit is not None:
+            self._emit("stream.sealed", **payload)
 
     def status(self) -> dict[str, Any]:
         return self.current.status()
@@ -923,11 +1046,10 @@ class StreamHub:
                 values.append(float(fn() or 0.0))
             except Exception:  # noqa: BLE001 - a broken consumer must not stall input
                 _log.exception("consumer cursor failed for kind=%s", kind)
-        positive = [value for value in values if value > 0.0]
-        return min(positive) if positive else 0.0
+        return min(values) if values else 0.0
 
     def consumer_gate_limit(self, kind: str) -> float:
-        """Largest backlog (seconds) the ``kind`` consumers allow, else ``0.0``."""
+        """Return the strictest positive consumer backlog limit, or zero."""
 
         limits: list[float] = []
         for fn in self._consumer_fns(kind, "gate_limit_fn"):
@@ -938,15 +1060,14 @@ class StreamHub:
                 continue
             if limit > 0.0:
                 limits.append(limit)
-        return max(limits) if limits else 0.0
+        return min(limits) if limits else 0.0
 
     def consumers_busy(self) -> list[str]:
         """Plugin ids whose consumer currently reports itself busy."""
 
         with self._lock:
             entries = [
-                (pid, dict(entry))
-                for (pid, _kind), entry in self._consumers.items()
+                (pid, dict(entry)) for (pid, _kind), entry in self._consumers.items()
             ]
         busy: list[str] = []
         for pid, entry in entries:

@@ -12,7 +12,7 @@ per page, not global: ``summarize`` registers "提问" on the pages it opens, so
 the same page re-used by ``instant-summarize`` shows no summarize menu item.
 
 Q&A pairs written by such a menu item live *inside* the note file as
-``qa`` blocks (see :mod:`plugins.reader.qa`); the reader renders them with its
+``qa`` blocks (see :mod:`core.note_document`); the reader renders them with its
 own collapsible component and offers one-click deletion.
 """
 
@@ -20,13 +20,16 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping
 
 from core.plugin import Plugin, PluginContext
+from core.file_access import path_lock, publication_lock
+from contextlib import ExitStack
 from core.ui import render_markdown
 
-from . import qa
+from core import note_document as qa
 
 PAGE_ID = "reader:main"
 PAGE_PREFIX = "reader:notes:"
@@ -69,6 +72,14 @@ class ReaderService:
             owner=owner,
         )
 
+    def register_activity_provider(self, owner, provider):
+        with self._plugin._lock:
+            self._plugin._activity_providers[owner] = provider
+
+    def unregister_activity_provider(self, owner):
+        with self._plugin._lock:
+            self._plugin._activity_providers.pop(owner, None)
+
     # -- selection menu ------------------------------------------------
     def register_selection_action(
         self, page: str, item: dict[str, Any], *, owner: str = ""
@@ -84,9 +95,7 @@ class ReaderService:
 
         self._plugin.unregister_selection_action(page, item_id, owner=owner)
 
-    def selection_actions(
-        self, page: str, owner: str = ""
-    ) -> list[dict[str, Any]]:
+    def selection_actions(self, page: str, owner: str = "") -> list[dict[str, Any]]:
         return self._plugin.selection_actions(page, owner)
 
     # -- inline Q&A blocks ---------------------------------------------
@@ -144,6 +153,18 @@ class ReaderService:
             history_words=history_words,
         )
 
+    def navigation(self, page_id):
+        with self._plugin._lock:
+            return str(self._plugin._states.get(page_id, {}).get("active", ""))
+
+    def select_document(self, page_id, key):
+        with self._plugin._lock:
+            state = self._plugin._states[page_id]
+            if key not in {doc["key"] for doc in state["docs"]}:
+                raise KeyError("Unknown note document")
+            state["active"] = key
+            state["sequence"] = int(state.get("sequence", 0)) + 1
+
 
 class ReaderPlugin(Plugin):
     """One reader page per notes session (plus a fallback ``reader:main``)."""
@@ -156,6 +177,7 @@ class ReaderPlugin(Plugin):
         self.ctx = ctx
         self._lock = threading.RLock()
         self._states: dict[str, dict[str, Any]] = {}
+        self._activity_providers = {}
         # page id → owner → item id → normalized menu item
         self._selection: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
         # item id → normalized menu item, offered on every reader page
@@ -172,9 +194,7 @@ class ReaderPlugin(Plugin):
             plugin_id=self.id,
         )
         ctx.ui.register_action(OPEN_ACTION, self._act_open, plugin_id=self.id)
-        ctx.ui.register_action(
-            DELETE_QA_ACTION, self._act_delete_qa, plugin_id=self.id
-        )
+        ctx.ui.register_action(DELETE_QA_ACTION, self._act_delete_qa, plugin_id=self.id)
         ctx.ui.register_action(
             COLLAPSE_QA_ACTION, self._act_collapse_qa, plugin_id=self.id
         )
@@ -329,7 +349,7 @@ class ReaderPlugin(Plugin):
     def unregister_selection_action(
         self, page: str = "", item_id: str = "", *, owner: str = ""
     ) -> None:
-        """Remove one menu item — or every item registered by *owner*.
+        """Remove one menu item or every item registered by *owner*.
 
         With an empty *item_id* and a non-empty *owner* this purges that
         plugin's items from every page and from the global bucket, which is
@@ -358,9 +378,7 @@ class ReaderPlugin(Plugin):
                     self._global_selection.pop(key, None)
         self.ctx.ui.refresh(f"reader.selection:purge:{owner}")
 
-    def selection_actions(
-        self, page: str, owner: str = ""
-    ) -> list[dict[str, Any]]:
+    def selection_actions(self, page: str, owner: str = "") -> list[dict[str, Any]]:
         """Return the menu items offered on *page* for a document of *owner*."""
 
         page_id = self._as_page_id(page)
@@ -492,7 +510,8 @@ class ReaderPlugin(Plugin):
         resolved = self._known_path(path)
         if resolved is None:
             raise ValueError("未知的文稿路径")
-        text = resolved.read_text("utf-8")
+        with publication_lock(resolved.parent), path_lock(resolved):
+            text = resolved.read_text("utf-8")
         blocks = qa.parse_blocks(text)
         current = next((b for b in blocks if b.id == qa_id), None)
         if current is None:
@@ -530,7 +549,7 @@ class ReaderPlugin(Plugin):
         resolved = self._known_path(path)
         if resolved is None:
             raise ValueError("未知的文稿路径")
-        with self._lock:
+        with publication_lock(resolved.parent), path_lock(resolved):
             text = resolved.read_text("utf-8")
             updated, info = mutate(text)
             resolved.write_text(updated, "utf-8")
@@ -562,14 +581,12 @@ class ReaderPlugin(Plugin):
         if resolved is None:
             return {"ok": False, "message": "未知的文稿路径"}
         try:
-            text = resolved.read_text("utf-8")
-        except OSError as exc:
-            return {"ok": False, "message": f"读取失败：{exc}"}
-        updated = qa.remove_block(text, qa_id)
-        if updated is None:
-            return {"ok": False, "message": "未找到这条问答"}
-        try:
-            resolved.write_text(updated, "utf-8")
+            with publication_lock(resolved.parent), path_lock(resolved):
+                text = resolved.read_text("utf-8")
+                updated = qa.remove_block(text, qa_id)
+                if updated is None:
+                    return {"ok": False, "message": "未找到这条问答"}
+                resolved.write_text(updated, "utf-8")
         except OSError as exc:
             return {"ok": False, "message": f"写入失败：{exc}"}
         return {"ok": True, "message": "已删除这条问答"}
@@ -617,10 +634,25 @@ class ReaderPlugin(Plugin):
         sequence = int(state.get("sequence") or 0)
 
         tabs: list[dict[str, Any]] = []
+        with ExitStack() as stack:
+            for directory in sorted(
+                {Path(doc["path"]).resolve().parent for doc in docs}
+            ):
+                stack.enter_context(publication_lock(directory))
+            texts = {doc["path"]: _read_text(doc["path"]) for doc in docs}
         for doc in docs:
-            text = _read_text(doc["path"])
+            text = texts[doc["path"]]
             owner = str(doc.get("owner", "") or state.get("owner") or "")
             blocks = _document_blocks(text, doc["path"])
+            with self._lock:
+                providers = tuple(self._activity_providers.values())
+            for block in blocks:
+                if block.get("type") == "qa" and block.get("status") == "pending":
+                    for provider in providers:
+                        activity = provider(doc["path"], block["id"])
+                        if activity is not None:
+                            block["activity"] = activity
+                            break
             tabs.append(
                 {
                     "title": doc["label"],
@@ -637,11 +669,7 @@ class ReaderPlugin(Plugin):
             )
 
         return [
-            *(
-                [{"type": "markdown", "text": f"### {title}"}]
-                if title
-                else []
-            ),
+            *([{"type": "markdown", "text": f"### {title}"}] if title else []),
             {
                 "type": "tabs",
                 "id": f"{page_id}:{sequence}",
@@ -651,46 +679,60 @@ class ReaderPlugin(Plugin):
 
 
 def _document_blocks(text: str, path: str) -> list[dict[str, Any]]:
-    """Render one document: markdown chunks plus custom Q&A components."""
+    """Parse the whole note before separating its Q&A components."""
 
     if not text.strip():
         return [{"type": "text", "text": "（暂无内容）"}]
 
+    segments = qa.segments(text)
+    prefix = f"<!--reader-qa-{sha256(text.encode()).hexdigest()}-"
+    source = []
+    for index, (kind, payload) in enumerate(segments):
+        source.append(str(payload) if kind == "markdown" else f"{prefix}{index}-->")
+    # Footnote definitions must remain visible to references across Q&A boundaries.
+    remaining_html = render_markdown("\n\n".join(source), document_id=path)
     blocks: list[dict[str, Any]] = []
-    for kind, payload in qa.segments(text):
-        if kind == "qa":
-            block = payload
-            assert isinstance(block, qa.QABlock)
-            blocks.append(
-                {
-                    "type": "qa",
-                    "id": block.id,
-                    "path": path,
-                    "ts": block.ts,
-                    "status": block.status,
-                    "intensity": block.intensity,
-                    "collapsed": block.collapsed,
-                    "question": block.question,
-                    "answer": block.answer,
-                    "question_html": render_markdown(block.question),
-                    "answer_html": render_markdown(block.answer)
+    markdown_text = ""
+    for index, (kind, payload) in enumerate(segments):
+        if kind == "markdown":
+            markdown_text += str(payload)
+            continue
+        html, _, remaining_html = remaining_html.partition(f"{prefix}{index}-->")
+        if html.strip():
+            blocks.append({"type": "markdown", "text": markdown_text, "html": html})
+        markdown_text = ""
+        block = payload
+        assert isinstance(block, qa.QABlock)
+        blocks.append(
+            {
+                "type": "qa",
+                "id": block.id,
+                "path": path,
+                "ts": block.ts,
+                "status": block.status,
+                "intensity": block.intensity,
+                "collapsed": block.collapsed,
+                "question": block.question,
+                "answer": block.answer,
+                "question_html": render_markdown(
+                    block.question, document_id=f"{path}:{block.id}:question"
+                ),
+                "answer_html": (
+                    render_markdown(
+                        block.answer, document_id=f"{path}:{block.id}:answer"
+                    )
                     if block.answer
-                    else "",
-                    "delete_action": DELETE_QA_ACTION,
-                    "collapse_action": COLLAPSE_QA_ACTION,
-                }
-            )
-            continue
-        chunk_text = str(payload)
-        if not chunk_text.strip():
-            continue
-        blocks.extend(
-            {"type": "markdown", "text": chunk}
-            for chunk in split_markdown(chunk_text)
+                    else ""
+                ),
+                "delete_action": DELETE_QA_ACTION,
+                "collapse_action": COLLAPSE_QA_ACTION,
+            }
         )
-    if not blocks:
-        return [{"type": "text", "text": "（暂无内容）"}]
-    return blocks
+    if remaining_html.strip():
+        blocks.append(
+            {"type": "markdown", "text": markdown_text, "html": remaining_html}
+        )
+    return blocks or [{"type": "text", "text": "（暂无内容）"}]
 
 
 def _read_text(path: str) -> str:
@@ -698,28 +740,3 @@ def _read_text(path: str) -> str:
         return Path(path).read_text("utf-8")
     except OSError:
         return ""
-
-
-def split_markdown(text: str, max_chars: int = 4000) -> list[str]:
-    """Split a document into paragraph-aligned chunks for KaTeX rendering."""
-
-    paragraphs = text.split("\n\n")
-    chunks: list[str] = []
-    current: list[str] = []
-    size = 0
-    in_display = False
-    in_fence = False
-    for para in paragraphs:
-        if current and size >= max_chars and not in_display and not in_fence:
-            chunks.append("\n\n".join(current))
-            current = []
-            size = 0
-        current.append(para)
-        size += len(para) + 2
-        if para.count("$$") % 2:
-            in_display = not in_display
-        if para.count("```") % 2:
-            in_fence = not in_fence
-    if current:
-        chunks.append("\n\n".join(current))
-    return chunks or [text]

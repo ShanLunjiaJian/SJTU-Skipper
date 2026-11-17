@@ -12,14 +12,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
+import httpx2
 
-OPENCODE_GO_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
-"""OpenAI-compatible Go endpoint.
-
-The model catalog declares this exact base URL for ``chat-completions``; the
-older ``/zen/go/v1`` path still answers but is not the documented one.
-"""
 DEVICE_CODE_URL = "https://opencode.ai/console/auth/device/code"
 TOKEN_URL = "https://opencode.ai/console/auth/device/token"
 OAUTH_CLIENT_ID = "opencode-cli"
@@ -69,12 +63,12 @@ def start_device_flow() -> DeviceFlow:
     """Start OpenCode's device authorization flow."""
 
     try:
-        response = httpx.post(
+        response = httpx2.post(
             DEVICE_CODE_URL,
             json={"client_id": OAUTH_CLIENT_ID, "supports_org_scope": True},
             timeout=30,
         )
-    except httpx.HTTPError as exc:
+    except httpx2.HTTPError as exc:
         raise OpenCodeGoError(f"无法连接 OpenCode 授权服务：{exc}") from exc
     if response.status_code != 200:
         raise OpenCodeGoError(
@@ -86,7 +80,9 @@ def start_device_flow() -> DeviceFlow:
         raise OpenCodeGoError("OpenCode 授权响应不是 JSON。") from exc
     device_code = str(data.get("device_code") or "")
     user_code = str(data.get("user_code") or "")
-    verification = str(data.get("verification_uri_complete") or data.get("verification_uri") or "")
+    verification = str(
+        data.get("verification_uri_complete") or data.get("verification_uri") or ""
+    )
     if not device_code or not verification:
         raise OpenCodeGoError("OpenCode 授权响应缺少 device_code/verification_uri。")
     return DeviceFlow(
@@ -102,7 +98,7 @@ def poll_device_token(flow: DeviceFlow) -> TokenSet | None:
     """Poll once; return ``None`` while authorization is still pending."""
 
     try:
-        response = httpx.post(
+        response = httpx2.post(
             TOKEN_URL,
             json={
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
@@ -111,7 +107,7 @@ def poll_device_token(flow: DeviceFlow) -> TokenSet | None:
             },
             timeout=30,
         )
-    except httpx.HTTPError as exc:
+    except httpx2.HTTPError as exc:
         raise OpenCodeGoError(f"轮询 OpenCode 授权状态失败：{exc}") from exc
     if response.status_code == 400:
         try:
@@ -142,7 +138,7 @@ def refresh_access_token(refresh_token: str) -> TokenSet:
     if not refresh_token:
         raise OpenCodeGoError("OpenCode Go refresh token 不存在，请重新关联套餐。")
     try:
-        response = httpx.post(
+        response = httpx2.post(
             TOKEN_URL,
             json={
                 "grant_type": "refresh_token",
@@ -151,7 +147,7 @@ def refresh_access_token(refresh_token: str) -> TokenSet:
             },
             timeout=30,
         )
-    except httpx.HTTPError as exc:
+    except httpx2.HTTPError as exc:
         raise OpenCodeGoError(f"刷新 OpenCode Go 凭据失败：{exc}") from exc
     if response.status_code != 200:
         raise OpenCodeGoError(
@@ -166,7 +162,6 @@ def refresh_access_token(refresh_token: str) -> TokenSet:
 
 __all__ = [
     "DEVICE_CODE_URL",
-    "OPENCODE_GO_BASE_URL",
     "OAUTH_CLIENT_ID",
     "TOKEN_URL",
     "DeviceFlow",

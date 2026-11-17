@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from .plugin import PAGE_ID, ReaderPlugin, ReaderService, split_markdown
+from .plugin import PAGE_ID, ReaderPlugin, ReaderService
 
-__all__ = ["ReaderPlugin", "ReaderService", "PAGE_ID", "split_markdown"]
+__all__ = ["ReaderPlugin", "ReaderService", "PAGE_ID"]

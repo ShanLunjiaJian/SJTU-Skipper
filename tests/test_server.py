@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -31,7 +31,11 @@ class DemoUI(Plugin):
         )
         ctx.ui.add_page("test.page", "测试页", render=lambda: "# 页面\n\nhello")
         ctx.ui.open_page("test.page")
-        ctx.ui.register_action("test.ping", lambda payload: {"ok": True, "message": "pong"}, plugin_id=self.id)
+        ctx.ui.register_action(
+            "test.ping",
+            lambda payload: {"ok": True, "message": "pong"},
+            plugin_id=self.id,
+        )
 
 
 @pytest.fixture()
@@ -61,11 +65,79 @@ def test_state_and_action(client) -> None:
     assert state["active_page"] == "test.page"
     assert "<h1>" in state["page_content"]["test.page"][0]["html"]
 
-    response = test_client.post("/api/ui/action", json={"action": "test.ping", "values": {"x": 1}})
+    response = test_client.post(
+        "/api/ui/action", json={"action": "test.ping", "values": {"x": 1}}
+    )
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True
     assert payload["message"] == "pong"
+
+
+def test_navigation_restores_dynamic_pages(client):
+    from types import SimpleNamespace
+
+    test_client, cfg = client
+    runtime = test_client.app.state.runtime
+    sid = "lecture-test"
+    (cfg.data_dir / "sessions" / sid).mkdir(parents=True)
+    selected = {}
+
+    def notes(session_id, doc):
+        selected.update(session=session_id, doc=doc)
+        runtime.ui.add_page(f"reader:notes:{session_id}:summarize", "Notes")
+
+    def logs(session_id):
+        selected["session"] = session_id
+        runtime.ui.add_page(f"summarize:logs:{session_id}", "Logs")
+
+    runtime.services.register(
+        "summarize", SimpleNamespace(open_notes=notes, open_logs=logs)
+    )
+
+    def instant_notes(payload):
+        selected.update(session=payload["session_id"], doc=payload["doc"])
+        runtime.ui.add_page(
+            f"reader:notes:{payload['session_id']}:instant-summarize", "Draft notes"
+        )
+        return {"ok": True}
+
+    runtime.ui.register_action("instant-summarize.read", instant_notes)
+    runtime.services.register(
+        "reader",
+        SimpleNamespace(
+            navigation=lambda page: selected["doc"],
+            select_document=lambda page, key: selected.update(doc=key),
+        ),
+    )
+    runtime.services.register(
+        "input",
+        SimpleNamespace(
+            open_class=lambda key: selected.update(class_id=key),
+            selected_class=lambda: selected["class_id"],
+        ),
+    )
+    runtime.ui.add_page("input:session", "Class")
+    for route in [
+        {"page": "input:session", "class": "class:math:rec:video"},
+        {"page": f"reader:notes:{sid}:summarize", "doc": "knowledge"},
+        {"page": f"reader:notes:{sid}:instant-summarize", "doc": "notice"},
+        {"page": f"summarize:logs:{sid}"},
+        {"page": ""},
+    ]:
+        response = test_client.post("/api/ui/navigate", json=route)
+        assert response.status_code == 200
+        assert test_client.get("/api/ui/state").json()["navigation"] == route
+    assert (
+        test_client.post("/api/ui/navigate", json={"page": "missing"}).status_code
+        == 404
+    )
+    assert (
+        test_client.post(
+            "/api/ui/navigate", json={"page": "summarize:logs:../secret"}
+        ).status_code
+        == 400
+    )
 
 
 def test_open_close_page(client) -> None:
@@ -117,8 +189,18 @@ def test_websocket_forwards_ui_notify(client) -> None:
 
 def test_media_relay_rejects_foreign_hosts(client) -> None:
     test_client, _cfg = client
-    assert test_client.get("/api/media", params={"src": "https://example.com/a.mp4"}).status_code == 400
-    assert test_client.get("/api/media", params={"src": "ftp://live.sjtu.edu.cn/a.mp4"}).status_code == 400
+    assert (
+        test_client.get(
+            "/api/media", params={"src": "https://example.com/a.mp4"}
+        ).status_code
+        == 400
+    )
+    assert (
+        test_client.get(
+            "/api/media", params={"src": "ftp://live.sjtu.edu.cn/a.mp4"}
+        ).status_code
+        == 400
+    )
 
 
 def test_media_relay_forwards_range(tmp_path: Path) -> None:
@@ -132,10 +214,10 @@ def test_media_relay_forwards_range(tmp_path: Path) -> None:
     app = create_app(runtime)
     seen: dict[str, Any] = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen["range"] = request.headers.get("range")
         seen["url"] = str(request.url)
-        return httpx.Response(
+        return httpx2.Response(
             206,
             headers={
                 "content-type": "video/mp4",
@@ -151,8 +233,8 @@ def test_media_relay_forwards_range(tmp_path: Path) -> None:
             data={"username": "test", "password": "test"},
             follow_redirects=False,
         )
-        test_client.app.state.media_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(handler)
+        test_client.app.state.media_client = httpx2.AsyncClient(
+            transport=httpx2.MockTransport(handler)
         )
         response = test_client.get(
             "/api/media",

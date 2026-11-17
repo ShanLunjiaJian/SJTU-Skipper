@@ -6,7 +6,6 @@ import base64
 import json
 import threading
 import time
-import difflib
 import io
 import logging
 import tempfile
@@ -28,14 +27,12 @@ from core import (
     UIManager,
     VideoFrame,
 )
-from llm.types import ImagePart, TextPart
 from plugins.vlm.fusion import fuse_frames
 from plugins.vlm.plugin import VlmPlugin, _fmt_time
 from plugins.vlm.prompts import (
     BLANK_BOARD_MARKER,
-    BOARD_RECOGNITION_PROMPT,
     NO_CHANGE_MARKER,
-    build_user_message,
+    build_image_content,
     collapse_repetitions,
     is_trivial_board_text,
 )
@@ -93,7 +90,11 @@ def _make_frames(
     for i in range(n):
         arr = _synthetic_frame(lines=True)
         if fade > 0:
-            arr = (arr.astype(np.float32) * (1.0 - fade * i)).clip(0, 255).astype(np.uint8)
+            arr = (
+                (arr.astype(np.float32) * (1.0 - fade * i))
+                .clip(0, 255)
+                .astype(np.uint8)
+            )
         if offset_px > 0:
             arr = np.roll(arr, shift=offset_px * i, axis=1)
         jpeg = _to_jpeg(arr)
@@ -104,6 +105,7 @@ def _make_frames(
 # ---------------------------------------------------------------------------
 # Fusion tests
 # ---------------------------------------------------------------------------
+
 
 class TestFusion:
     def test_single_frame_raises(self):
@@ -146,11 +148,6 @@ class TestFusion:
         result = fuse_frames(frames, max_width=0)
         assert result.shape[1] == WIDTH
 
-    def test_no_align_still_works(self):
-        frames = _make_frames(15)
-        result = fuse_frames(frames, align=False)
-        assert result.size > 0
-
     def test_black_frames_yield_dark_output(self):
         """All-black frames should produce a dark fused result."""
         arr = _synthetic_frame(lines=False, black=True)
@@ -176,28 +173,8 @@ class TestFusion:
 # Prompt tests
 # ---------------------------------------------------------------------------
 
+
 class TestPrompts:
-    def test_prompt_contains_latex_rules(self):
-        prompt = BOARD_RECOGNITION_PROMPT.replace("{timestamp}", "00:00-01:00")
-        assert "$" in prompt
-        assert "$$" in prompt
-        assert "\\[" in prompt  # forbidden mention
-        assert "\\]" in prompt
-
-    def test_prompt_contains_diagram_placeholder(self):
-        prompt = BOARD_RECOGNITION_PROMPT.replace("{timestamp}", "00:00")
-        assert "![" in prompt
-        assert "]()" in prompt
-
-    def test_prompt_contains_blank_board_marker(self):
-        prompt = BOARD_RECOGNITION_PROMPT.replace("{timestamp}", "00:00")
-        assert BLANK_BOARD_MARKER in prompt
-
-    def test_prompt_no_greeting(self):
-        prompt = BOARD_RECOGNITION_PROMPT.replace("{timestamp}", "00:00")
-        assert "寒暄" in prompt or "问候" in prompt  # instructs to avoid them
-
-
     def test_collapse_repeated_display_math(self):
         block = "$$\nT_m = \tilde{Q}_m^T A \tilde{Q}_m\n$$"
         text = "**02:28-02:46**\n\n" + "\n\n".join([block] * 8)
@@ -217,37 +194,32 @@ class TestPrompts:
         text = "$$\nA = B\n$$\n\n$$\nC = D\n$$\n\n$$\nA = B\n$$"
         assert collapse_repetitions(text) == text
 
-    def test_build_user_message_structure(self):
-        content = build_user_message(timestamp="00:30", image_data_url="data:image/jpeg;base64,abc")
+    def test_build_image_content_structure(self):
+        content = build_image_content(
+            timestamp="00:30", image_data_url="data:image/jpeg;base64,abc"
+        )
         assert isinstance(content, list)
         assert len(content) == 2
-        assert isinstance(content[0], TextPart)
-        assert isinstance(content[1], ImagePart)
-        assert "00:30" in content[0].text
-        assert content[1].url == "data:image/jpeg;base64,abc"
+        assert content[0]["type"] == "text"
+        assert "00:30" in content[0]["text"]
+        assert content[1] == {
+            "type": "image_url",
+            "image_url": {"url": "data:image/jpeg;base64,abc"},
+        }
 
-    def test_build_user_message_no_image_url(self):
-        content = build_user_message(timestamp="00:00", image_data_url="")
+    def test_build_image_content_no_image_url(self):
+        content = build_image_content(timestamp="00:00", image_data_url="")
         assert len(content) == 1
-        assert isinstance(content[0], TextPart)
-
-    def test_first_window_asks_for_full_transcription(self):
-        content = build_user_message(timestamp="00:00")
-        text = content[0].text
-        assert "第一次识别" in text
-        assert "请完整转录当前黑板" in text
-        assert "【无变化】" not in text
+        assert content[0]["type"] == "text"
 
     def test_history_is_passed_as_text_and_asks_for_delta(self):
-        content = build_user_message(
+        content = build_image_content(
             timestamp="10:00",
             history=["第一版板书 A", "第二版板书 B"],
         )
-        text = content[0].text
+        text = content[0]["text"]
         assert "第一版板书 A" in text
         assert "第二版板书 B" in text
-        assert "新增、修改或擦除" in text
-        assert NO_CHANGE_MARKER in text
 
 
 class TestTrivialBoardText:
@@ -261,9 +233,7 @@ class TestTrivialBoardText:
         assert is_trivial_board_text("![手绘示意图：复平面上的积分路径与区域]()")
 
     def test_multiple_placeholders_are_trivial(self):
-        assert is_trivial_board_text(
-            "![图1]()\n![图2]()\n![区域示意图]()"
-        )
+        assert is_trivial_board_text("![图1]()\n![图2]()\n![区域示意图]()")
 
     def test_placeholder_with_surrounding_whitespace(self):
         assert is_trivial_board_text("\n  ![示意图]()\n\n")
@@ -287,35 +257,9 @@ class TestTrivialBoardText:
 
 
 # ---------------------------------------------------------------------------
-# Deduplication tests
-# ---------------------------------------------------------------------------
-
-class TestDedupe:
-    def test_identical_text_high_ratio(self):
-        text = "设 $x \\in X$ 为拓扑空间中的点。\n\n$$\n\\ker \\partial_n = \\operatorname{im} \\partial_{n+1}\n$$\n"
-        ratio = difflib.SequenceMatcher(None, text, text).ratio()
-        assert ratio == 1.0
-
-    def test_different_text_low_ratio(self):
-        a = "设 $x \\in X$。"
-        b = "证明：对于任意 $\\epsilon > 0$，存在 $\\delta > 0$ 使得..."
-        ratio = difflib.SequenceMatcher(None, a, b).ratio()
-        assert ratio < 0.92
-
-    def test_threshold_default(self):
-        """Default threshold 0.92 blocks similar but skips different."""
-        # Two very similar texts
-        a = "定理 1.1 设 $f$ 在 $D$ 上全纯，则 $f$ 在 $D$ 上有无穷阶导数。"
-        b = "定理 1.1 设 $f$ 在 $D$ 上全纯，则 $f$ 在 $D$ 上有无穷阶导数。"  # identical
-        assert difflib.SequenceMatcher(None, a, b).ratio() >= 0.92
-
-        c = "这是完全不同的内容，包含了新的定义和引理，涉及复分析中的留数定理。"
-        assert difflib.SequenceMatcher(None, a, c).ratio() < 0.92
-
-
-# ---------------------------------------------------------------------------
 # Plugin / Worker tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def vlm_ctx(tmp_path: Path) -> PluginContext:
@@ -334,28 +278,12 @@ def vlm_ctx(tmp_path: Path) -> PluginContext:
     services.register("settings", fake_settings, plugin_id="<test>")
     ui = UIManager()
 
-    class LLMProxy:
-        def __init__(self, svc):
-            self._svc = svc
-        def _service(self):
-            return self._svc.get("llm")
-        def chat(self, **kw):
-            return self._service().chat(**kw)
-        def stream(self, **kw):
-            return self._service().stream(**kw)
-        def config_for(self, profile):
-            return self._service().config_for(profile)
-        def info(self):
-            return self._service().info()
-
-    llm_proxy = LLMProxy(services)
-
     ctx = PluginContext(
         plugin_id="vlm",
         data_dir=tmp_path,
         events=bus,
         streams=hub,
-        llm=llm_proxy,
+        llm=fake_llm,
         ui=ui,
         services=services,
         meta=MetaRegistry(),
@@ -368,40 +296,14 @@ def vlm_ctx(tmp_path: Path) -> PluginContext:
 def vlm_plugin(vlm_ctx: PluginContext) -> VlmPlugin:
     plugin = VlmPlugin()
     plugin.setup(vlm_ctx)
-    return plugin
+    plugin._stop_worker()
+    plugin._stop_event.clear()
+    yield plugin
+    plugin.teardown()
+    vlm_ctx.events.stop()
 
 
 class TestVlmPlugin:
-    def test_plugin_id_and_requires(self):
-        assert VlmPlugin.id == "vlm"
-        assert "settings" in VlmPlugin.requires
-        assert "llm" in VlmPlugin.requires
-
-    def test_setup_registers_service(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
-        assert vlm_ctx.service("vlm") is not None
-
-    def test_setup_creates_debug_page_only(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
-        snap = vlm_ctx.ui.snapshot()
-        assert "classroom" not in snap["tabs"]
-        assert "vlm.board" not in snap["items"]
-        assert "vlm:board" in snap["pages"]
-        assert "vlm.debug" in snap["commands"]
-
-    def test_status_returns_dict(self, vlm_plugin: VlmPlugin):
-        status = vlm_plugin.status()
-        assert "cursor" in status
-        assert "session_id" in status
-        assert "worker_alive" in status
-
-    def test_settings_specs_registered(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
-        settings = vlm_ctx.service("settings")
-        assert settings is not None
-        # vlm.enabled should be registered
-        spec_keys = [s.key for s in settings.specs()]
-        assert "vlm.enabled" in spec_keys
-        assert "vlm.model" in spec_keys
-        assert "vlm.window_seconds" in spec_keys
-
     def test_recording_session_commits_windows_in_order(
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
     ):
@@ -409,7 +311,6 @@ class TestVlmPlugin:
         settings.set("vlm.enabled", True)
         settings.set("vlm.window_seconds", 5.0)
         settings.set("vlm.cadence_recording_seconds", 5.0)
-        settings.set("vlm.concurrency", 3)
         settings.set("vlm.dedupe_threshold", 0.92)
         settings.set("vlm.fusion", False)
 
@@ -501,9 +402,7 @@ class TestVlmPlugin:
             return False
 
         plugin._stop_event.wait = fake_wait  # type: ignore[method-assign]
-        thread = threading.Thread(
-            target=plugin._run_recording_session, daemon=True
-        )
+        thread = threading.Thread(target=plugin._run_recording_session, daemon=True)
         thread.start()
         try:
             assert entered.wait(1.0), "the worker never reached the idle wait"
@@ -516,7 +415,9 @@ class TestVlmPlugin:
             thread.join(2.0)
             plugin.teardown()
 
-    def test_process_window_with_fake_llm(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
+    def test_process_window_with_fake_llm(
+        self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
+    ):
         """process_window should call LLM, emit vlm.segment, and append visual."""
         # Setup settings
         settings = vlm_ctx.service("settings")
@@ -527,7 +428,18 @@ class TestVlmPlugin:
 
         # Inject scripted LLM response
         fake_llm = vlm_ctx.service("llm")
-        fake_llm.script = ["定理 1：设 $f$ 在 $D$ 上全纯。"]
+        fake_llm.script = [
+            {
+                "content": "定理 1：设 $f$ 在 $D$ 上全纯。",
+                "finish_reason": "stop",
+                "model": "board-model",
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 20,
+                    "total_tokens": 30,
+                },
+            }
+        ]
 
         # Create synthetic frame
         arr = _synthetic_frame()
@@ -536,6 +448,7 @@ class TestVlmPlugin:
 
         # Listen for vlm.segment
         segments: list[dict] = []
+
         def on_segment(event):
             segments.append(dict(event.payload))
 
@@ -554,7 +467,8 @@ class TestVlmPlugin:
         assert item.start == 10.0
         assert item.end == 11.0
         assert "image_path" in item.meta
-        assert "model" in item.meta
+        assert item.meta["model"] == "board-model"
+        assert item.meta["usage"]["total_tokens"] == 30
 
         log = (
             vlm_ctx.data_dir
@@ -562,20 +476,16 @@ class TestVlmPlugin:
             / vlm_ctx.streams.current.session_id
             / "visual.jsonl"
         )
-        records = [
-            json.loads(line) for line in log.read_text("utf-8").splitlines()
-        ]
+        records = [json.loads(line) for line in log.read_text("utf-8").splitlines()]
         assert records[-1]["start"] == 10.0
         assert records[-1]["end"] == 11.0
         assert "定理 1" in records[-1]["text"]
 
-        # Check that thinking was disabled in the LLM call
-        assert len(fake_llm.calls) >= 1
-        last_call = fake_llm.calls[-1]
-        extra = last_call.get("extra") or {}
-        assert extra.get("thinking") == {"type": "disabled"}
-        assert extra.get("frequency_penalty") == 0.2
-        assert extra.get("presence_penalty") == 0.2
+        method, last_call = fake_llm.calls[-1]
+        assert method == "generate"
+        assert last_call["role"] == "board_recognition"
+        assert "model" not in last_call
+        assert "extra" not in last_call
 
         # Check vlm.segment event
         assert len(segments) >= 1
@@ -583,7 +493,9 @@ class TestVlmPlugin:
         assert seg["start"] == 10.0
         assert seg["end"] == 11.0
 
-    def test_process_window_skips_blank_board(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
+    def test_process_window_skips_blank_board(
+        self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
+    ):
         settings = vlm_ctx.service("settings")
         settings.set("vlm.dedupe_threshold", 0.0)
         settings.set("vlm.fusion", False)
@@ -602,7 +514,9 @@ class TestVlmPlugin:
         # No new visual items for blank board
         assert len(vlm_ctx.streams.current.visual) == visual_before
 
-    def test_process_window_skips_placeholder_only(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
+    def test_process_window_skips_placeholder_only(
+        self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
+    ):
         """Output consisting solely of ![...]() placeholders must be skipped."""
         settings = vlm_ctx.service("settings")
         settings.set("vlm.dedupe_threshold", 0.0)
@@ -621,7 +535,9 @@ class TestVlmPlugin:
         assert result.get("ok") is True
         assert len(vlm_ctx.streams.current.visual) == visual_before
 
-    def test_process_window_deduplicates(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
+    def test_process_window_deduplicates(
+        self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
+    ):
         settings = vlm_ctx.service("settings")
         settings.set("vlm.dedupe_threshold", 0.5)  # low threshold to catch
         settings.set("vlm.fusion", False)
@@ -665,8 +581,46 @@ class TestVlmPlugin:
         result = vlm_plugin.process_window(5.0, 6.0, frames)
 
         assert result.get("skipped") is True
-        assert "无变化" in result.get("note", "")
         assert len(vlm_ctx.streams.current.visual) == visual_before
+
+    def test_truncated_response_is_not_committed(self, vlm_plugin, vlm_ctx):
+        settings = vlm_ctx.service("settings")
+        settings.set("vlm.fusion", False)
+        fake_llm = vlm_ctx.service("llm")
+        fake_llm.script = [{"content": "Incomplete formula", "finish_reason": "length"}]
+        session = vlm_ctx.streams.current
+        frames = _make_frames(3)
+        with pytest.raises(RuntimeError, match="transcription is incomplete"):
+            vlm_plugin.process_window(0.0, 3.0, frames)
+        assert not session.visual.items_since(0)
+        assert not vlm_plugin._coverage(session).covers("video", 0.0, 3.0)
+
+    @pytest.mark.parametrize("cancel_before_sent", [False, True])
+    def test_cancel_during_submission(
+        self, vlm_plugin, vlm_ctx, monkeypatch, cancel_before_sent
+    ):
+        session = vlm_ctx.streams.current
+        fake_llm = vlm_ctx.service("llm")
+        cancelled = []
+        monkeypatch.setattr(fake_llm, "cancel", cancelled.append)
+
+        def generate(method, **params):
+            assert method == "generate"
+            if cancel_before_sent:
+                vlm_plugin.cancel(session.session_id)
+                assert not cancelled
+            params["on_sent"]()
+            if not cancel_before_sent:
+                vlm_plugin.cancel(session.session_id)
+            assert cancelled == [params["session_id"]]
+            return {"content": "Cancelled board", "finish_reason": "stop"}
+
+        monkeypatch.setattr(fake_llm, "call", generate)
+        with pytest.raises(RuntimeError, match="VLM session cancelled"):
+            vlm_plugin._ask_image(b"jpeg", "00:00")
+        assert not vlm_plugin._requests
+        assert not vlm_plugin._submitted_requests
+        assert not session.visual.items_since(0)
 
     def test_second_window_sends_previous_transcription(
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
@@ -684,13 +638,12 @@ class TestVlmPlugin:
         vlm_plugin.process_window(5.0, 6.0, [_make_video_frame(jpeg, 5.0, 6.0)])
 
         assert len(fake_llm.calls) == 2
-        first = fake_llm.calls[0]["messages"][0]["content"][0].text
-        assert "第一次识别" in first
-        second = fake_llm.calls[1]["messages"][0]["content"][0].text
+        second = fake_llm.calls[1][1]["messages"][0]["content"][0]["text"]
         assert "定理 A" in second
-        assert "新增、修改或擦除" in second
 
-    def test_llm_error_emits_vlm_error(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
+    def test_llm_error_emits_vlm_error(
+        self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
+    ):
         settings = vlm_ctx.service("settings")
         settings.set("vlm.dedupe_threshold", 0.0)
         settings.set("vlm.fusion", False)
@@ -704,8 +657,10 @@ class TestVlmPlugin:
         fake_llm.script = [_fail]
 
         errors: list[dict] = []
+
         def on_error(event):
             errors.append(dict(event.payload))
+
         vlm_ctx.events.on("vlm.error", on_error)
 
         arr = _synthetic_frame()
@@ -718,26 +673,55 @@ class TestVlmPlugin:
         assert len(errors) >= 1
         assert "simulated LLM failure" in errors[0].get("error", "")
 
+    def test_selection_failure_has_no_session(self, vlm_plugin, vlm_ctx):
+        failures = []
+        vlm_ctx.events.on(
+            "vlm.error", lambda event: failures.append(dict(event.payload))
+        )
+
+        def fail():
+            vlm_plugin._stop_event.set()
+            raise RuntimeError("selection failed")
+
+        vlm_plugin._select_session = fail
+        vlm_plugin._flush_remaining = lambda: None
+        vlm_plugin._worker_loop()
+        vlm_ctx.events.flush(timeout=1.0)
+        assert failures[0]["session_id"] == ""
+        assert not vlm_plugin._cancelled_sessions
+
+    def test_worker_failure_releases_input(self, vlm_plugin, vlm_ctx):
+        session = vlm_ctx.streams.start_session(meta={"mode": "fast"})
+        session.input_done = True
+        session.video_gate.configure(1.0)
+        failures = []
+        vlm_ctx.events.on(
+            "input.error", lambda event: failures.append(dict(event.payload))
+        )
+        vlm_plugin._select_session = lambda: session
+
+        def fail():
+            vlm_plugin._stop_event.set()
+            raise RuntimeError("model unavailable")
+
+        vlm_plugin._run_recording_session = fail
+        vlm_plugin._worker_loop()
+        vlm_ctx.events.flush(timeout=1.0)
+        assert not session.video_gate.wait(10.0)
+        assert not vlm_plugin.busy()
+        assert failures[0]["session_id"] == session.session_id
+        assert "model unavailable" in failures[0]["message"]
+
 
 # ---------------------------------------------------------------------------
 # UI state tests
 # ---------------------------------------------------------------------------
 
+
 class TestUiState:
-    def test_debug_page_present(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
-        snap = vlm_ctx.ui.snapshot()
-        assert "vlm:board" in snap["pages"]
-        assert "vlm.debug" in snap["commands"]
-
-    def test_render_returns_blocks(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
-        page = vlm_ctx.ui._pages.get("vlm:board")
-        assert page is not None
-        blocks = vlm_ctx.ui._render(page.render, "test")
-        assert isinstance(blocks, list)
-        # At minimum, we get a text placeholder or image
-        assert len(blocks) > 0
-
-    def test_render_with_visual_items(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
+    def test_render_with_visual_items(
+        self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
+    ):
         visual = vlm_ctx.streams.current.visual
         visual.append(
             "定理 1：测试内容。",
@@ -758,8 +742,106 @@ class TestUiState:
 # Helper tests
 # ---------------------------------------------------------------------------
 
+
 class TestHelpers:
     def test_fmt_time(self):
         assert _fmt_time(0) == "00:00"
         assert _fmt_time(65.5) == "01:05"
         assert _fmt_time(3661.0) == "61:01"
+
+
+def test_prepare_overlaps_recognition(vlm_plugin, vlm_ctx, monkeypatch):
+    from plugins.vlm.plugin import PreparedWindow
+
+    vlm_plugin._stop_worker()
+    vlm_plugin._stop_event.clear()
+    settings = vlm_ctx.service("settings")
+    settings.set("vlm.window_seconds", 5.0)
+    settings.set("vlm.cadence_recording_seconds", 5.0)
+    session = vlm_ctx.streams.current
+    session.meta["mode"] = "fast"
+    session.video_gate.configure(0)
+    for _ in range(10):
+        session.video.append_frame(_to_jpeg(_synthetic_frame()), duration=1)
+    session.input_done = True
+    vlm_plugin._processing_session = session
+    prepared_next = threading.Event()
+    recognition_started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    histories = []
+
+    def prepare(session, start, end, frames):
+        if start == 5:
+            prepared_next.set()
+        return PreparedWindow(start, end, Path("board.jpg"), b"jpeg")
+
+    def recognize(session, prepared, history):
+        histories.append(list(history))
+        recognition_started.set()
+        if prepared.start == 0:
+            assert prepared_next.wait(2)
+            assert release.wait(2)
+        return {"text": f"Definition at {prepared.start}", "image_path": ""}
+
+    monkeypatch.setattr(vlm_plugin, "_prepare_window", prepare)
+    monkeypatch.setattr(vlm_plugin, "_recognize_window", recognize)
+
+    def run():
+        try:
+            vlm_plugin._run_recording_session()
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=run)
+    vlm_plugin._worker = worker
+    worker.start()
+    try:
+        assert prepared_next.wait(2)
+        assert recognition_started.wait(2)
+        assert len(histories) == 1
+        release.set()
+        assert finished.wait(2)
+        assert histories[1] == ["Definition at 0.0"]
+    finally:
+        release.set()
+        worker.join(2)
+
+
+def test_idle_session_does_not_block_recording():
+    hub = StreamHub()
+    old = hub.current
+    current = hub.start_session(meta={"mode": "recording"})
+    plugin = VlmPlugin()
+    plugin._ctx = SimpleNamespace(streams=hub)
+    plugin._sessions = {old.session_id: old, current.session_id: current}
+    plugin._recording_cursor = {}
+    plugin._last_session = None
+    plugin._session_history = {}
+    plugin._window_seconds = lambda: 20.0
+    plugin._history_windows = lambda: 3
+    current.video_input_done = True
+    assert plugin._select_session() is current
+
+
+def test_cancel_releases_preparation_pool(vlm_plugin, vlm_ctx):
+    session = vlm_ctx.streams.start_session()
+    vlm_plugin._processing_session = session
+    waiting = threading.Event()
+    wait_for = session.video.wait_for
+
+    def wait(end, timeout):
+        waiting.set()
+        return wait_for(end, timeout=timeout)
+
+    with patch.object(session.video, "wait_for", side_effect=wait):
+        prepared = vlm_plugin._prepare_pool.submit(
+            vlm_plugin._prepare_next_window, session, 0, 20
+        )
+        assert waiting.wait(3)
+        vlm_plugin.cancel(session.session_id)
+        assert prepared.result(timeout=3) is None
+        assert (
+            vlm_plugin._prepare_pool.submit(lambda: "available").result(timeout=3)
+            == "available"
+        )

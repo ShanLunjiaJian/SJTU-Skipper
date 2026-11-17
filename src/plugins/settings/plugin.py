@@ -8,7 +8,7 @@ import threading
 from typing import Any, Mapping
 
 from core.plugin import Plugin, PluginContext
-from .spec import SECRET_MASK, SettingsSpec
+from core.settings_spec import SECRET_MASK, SettingsSpec
 from .store import SettingsService, SettingsStore
 
 logger = logging.getLogger("lecture_agent.plugins.settings")
@@ -166,14 +166,12 @@ class SettingsPlugin(Plugin):
     # ------------------------------------------------------------------
     def _render_page(self) -> list[dict[str, Any]]:
         groups = self._grouped_specs()
-        if not groups:
+        sections = self.service.sections() if self.service is not None else []
+        if not groups and not sections:
             return [
                 {
                     "type": "markdown",
-                    "text": (
-                        "### 设置\n\n"
-                        "暂无设置项。"
-                    ),
+                    "text": ("### 设置\n\n暂无设置项。"),
                 }
             ]
         tabs: list[dict[str, Any]] = []
@@ -184,6 +182,13 @@ class SettingsPlugin(Plugin):
                 blocks.append({"type": "markdown", "text": note})
             blocks.extend(self._form_blocks(specs, group))
             tabs.append({"title": group or "General", "blocks": blocks})
+        for title, render in sections:
+            try:
+                blocks = render()
+            except Exception:
+                logger.exception("failed to render settings section %s", title)
+                blocks = [{"type": "markdown", "text": "配置读取失败．请刷新后重试．"}]
+            tabs.append({"title": title, "blocks": blocks})
         return [{"type": "tabs", "id": "settings.groups", "tabs": tabs}]
 
     def _form_blocks(
@@ -212,9 +217,7 @@ class SettingsPlugin(Plugin):
             # Secrets are write-only: never send the real value or a fake
             # six-character mask to the browser.
             "value": "" if spec.secret else value,
-            "secret_length": (
-                len(str(raw)) if spec.secret and configured else 0
-            ),
+            "secret_length": (len(str(raw)) if spec.secret and configured else 0),
             "options": options,
             "option_items": [
                 {"value": option, "label": label}
@@ -303,6 +306,9 @@ class SettingsPlugin(Plugin):
         errors: list[str] = []
         for key, value in values.items():
             if not isinstance(key, str):
+                continue
+            if key in {"models_yaml", "roles_yaml"}:
+                errors.append("模型配置必须通过「保存配置」保存")
                 continue
             spec = service.get_spec(key)
             if spec is not None and (spec.readonly or spec.type == "action"):

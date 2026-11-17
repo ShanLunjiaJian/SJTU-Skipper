@@ -43,7 +43,7 @@ def split_jpeg_frames(data: bytes) -> list[bytes]:
         # Look for EOI after this SOI
         eoi_pos = data.find(_EOI, soi_pos + 2)
         if eoi_pos < 0:
-            # No EOI found — trailing incomplete frame, stop here
+            # No EOI found: stop at the incomplete tail.
             break
         # Valid frame: SOI .. EOI inclusive
         frames.append(data[soi_pos : eoi_pos + 2])
@@ -58,7 +58,7 @@ def iter_jpeg_frames(data: bytes) -> list[bytes]:
 
 
 def has_complete_frame(data: bytes) -> bool:
-    """Return True if *data* contains at least one SOI–EOI pair."""
+    """Return True if *data* contains at least one SOI-EOI pair."""
     soi = data.find(_SOI)
     if soi < 0:
         return False
@@ -108,13 +108,19 @@ def build_audio_cmd(
     cmd.extend(
         [
             "-hide_banner",
-            "-loglevel", "error",
-            "-i", url,
+            "-loglevel",
+            "error",
+            "-i",
+            url,
             "-vn",  # no video
-            "-acodec", "pcm_s16le",
-            "-ar", str(sample_rate),
-            "-ac", str(channels),
-            "-f", "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            str(channels),
+            "-f",
+            "s16le",
         ]
     )
     if extra_args:
@@ -156,11 +162,16 @@ def build_video_cmd(
         # Low-latency flags for live FLV streams
         cmd.extend(
             [
-                "-fflags", "nobuffer",
-                "-flags", "low_delay",
-                "-strict", "experimental",
-                "-probesize", "32",
-                "-analyzeduration", "0",
+                "-fflags",
+                "nobuffer",
+                "-flags",
+                "low_delay",
+                "-strict",
+                "experimental",
+                "-probesize",
+                "32",
+                "-analyzeduration",
+                "0",
             ]
         )
     video_filter = f"fps={fps}"
@@ -169,10 +180,14 @@ def build_video_cmd(
     cmd.extend(
         [
             "-an",  # no audio in video sub-process
-            "-vf", video_filter,
-            "-c:v", "mjpeg",
-            "-q:v", "3",
-            "-f", "image2pipe",
+            "-vf",
+            video_filter,
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "3",
+            "-f",
+            "image2pipe",
         ]
     )
     if extra_args:
@@ -187,13 +202,17 @@ def build_reconnect_args(
 ) -> list[str]:
     """FFmpeg reconnect arguments for resilient streaming."""
     return [
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", str(max(1, int(max_retries))),
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_delay_max",
+        str(max(1, int(max_retries))),
     ]
 
-def probe_duration(path: str, *, timeout: float = 20.0) -> float | None:
-    """Return the media duration in seconds via ffprobe, or None."""
+
+def probe_duration(path: str) -> float:
+    """Read duration through the byte cache, which controls network timeouts."""
 
     import json
     import subprocess
@@ -202,22 +221,27 @@ def probe_duration(path: str, *, timeout: float = 20.0) -> float | None:
         proc = subprocess.run(
             [
                 "ffprobe",
-                "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "json",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "json",
                 str(path),
             ],
             capture_output=True,
-            timeout=timeout,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(f"Recording duration probe failed: {exc}") from exc
     if proc.returncode != 0:
-        return None
+        detail = proc.stderr.decode("utf-8", "replace").strip()
+        raise OSError(f"Recording duration probe exited {proc.returncode}: {detail}")
     try:
         data = json.loads(proc.stdout.decode("utf-8", "replace") or "{}")
         value = float((data.get("format") or {}).get("duration") or 0.0)
-    except (ValueError, TypeError):
-        return None
-    return value if value > 0 else None
+    except (ValueError, TypeError) as exc:
+        raise OSError("Recording duration probe returned invalid metadata") from exc
+    if value <= 0:
+        raise OSError("Recording metadata has no positive duration")
+    return value

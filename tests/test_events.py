@@ -3,8 +3,6 @@ from __future__ import annotations
 import threading
 import time
 
-import pytest
-
 from core.events import CLOCK_TICK, EVENT_ERROR, Clock, EventBus
 
 
@@ -106,17 +104,20 @@ def test_clock_tick() -> None:
 def test_flush_timeout_when_handler_slow() -> None:
     bus = EventBus()
     started = threading.Event()
+    release = threading.Event()
 
     def slow(event) -> None:
         started.set()
-        time.sleep(0.2)
+        release.wait()
 
     bus.on("slow", slow)
     bus.start()
     try:
         bus.emit("slow")
         assert started.wait(1.0)
-        assert bus.flush(timeout=0.01) in (True, False)
-        bus.flush(2.0)
+        assert not bus.flush(timeout=0.01)
+        release.set()
+        assert bus.flush(2.0)
     finally:
+        release.set()
         bus.stop()

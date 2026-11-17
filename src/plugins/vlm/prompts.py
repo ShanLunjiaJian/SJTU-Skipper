@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-
-from llm.types import ImagePart, TextPart
+from typing import Any
 
 BOARD_RECOGNITION_PROMPT = """这是大学数学课堂在 {timestamp} 时的黑板板书图像。
 
@@ -94,38 +93,20 @@ def build_recognition_prompt(
     return text
 
 
-def build_user_message(
+def build_image_content(
     *,
     timestamp: str = "",
     image_data_url: str = "",
     prompt_text: str | None = None,
     history: Sequence[str] = (),
-) -> list[TextPart | ImagePart]:
-    """Build an OpenAI-style user message with text + image.
-
-    Parameters
-    ----------
-    timestamp:
-        Human-readable timestamp string (e.g. ``"00:30-01:00"``).
-    image_data_url:
-        Data URL of the fused board image (``data:image/jpeg;base64,...``).
-    history:
-        Recent transcriptions of the same board, oldest first.  They are
-        text-only: no extra images are attached.
-
-    Returns
-    -------
-    list[TextPart | ImagePart]
-        A typed content list suitable for :class:`llm.types.Message`.
-    """
+) -> list[dict[str, Any]]:
+    """Build native text and image content, preserving the image data URL."""
     if prompt_text is None:
         prompt_text = BOARD_RECOGNITION_PROMPT
-    text = build_recognition_prompt(
-        prompt_text, timestamp=timestamp, history=history
-    )
-    content: list[TextPart | ImagePart] = [TextPart(text=text)]
+    text = build_recognition_prompt(prompt_text, timestamp=timestamp, history=history)
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if image_data_url:
-        content.append(ImagePart(url=image_data_url))
+        content.append({"type": "image_url", "image_url": {"url": image_data_url}})
     return content
 
 

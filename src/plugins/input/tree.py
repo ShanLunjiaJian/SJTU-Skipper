@@ -1,7 +1,7 @@
 """Course tree building: one unified list of courses → class sessions.
 
 Live streams and recordings are presented the same way: a course node with
-child class nodes.  Consecutive recording periods (2–3 back-to-back periods of
+child class nodes. Consecutive recording periods (2-3 periods of
 the same course) are merged into a single class node that keeps every part.
 """
 
@@ -111,11 +111,10 @@ def merge_periods(
         assert begin is not None and end is not None
         if groups:
             last = groups[-1]
-            gap = begin - last["end"]
             same_day = begin.date() == last["begin"].date()
             if (
                 same_day
-                and timedelta(0) <= gap <= max_gap
+                and begin <= last["end"] + max_gap
                 and len(last["parts"]) < max(1, int(max_parts))
             ):
                 last["parts"].append(item)
@@ -146,7 +145,9 @@ def _match_course(name: str, courses: list[dict[str, Any]]) -> dict[str, Any] | 
     return None
 
 
-def _recording_overlaps(live_begin: datetime | None, groups: list[dict[str, Any]]) -> bool:
+def _recording_overlaps(
+    live_begin: datetime | None, groups: list[dict[str, Any]]
+) -> bool:
     if live_begin is None:
         return False
     window = timedelta(minutes=40)
@@ -156,8 +157,8 @@ def _recording_overlaps(live_begin: datetime | None, groups: list[dict[str, Any]
     return False
 
 
-def _class_label(begin: datetime, end: datetime, parts: int) -> str:
-    return f"{begin:%m-%d} {begin:%H:%M}–{end:%H:%M}"
+def _class_label(begin: datetime, end: datetime) -> str:
+    return f"{begin:%m-%d} {begin:%H:%M}-{end:%H:%M}"
 
 
 def _recording_child(
@@ -169,8 +170,8 @@ def _recording_child(
     classrooms = [str(p.get("classroom", "") or "") for p in parts]
     classroom = next((c for c in classrooms if c), "")
     video_ids = [str(p.get("video_id", "")) for p in parts if p.get("video_id")]
-    label = _class_label(group["begin"], group["end"], len(parts))
-    subtitle = " · ".join(
+    label = _class_label(group["begin"], group["end"])
+    subtitle = ", ".join(
         part
         for part in (
             f"{len(parts)} 节" if len(parts) > 1 else "",
@@ -193,6 +194,10 @@ def _recording_child(
                 "name": str(course.get("name", "")),
                 "label": label,
                 "videos": video_ids,
+                "recording_parts": [
+                    {key: part.get(key, "") for key in ("video_id", "begin", "end")}
+                    for part in parts
+                ],
             },
         },
     }
@@ -246,9 +251,7 @@ def _live_group_child(
     """One class node for a merged run of live periods."""
 
     parts: list[dict[str, Any]] = group["parts"]
-    states = [
-        live_state(part.get("begin"), part.get("end"), now=now) for part in parts
-    ]
+    states = [live_state(part.get("begin"), part.get("end"), now=now) for part in parts]
     if not any(states):
         return None
     if "直播中" in states:
@@ -274,9 +277,9 @@ def _live_group_child(
 
     begin = group["begin"]
     end = group["end"]
-    label = f"{begin:%m-%d %H:%M}–{end:%H:%M}"
+    label = f"{begin:%m-%d %H:%M}-{end:%H:%M}"
     classrooms = [str(p.get("classroom", "") or "") for p in parts]
-    subtitle = " · ".join(
+    subtitle = ", ".join(
         part
         for part in (
             state,
@@ -307,27 +310,6 @@ def _live_group_child(
             },
         },
     }
-
-
-def _live_child(
-    course_id: str,
-    course_name: str,
-    live: dict[str, Any],
-    *,
-    now: datetime,
-) -> dict[str, Any] | None:
-    """Backwards-compatible single-period wrapper."""
-
-    begin = parse_time(live.get("begin"))
-    end = parse_time(live.get("end")) or begin
-    if begin is None or end is None:
-        return None
-    return _live_group_child(
-        course_id,
-        course_name,
-        {"parts": [live], "begin": begin, "end": end},
-        now=now,
-    )
 
 
 def build_tree(
@@ -367,7 +349,7 @@ def build_tree(
         cid = str(matched.get("id", ""))
         begin = parse_time(live.get("begin"))
         if _recording_overlaps(begin, groups_by_course.get(cid, [])):
-            continue  # recorded already — do not duplicate the class
+            continue  # The recording already represents this class.
         lives_by_course.setdefault(cid, []).append(live)
         names_by_course[cid] = str(matched.get("name", ""))
 
@@ -375,9 +357,7 @@ def build_tree(
         for group in merge_live_periods(
             items, max_gap_minutes=max_gap_minutes, max_parts=max_parts
         ):
-            child = _live_group_child(
-                cid, names_by_course.get(cid, ""), group, now=now
-            )
+            child = _live_group_child(cid, names_by_course.get(cid, ""), group, now=now)
             if child is not None:
                 groups_by_course.setdefault(cid, [])
                 groups_by_course[cid].append(
@@ -405,7 +385,7 @@ def build_tree(
             {
                 "id": f"course:{cid}",
                 "label": str(course.get("name", "")) or f"课程 {cid}",
-                "subtitle": " · ".join(
+                "subtitle": ", ".join(
                     part
                     for part in (
                         str(course.get("term", "") or ""),

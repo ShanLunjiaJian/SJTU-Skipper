@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from .plugin import NOTE_FILES, NOTE_HEADERS, SummarizePlugin, SummarizeService
+from .plugin import SummarizePlugin, SummarizeService
 
-__all__ = ["SummarizePlugin", "SummarizeService", "NOTE_FILES", "NOTE_HEADERS"]
+__all__ = ["SummarizePlugin", "SummarizeService"]

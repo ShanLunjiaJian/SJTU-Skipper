@@ -17,8 +17,7 @@ right below the anchored paragraph, inside a private delimiter pair::
 The delimiters are HTML comments, so any plain Markdown viewer still shows the
 question and the answer (only the markers are invisible).  The reader itself
 recognises the span, removes it from the Markdown stream and renders it with
-its own collapsible component instead — that is the "special format" the note
-files carry.
+its own collapsible component. This is the "special format" the note files carry.
 
 Everything in this module is deterministic file surgery: the agent never edits
 the notes, it only produces the answer text which is inserted here.
@@ -41,12 +40,8 @@ _BLOCK_RE = re.compile(
     r"<!--\s*qa:begin\s*(?P<meta>\{.*?\})\s*-->(?P<body>.*?)<!--\s*qa:end\s*-->",
     re.S,
 )
-_QUESTION_HEAD_RE = re.compile(
-    r"^[ \t]*\*\*[^\n]*提问[^\n]*\*\*[ \t]*(?:\n|$)", re.M
-)
-_ANSWER_SEP_RE = re.compile(
-    r"^[ \t]*\*\*[^\n]*回答[^\n]*\*\*[ \t]*(?:\n|$)", re.M
-)
+_QUESTION_HEAD_RE = re.compile(r"^[ \t]*\*\*[^\n]*提问[^\n]*\*\*[ \t]*(?:\n|$)", re.M)
+_ANSWER_SEP_RE = re.compile(r"^[ \t]*\*\*[^\n]*回答[^\n]*\*\*[ \t]*(?:\n|$)", re.M)
 _MULTI_BLANK_RE = re.compile(r"\n{3,}")
 _LEADING_BLOCK_RE = re.compile(
     r"[ \t]*<!--\s*qa:begin\s*\{.*?\}\s*-->.*?<!--\s*qa:end\s*-->", re.S
@@ -235,9 +230,7 @@ def find_anchor(text: str, selection: str) -> int | None:
     return None
 
 
-def insert_block(
-    text: str, block: str, selection: str = ""
-) -> tuple[str, bool]:
+def insert_block(text: str, block: str, selection: str = "") -> tuple[str, bool]:
     """Insert *block* below the paragraph containing *selection*.
 
     Returns ``(new_text, anchored)``; ``anchored`` is False when the selection
@@ -323,9 +316,7 @@ def _split_body(body: str) -> tuple[str, str]:
     return question, answer_part.strip()
 
 
-# Markdown markers that vanish in rendered text and would break anchoring
-# (e.g. "设 $f$ 在" is selected as "设 f 在").  They are dropped from the
-# search key only — the mapping back to source offsets is kept.
+# Remove Markdown syntax from the search key, but keep source offset mappings.
 _SYNTAX_CHARS = frozenset("$*_`#>|\\~^")
 
 

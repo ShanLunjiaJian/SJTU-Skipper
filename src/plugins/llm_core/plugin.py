@@ -1,62 +1,46 @@
-"""LLM plugin: provider wiring and two authentication modes.
-
-Settings expose two explicit choices:
-
-* ``openai`` — a generic OpenAI-compatible endpoint with a base URL and key.
-* ``opencode`` — an OpenCode subscription linked through OAuth device flow.
-
-OpenCode credentials are stored in this application's settings (write-only
-secrets) and refreshed here.  The runtime does not read a local OpenCode
-installation or database.
-"""
+"""Project model configuration, credentials, and OpenCode device login."""
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import threading
 import time
-import uuid
 import webbrowser
-from typing import Any
+from typing import Any, Mapping
 
+from agent_runtime.client import RuntimeClient
 from core.plugin import Plugin, PluginContext
 from integrations.opencode_go import (
-    OPENCODE_GO_BASE_URL,
     OpenCodeGoError,
     poll_device_token,
-    refresh_access_token,
     start_device_flow,
 )
-from llm.errors import LLMError
-from llm.openai_compat import OpenAICompatibleProvider
-from llm.provider import ProviderRegistry
-from llm.service import LLMService
-from llm.types import ProviderConfig
 
 logger = logging.getLogger("lecture_agent.plugin.llm")
 
-_ENV_BASE_URL_KEYS = ("LLM_BASE_URL", "OPENAI_BASE_URL")
-_ENV_API_KEY_KEYS = ("LLM_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY")
-_DEFAULT_BASE_URL = "https://api.deepseek.com"
-_DEFAULT_TIMEOUT = 60.0
-_DEFAULT_MAX_RETRIES = 3
-_DEFAULT_TEMPERATURE: float | None = None
-_DEFAULT_MAX_TOKENS: int | None = None
-
-_MODE_OPENAI = "openai"
-_MODE_OPENCODE = "opencode"
-_OPENCODE_SESSION_ID = uuid.uuid4().hex
-_REFRESH_SKEW_MS = 60_000
+_ACTIONS = (
+    "llm.configure",
+    "llm.credentials",
+    "llm.logout",
+    "llm.opencode_login",
+)
 
 
-def _resolve_env(key: str, env_keys: tuple[str, ...], default: str) -> str:
-    for name in env_keys:
-        val = os.environ.get(name)
-        if val:
-            return val
-    return default
+def _values(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    nested = payload.get("values")
+    return nested if isinstance(nested, Mapping) else payload
+
+
+def _field(name: str, label: str, value: Any = "", **options: Any) -> dict[str, Any]:
+    return {
+        "key": name,
+        "name": name,
+        "label": label,
+        "type": "string",
+        "input": "text",
+        "value": value,
+        **options,
+    }
 
 
 class LLMPlugin(Plugin):
@@ -65,464 +49,278 @@ class LLMPlugin(Plugin):
     provides = ("llm",)
 
     def __init__(self) -> None:
-        self._settings: Any | None = None
-        self._service: LLMService | None = None
+        self._settings: Any = None
+        self._runtime: RuntimeClient | None = None
         self._ctx: PluginContext | None = None
-        self._actions_added = False
         self._login_lock = threading.RLock()
-        self._refresh_lock = threading.RLock()
         self._login_thread: threading.Thread | None = None
+        self._login_cancel = threading.Event()
+        self._login_provider = ""
+        self._login_status = ""
 
     def setup(self, ctx: PluginContext) -> None:
         self._ctx = ctx
-        settings = ctx.require("settings")
-        self._settings = settings
-
-        from core.settings_spec import SettingsSpec
-
-        specs = [
-            SettingsSpec(
-                key="llm.mode",
-                label="连接方式",
-                type="select",
-                default=_MODE_OPENAI,
-                group="LLM",
-                options=(
-                    (_MODE_OPENAI, "OpenAI 兼容接口"),
-                    (_MODE_OPENCODE, "OpenCode 套餐"),
-                ),
-                description="选择独立的 OpenAI-compatible 配置，或关联 OpenCode 套餐。",
-                group_note=(
-                    "两种方式互相独立：OpenAI 兼容使用本页的 Base URL / API Key；"
-                    "OpenCode 套餐通过设备授权单独关联，凭据保存在本应用设置中，"
-                    "不读取本机 OpenCode 安装。"
-                ),
-                order=0,
-            ),
-            SettingsSpec(
-                key="llm.base_url",
-                label="OpenAI Base URL",
-                type="string",
-                default=_DEFAULT_BASE_URL,
-                group="LLM",
-                description="OpenAI 兼容 Base URL；缺少 /v1 时会自动补全。",
-                env=_ENV_BASE_URL_KEYS,
-                visible_when=("llm.mode", (_MODE_OPENAI,)),
-                order=1,
-            ),
-            SettingsSpec(
-                key="llm.api_key",
-                label="OpenAI API Key",
-                type="secret",
-                default="",
-                group="LLM",
-                description="OpenAI 兼容接口的 API Key。",
-                env=_ENV_API_KEY_KEYS,
-                visible_when=("llm.mode", (_MODE_OPENAI,)),
-                order=2,
-            ),
-            SettingsSpec(
-                key="llm.extra_headers",
-                label="额外请求头（JSON）",
-                type="json",
-                default={},
-                group="LLM",
-                description='附加 HTTP 头 JSON，例如 {"X-Custom": "val"}。',
-                visible_when=("llm.mode", (_MODE_OPENAI,)),
-                order=3,
-            ),
-            SettingsSpec(
-                key="llm.opencode_status",
-                label="OpenCode 套餐状态",
-                type="string",
-                default="未关联",
-                group="LLM",
-                description="通过下方按钮关联；授权成功后凭据会自动刷新。",
-                visible_when=("llm.mode", (_MODE_OPENCODE,)),
-                readonly=True,
-                order=4,
-            ),
-            SettingsSpec(
-                key="llm.opencode_login",
-                label="关联 OpenCode 套餐",
-                type="action",
-                action="llm.opencode_login",
-                button_label="关联 OpenCode 套餐",
-                group="LLM",
-                description="打开 OpenCode 授权页面；完成后凭据自动保存。",
-                visible_when=("llm.mode", (_MODE_OPENCODE,)),
-                order=5,
-            ),
-            SettingsSpec(
-                key="llm.opencode_logout",
-                label="解除关联",
-                type="action",
-                action="llm.opencode_logout",
-                button_label="解除关联",
-                group="LLM",
-                description="删除本应用保存的 OpenCode 套餐凭据。",
-                visible_when=("llm.mode", (_MODE_OPENCODE,)),
-                order=6,
-            ),
-            SettingsSpec(
-                key="llm.opencode_access_token",
-                label="OpenCode Access Token",
-                type="secret",
-                default="",
-                group="LLM",
-                hidden=True,
-            ),
-            SettingsSpec(
-                key="llm.opencode_refresh_token",
-                label="OpenCode Refresh Token",
-                type="secret",
-                default="",
-                group="LLM",
-                hidden=True,
-            ),
-            SettingsSpec(
-                key="llm.opencode_expires_at",
-                label="OpenCode Token 到期时间",
-                type="int",
-                default=0,
-                group="LLM",
-                hidden=True,
-            ),
-            SettingsSpec(
-                key="llm.opencode_org_id",
-                label="OpenCode Org ID",
-                type="string",
-                default="",
-                group="LLM",
-                hidden=True,
-            ),
-            SettingsSpec(
-                key="llm.temperature",
-                label="采样温度",
-                type="float",
-                default=_DEFAULT_TEMPERATURE,
-                group="LLM",
-                description="采样温度；留空使用模型默认。",
-                order=10,
-            ),
-            SettingsSpec(
-                key="llm.max_tokens",
-                label="最大 Token 数",
-                type="int",
-                default=_DEFAULT_MAX_TOKENS,
-                group="LLM",
-                description="最大生成 Token 数；留空使用模型默认。",
-                order=11,
-            ),
-            SettingsSpec(
-                key="llm.timeout",
-                label="超时（秒）",
-                type="float",
-                default=_DEFAULT_TIMEOUT,
-                group="LLM",
-                description="HTTP 请求超时秒数。",
-                order=12,
-            ),
-            SettingsSpec(
-                key="llm.max_retries",
-                label="最大重试次数",
-                type="int",
-                default=_DEFAULT_MAX_RETRIES,
-                group="LLM",
-                description="瞬时错误自动重试次数。",
-                order=13,
-            ),
-            SettingsSpec(
-                key="llm.extra_body",
-                label="额外请求体（JSON）",
-                type="json",
-                default={},
-                group="LLM",
-                description='合并进每次请求的额外 JSON，例如 {"thinking": "disabled"}。',
-                order=14,
-            ),
-        ]
-        for spec in specs:
-            try:
-                settings.register(spec)
-            except Exception:
-                logger.warning("settings register failed for %s", spec.key)
-
-        # Actions are separate from the form; the backend writes secrets.
-        ctx.ui.register_action(
-            "llm.opencode_login", self._handle_opencode_login, plugin_id=self.id
+        self._settings = ctx.require("settings")
+        runtime = RuntimeClient(ctx.data_dir / "llm_runtime")
+        self._runtime = runtime
+        ctx.register_service("llm", runtime)
+        handlers = (
+            self._handle_configure,
+            self._handle_credentials,
+            self._handle_logout,
+            self._handle_opencode_login,
         )
-        ctx.ui.register_action(
-            "llm.opencode_logout", self._handle_opencode_logout, plugin_id=self.id
-        )
-        self._actions_added = True
-
-        def _config_provider(profile: str) -> ProviderConfig:
-            try:
-                mode = str(settings.get("llm.mode", _MODE_OPENAI) or _MODE_OPENAI).lower()
-                temperature = settings.get("llm.temperature", _DEFAULT_TEMPERATURE)
-                max_tokens = settings.get("llm.max_tokens", _DEFAULT_MAX_TOKENS)
-                timeout = settings.get("llm.timeout", _DEFAULT_TIMEOUT)
-                max_retries = settings.get("llm.max_retries", _DEFAULT_MAX_RETRIES)
-                extra_body = settings.get("llm.extra_body", {})
-                if isinstance(extra_body, str):
-                    try:
-                        extra_body = json.loads(extra_body)
-                    except json.JSONDecodeError:
-                        extra_body = {}
-            except Exception:
-                logger.exception("failed to read settings for profile %s", profile)
-                return ProviderConfig()
-
-            if mode == _MODE_OPENCODE:
-                return self._opencode_config(
-                    settings,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    timeout=timeout,
-                    max_retries=max_retries,
-                    extra_body=extra_body,
-                )
-
-            base_url = str(settings.get("llm.base_url", _DEFAULT_BASE_URL) or _DEFAULT_BASE_URL)
-            api_key = str(settings.get("llm.api_key", "") or "")
-            extra_headers = settings.get("llm.extra_headers", {})
-            if isinstance(extra_headers, str):
-                try:
-                    extra_headers = json.loads(extra_headers)
-                except json.JSONDecodeError:
-                    extra_headers = {}
-            return ProviderConfig(
-                base_url=base_url,
-                api_key=api_key,
-                model="",
-                temperature=temperature,
-                max_tokens=max_tokens,
-                timeout=float(timeout) if timeout else _DEFAULT_TIMEOUT,
-                max_retries=(
-                    int(max_retries)
-                    if max_retries is not None
-                    else _DEFAULT_MAX_RETRIES
-                ),
-                extra_headers=dict(extra_headers or {}),
-                extra_body=dict(extra_body or {}),
-            )
-
-        service = LLMService(
-            config_provider=_config_provider,
-            on_event=_on_llm_event,
-            # Every call is written verbatim (request, response, usage, errors)
-            # under ``<data_dir>/llm/<date>/`` — see ``llm.trace``.
-            trace_dir=ctx.data_dir / "llm",
-        )
-
-        try:
-            config = _config_provider("agent")
-        except OpenCodeGoError as exc:
-            logger.error("OpenCode credentials unavailable at startup: %s", exc)
-            config = ProviderConfig()
-        openai_provider = OpenAICompatibleProvider(config=config)
-        service.register_provider("openai", openai_provider)
-        service.register_provider("openai-compatible", openai_provider)
-
-        ctx.register_service("llm", service)
-        self._service = service
-        logger.info(
-            "LLM plugin setup complete; providers: %s",
-            service.info().get("providers", []),
-        )
+        for action, handler in zip(_ACTIONS, handlers):
+            ctx.ui.register_action(action, handler, plugin_id=self.id)
+        self._settings.register_section("llm", "LLM", self._render_settings)
 
     def teardown(self) -> None:
-        """Close providers and drop this plugin's UI contributions."""
+        self._login_cancel.set()
+        if self._settings is not None:
+            self._settings.unregister_section("llm")
+        if self._ctx is not None:
+            for action in _ACTIONS:
+                self._ctx.ui.unregister_action(action)
+        if self._runtime is not None:
+            self._runtime.close()
+        self._runtime = None
 
-        service = self._service
-        self._service = None
-        if service is not None:
-            try:
-                service.close()
-            except Exception:  # noqa: BLE001 - shutdown is best effort
-                logger.exception("failed to close the LLM service")
-        ctx = self._ctx
-        if ctx is not None and self._actions_added:
-            for action_id in ("llm.opencode_login", "llm.opencode_logout"):
-                try:
-                    ctx.ui.unregister_action(action_id)
-                except Exception:  # noqa: BLE001 - UI may already be gone
-                    pass
-            self._actions_added = False
+    def _refresh(self) -> None:
+        if self._ctx is not None:
+            self._ctx.ui.refresh("llm:configuration")
 
-    # ------------------------------------------------------------------
-    # OpenCode mode
-    # ------------------------------------------------------------------
-    def _opencode_config(
-        self,
-        settings: Any,
-        *,
-        temperature: Any,
-        max_tokens: Any,
-        timeout: Any,
-        max_retries: Any,
-        extra_body: Any,
-    ) -> ProviderConfig:
-        with self._refresh_lock:
-            access = str(settings.get("llm.opencode_access_token", "") or "")
-            refresh = str(settings.get("llm.opencode_refresh_token", "") or "")
-            expires_ms = int(settings.get("llm.opencode_expires_at", 0) or 0)
-            org_id = str(settings.get("llm.opencode_org_id", "") or "")
-            if not access:
-                raise OpenCodeGoError("请先在设置中关联 OpenCode 套餐。")
-            if expires_ms and expires_ms <= int(time.time() * 1000) + _REFRESH_SKEW_MS:
-                tokens = refresh_access_token(refresh)
-                access = tokens.access_token
-                refresh = tokens.refresh_token or refresh
-                org_id = tokens.org_id or org_id
-                self._store_opencode_tokens(settings, tokens, refresh=refresh)
-        if not org_id:
-            raise OpenCodeGoError("OpenCode 套餐凭据缺少 orgID，请重新关联。")
-        return ProviderConfig(
-            base_url=OPENCODE_GO_BASE_URL,
-            api_key=access,
-            model="",
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=float(timeout) if timeout else _DEFAULT_TIMEOUT,
-            max_retries=(
-                int(max_retries)
-                if max_retries is not None
-                else _DEFAULT_MAX_RETRIES
-            ),
-            extra_headers={
-                "x-opencode-org-id": org_id,
-                # Fallback affinity for calls that carry no session id (the VLM
-                # and any direct provider use).  Agent calls override all four
-                # per request with their own conversation id.
-                "x-opencode-session": _OPENCODE_SESSION_ID,
-                "x-session-affinity": _OPENCODE_SESSION_ID,
-                "X-Session-Id": _OPENCODE_SESSION_ID,
-                "x-opencode-session-id": _OPENCODE_SESSION_ID,
-            },
-            extra_body=dict(extra_body or {}),
-        )
+    def _call(self, method: str, **params: Any) -> dict[str, Any]:
+        if self._runtime is None:
+            raise RuntimeError("The LLM runtime is unavailable")
+        return self._runtime.call(method, **params)
 
-    def _store_opencode_tokens(
-        self,
-        settings: Any,
-        tokens: Any,
-        *,
-        refresh: str = "",
-    ) -> None:
-        refresh_value = tokens.refresh_token or refresh
-        expires = time.strftime(
-            "%Y-%m-%d %H:%M", time.localtime(tokens.expires_at_ms / 1000)
-        )
-        org = tokens.org_id or str(settings.get("llm.opencode_org_id", "") or "")
-        try:
-            settings.set("llm.opencode_access_token", tokens.access_token)
-            if refresh_value:
-                settings.set("llm.opencode_refresh_token", refresh_value)
-            settings.set("llm.opencode_expires_at", int(tokens.expires_at_ms))
-            if org:
-                settings.set("llm.opencode_org_id", org)
-            settings.set(
-                "llm.opencode_status",
-                f"已关联（{org or 'OpenCode'}，有效期至 {expires}）",
+    def _render_settings(self) -> list[dict[str, Any]]:
+        info = self._call("info")
+        blocks: list[dict[str, Any]] = [
+            {
+                "type": "form",
+                "fields": [
+                    _field(
+                        "models_yaml",
+                        "models.yml",
+                        info["models_yaml"],
+                        type="text",
+                        input="textarea",
+                    ),
+                    _field(
+                        "roles_yaml",
+                        "roles.yml",
+                        info["roles_yaml"],
+                        type="text",
+                        input="textarea",
+                    ),
+                ],
+                "submit": {"label": "保存配置", "action": "llm.configure"},
+            }
+        ]
+        roles = info.get("roles", {})
+        lines = ["### 角色模型"]
+        for role, resolved in roles.items():
+            selector = f"{resolved['provider']}/{resolved['model']}"
+            level = resolved.get("thinkingLevel")
+            if level:
+                selector += f":{level}"
+            lines.append(f"- `{role}`: `{selector}`")
+        blocks.append({"type": "markdown", "text": "\n".join(lines)})
+        providers = info.get("providers", [])
+        lines = ["### 提供方凭据"]
+        for provider in providers:
+            status = "已配置" if provider.get("configured") else "未配置"
+            if provider.get("auth") == "none":
+                status = "无需鉴权"
+            source = provider.get("source") or "none"
+            lines.append(f"- `{provider['id']}`: {status}（{source}）")
+        if self._login_status:
+            lines.append(self._login_status)
+        blocks.append({"type": "markdown", "text": "\n".join(lines)})
+
+        def provider_field(items: list[dict[str, Any]]) -> dict[str, Any]:
+            ids = [item["id"] for item in items]
+            return _field(
+                "provider",
+                "提供方",
+                ids[0] if ids else "",
+                type="select",
+                input="select",
+                options=ids,
             )
-        except Exception:  # noqa: BLE001 - settings storage failure is reported below
-            logger.exception("failed to store OpenCode credentials")
 
-    # ------------------------------------------------------------------
-    # OpenCode actions
-    # ------------------------------------------------------------------
-    def _handle_opencode_login(self, _payload: dict[str, Any]) -> dict[str, Any]:
-        settings = self._settings
-        if settings is None:
-            return {"ok": False, "message": "设置服务未就绪", "refresh": True}
-        with self._login_lock:
-            if self._login_thread is not None and self._login_thread.is_alive():
-                return {
-                    "ok": True,
-                    "message": "授权正在进行，请完成浏览器中的授权。",
-                    "refresh": True,
+        api_providers = [item for item in providers if item.get("auth") == "apiKey"]
+        if api_providers:
+            blocks.append(
+                {
+                    "type": "form",
+                    "fields": [
+                        provider_field(api_providers),
+                        _field("key", "API Key", input="password"),
+                    ],
+                    "submit": {"label": "保存密钥", "action": "llm.credentials"},
                 }
+            )
+        oauth = [item for item in providers if item.get("auth") == "oauth"]
+        if oauth:
+            blocks.append(
+                {
+                    "type": "form",
+                    "fields": [provider_field(oauth)],
+                    "submit": {"label": "关联套餐", "action": "llm.opencode_login"},
+                }
+            )
+        configured = [item for item in providers if item.get("auth") != "none"]
+        if configured:
+            blocks.append(
+                {
+                    "type": "form",
+                    "fields": [provider_field(configured)],
+                    "submit": {"label": "删除凭据", "action": "llm.logout"},
+                }
+            )
+        return blocks
+
+    def _handle_configure(self, payload: dict[str, Any]) -> dict[str, Any]:
+        values = _values(payload)
+        models = values.get("models_yaml")
+        roles = values.get("roles_yaml")
+        if not isinstance(models, str) or not isinstance(roles, str):
+            return {
+                "ok": False,
+                "message": "请填写两份 YAML 配置后保存．",
+                "refresh": False,
+            }
         try:
-            flow = start_device_flow()
-        except OpenCodeGoError as exc:
-            return {"ok": False, "message": str(exc), "refresh": True}
-        opened = False
-        try:
-            opened = bool(webbrowser.open(flow.verification_uri_complete))
-        except Exception:  # noqa: BLE001 - browser is optional
-            opened = False
-        try:
-            settings.set("llm.opencode_status", "等待授权…")
-        except Exception:  # noqa: BLE001
-            pass
-        self._start_login_poller(settings, flow)
-        hint = (
-            "已打开 OpenCode 授权页面，请在浏览器完成授权。"
-            if opened
-            else f"请打开 {flow.verification_uri_complete} 完成授权。"
-        )
+            self._call("configure", models=models, roles=roles)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "message": f"保存失败：{exc}．修改配置后重试．",
+                "refresh": False,
+            }
+        self._refresh()
         return {
             "ok": True,
-            "message": f"{hint} 验证码：{flow.user_code}（完成后自动保存）",
+            "message": "已保存配置，新会话使用新配置．",
             "refresh": True,
         }
 
-    def _start_login_poller(self, settings: Any, flow: Any) -> None:
-        with self._login_lock:
-            if self._login_thread is not None and self._login_thread.is_alive():
-                return
-            self._login_thread = threading.Thread(
-                target=self._poll_login,
-                args=(settings, flow),
-                name="opencode-device-login",
-                daemon=True,
-            )
-            self._login_thread.start()
+    def _handle_credentials(self, payload: dict[str, Any]) -> dict[str, Any]:
+        values = _values(payload)
+        provider = str(values.get("provider") or "")
+        key = values.get("key")
+        if not provider or not isinstance(key, str) or not key.strip():
+            return {
+                "ok": False,
+                "message": "请选择提供方并填写密钥．",
+                "refresh": False,
+            }
+        try:
+            self._call("credentials", provider=provider, key=key)
+        except Exception:
+            # Provider errors can contain request data. Never echo credential values.
+            logger.error("failed to save provider credentials")
+            return {
+                "ok": False,
+                "message": "密钥保存失败．检查提供方配置后重试．",
+                "refresh": False,
+            }
+        self._refresh()
+        return {"ok": True, "message": "已保存密钥．", "refresh": True}
 
-    def _poll_login(self, settings: Any, flow: Any) -> None:
+    def _handle_logout(self, payload: dict[str, Any]) -> dict[str, Any]:
+        provider = str(_values(payload).get("provider") or "")
+        if not provider:
+            return {"ok": False, "message": "请选择提供方．", "refresh": False}
+        try:
+            with self._login_lock:
+                if self._login_provider == provider:
+                    self._login_cancel.set()
+                    self._login_status = ""
+                self._call("logout", provider=provider)
+        except Exception:
+            return {"ok": False, "message": "凭据删除失败．请重试．", "refresh": False}
+        self._refresh()
+        return {"ok": True, "message": "已删除凭据．", "refresh": True}
+
+    def _handle_opencode_login(self, payload: dict[str, Any]) -> dict[str, Any]:
+        provider = str(_values(payload).get("provider") or "")
+        try:
+            allowed = {
+                item["id"]
+                for item in self._call("info").get("providers", [])
+                if item.get("auth") == "oauth"
+            }
+            if provider not in allowed:
+                return {
+                    "ok": False,
+                    "message": "请选择 OpenCode 提供方．",
+                    "refresh": False,
+                }
+            with self._login_lock:
+                if self._login_thread is not None and self._login_thread.is_alive():
+                    return {
+                        "ok": True,
+                        "message": "授权正在进行，请完成浏览器中的授权．",
+                        "refresh": True,
+                    }
+                flow = start_device_flow()
+                self._login_cancel = threading.Event()
+                self._login_provider = provider
+                self._login_status = "等待 OpenCode 授权．"
+                self._login_thread = threading.Thread(
+                    target=self._poll_login,
+                    args=(provider, flow, self._login_cancel),
+                    name="opencode-device-login",
+                    daemon=True,
+                )
+                self._login_thread.start()
+        except Exception:
+            return {
+                "ok": False,
+                "message": "无法启动 OpenCode 授权．检查网络后重试．",
+                "refresh": False,
+            }
+        try:
+            webbrowser.open(flow.verification_uri_complete)
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "message": f"请打开 {flow.verification_uri_complete} 完成授权．验证码：{flow.user_code}",
+            "refresh": True,
+        }
+
+    def _poll_login(self, provider: str, flow: Any, cancel: threading.Event) -> None:
         deadline = time.monotonic() + flow.expires_in
-        while time.monotonic() < deadline:
-            try:
+        try:
+            while time.monotonic() < deadline and not cancel.is_set():
                 tokens = poll_device_token(flow)
-            except OpenCodeGoError as exc:
-                logger.warning("OpenCode device login failed: %s", exc)
-                try:
-                    settings.set("llm.opencode_status", f"授权失败：{exc}")
-                except Exception:  # noqa: BLE001
-                    pass
-                return
-            if tokens is not None:
-                self._store_opencode_tokens(settings, tokens)
-                logger.info("OpenCode Go subscription linked")
-                return
-            time.sleep(max(1, int(flow.interval)))
-        try:
-            settings.set("llm.opencode_status", "授权超时，请重新关联")
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _handle_opencode_logout(self, _payload: dict[str, Any]) -> dict[str, Any]:
-        settings = self._settings
-        if settings is None:
-            return {"ok": False, "message": "设置服务未就绪", "refresh": True}
-        for key in (
-            "llm.opencode_access_token",
-            "llm.opencode_refresh_token",
-            "llm.opencode_org_id",
-        ):
-            try:
-                settings.reset(key)
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            settings.set("llm.opencode_expires_at", 0)
-            settings.set("llm.opencode_status", "未关联")
-        except Exception:  # noqa: BLE001
-            pass
-        return {"ok": True, "message": "已解除 OpenCode 套餐关联", "refresh": True}
-
-
-def _on_llm_event(event_type: str, payload: dict[str, Any]) -> None:
-    logger.debug("llm event %s: %s", event_type, payload)
+                if tokens is not None:
+                    with self._login_lock:
+                        if cancel.is_set():
+                            return
+                        self._call(
+                            "import_credentials",
+                            provider=provider,
+                            credential={
+                                "type": "oauth",
+                                "access": tokens.access_token,
+                                "refresh": tokens.refresh_token,
+                                "expires": tokens.expires_at_ms,
+                                "org_id": tokens.org_id,
+                            },
+                        )
+                        self._login_status = "已关联 OpenCode 套餐．"
+                    return
+                cancel.wait(max(1, int(flow.interval)))
+            if not cancel.is_set():
+                self._login_status = "OpenCode 授权超时．请重新关联．"
+        except (OpenCodeGoError, RuntimeError):
+            self._login_status = "OpenCode 授权失败．请重新关联．"
+        except Exception:
+            self._login_status = "OpenCode 凭据保存失败．请重新关联．"
+        finally:
+            self._refresh()

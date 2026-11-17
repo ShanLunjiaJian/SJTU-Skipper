@@ -24,8 +24,6 @@ SETTING_TYPES = {
     "action",
 }
 
-#: Backwards-compatible alias (the old name used by ``plugins.settings``).
-VALID_TYPES = SETTING_TYPES
 
 SECRET_MASK = "******"
 """Placeholder shown in public (UI/HTTP) output for a configured secret."""
@@ -118,6 +116,7 @@ class SettingsSpec:
     label: str
     type: str = "string"
     default: Any = None
+    nullable: bool = False
     group: str = "General"
     description: str = ""
     options: tuple[Any, ...] = ()
@@ -175,6 +174,12 @@ class SettingsSpec:
         are not allowed by this specification.
         """
 
+        if self.nullable and (
+            value is None
+            or isinstance(value, str)
+            and value.strip().lower() in ("", "none", "null")
+        ):
+            return None
         if self.type in ("string", "text", "secret"):
             if value is None:
                 return ""

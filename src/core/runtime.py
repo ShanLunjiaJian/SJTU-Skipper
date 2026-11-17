@@ -21,12 +21,7 @@ logger = logging.getLogger("lecture_agent.runtime")
 
 
 class LLMProxy:
-    """Late-bound facade over the ``llm`` service.
-
-    The low-level LLM plugin is itself a plugin, so the context must exist
-    before it registers the real ``LLMService``.  This proxy resolves the
-    service at call time and keeps plugin contexts stable.
-    """
+    """Resolve the shared OMP runtime after plugin registration."""
 
     def __init__(self, services: ServiceRegistry) -> None:
         self._services = services
@@ -39,26 +34,14 @@ class LLMProxy:
             )
         return service
 
-    def chat(self, **kwargs: Any) -> Any:
-        return self._service().chat(**kwargs)
+    def call(self, method: str, **params: Any) -> dict[str, Any]:
+        return self._service().call(method, **params)
 
-    def stream(self, **kwargs: Any) -> Any:
-        return self._service().stream(**kwargs)
+    def stream(self, method: str, **params: Any):
+        return self._service().stream(method, **params)
 
-    def config_for(self, profile: str) -> Any:
-        return self._service().config_for(profile)
-
-    def info(self) -> dict[str, Any]:
-        service = self._services.get("llm")
-        if service is None:
-            return {"registered": False}
-        getter = getattr(service, "info", None)
-        if callable(getter):
-            try:
-                return dict(getter())
-            except Exception as exc:  # noqa: BLE001
-                return {"error": str(exc)}
-        return {"registered": True}
+    def cancel(self, session_id: str):
+        return self._service().cancel(session_id)
 
     def close(self) -> None:
         service = self._services.get("llm")
@@ -152,10 +135,6 @@ class Runtime:
         self.plugins.register(registered)
         return registered
 
-    def add_plugins(self, plugins: Iterable[Plugin | type[Plugin]]) -> None:
-        for plugin in plugins:
-            self.add_plugin(plugin)
-
     # -- dynamic plugin management --------------------------------------
     def load_plugin(self, plugin_or_spec: Plugin | type[Plugin] | str) -> Plugin:
         """Load an external plugin into the running runtime."""
@@ -185,10 +164,7 @@ class Runtime:
                 "services": self.services.snapshot(),
             },
             "session": current.status(),
-            "sessions": [
-                dataclasses.asdict(s) for s in self.hub.list_sessions()
-            ][-10:],
-            "llm": self.llm.info(),
+            "sessions": [dataclasses.asdict(s) for s in self.hub.list_sessions()][-10:],
         }
 
 

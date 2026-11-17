@@ -100,9 +100,6 @@ class EventBus:
             self._types[name] = event_type
             return event_type
 
-    #: Alias matching the "create event" wording in the plugin API.
-    create = define
-
     def on(
         self,
         event_type: str | EventType,
@@ -135,7 +132,9 @@ class EventBus:
                 self._handlers[name].sort(key=lambda s: (-s.priority, s.seq))
             return sub
 
-    def once(self, event_type: str | EventType, handler: Handler, **kwargs: Any) -> Subscription:
+    def once(
+        self, event_type: str | EventType, handler: Handler, **kwargs: Any
+    ) -> Subscription:
         kwargs["once"] = True
         return self.on(event_type, handler, **kwargs)
 
@@ -215,11 +214,6 @@ class EventBus:
             self._queue.put(event)
             return event
 
-    def emit_event(self, event: Event) -> None:
-        with self._lock:
-            self._pending += 1
-            self._queue.put(event)
-
     def flush(self, timeout: float | None = 10.0) -> bool:
         """Wait until every emitted event has been dispatched."""
 
@@ -237,7 +231,9 @@ class EventBus:
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     return False
-                self._pending_cv.wait(0.05 if remaining is None else min(0.05, remaining))
+                self._pending_cv.wait(
+                    0.05 if remaining is None else min(0.05, remaining)
+                )
             return True
 
     def _drain_sync(self) -> None:

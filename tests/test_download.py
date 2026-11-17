@@ -28,6 +28,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
         header = self.headers.get("Range")
+        if self.path == "/sequential":
+            header = None
         if header and header.startswith("bytes="):
             start_text, _, end_text = header[6:].partition("-")
             start = int(start_text or 0)
@@ -40,7 +42,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 "Content-Range", f"bytes {start}-{end}/{len(self.payload)}"
             )
             self.send_header("Content-Length", str(len(body)))
+            if self.path == "/changed":
+                self.send_header(
+                    "ETag", '"first"' if header == "bytes=0-0" else '"second"'
+                )
             self.end_headers()
+            if self.path == "/truncated" and header != "bytes=0-0":
+                self.wfile.write(body[: max(1, len(body) // 2)])
+                self.close_connection = True
+                return
             self.wfile.write(body)
             return
         self.send_response(200)
@@ -104,19 +114,68 @@ def test_cancel_before_download(tmp_path: Path) -> None:
 
 
 def test_large_file_uses_parallel_ranges(http_base: str, tmp_path: Path) -> None:
-    from plugins.input import download as download_mod
-
     payload = bytes(range(256)) * (200 * 1024)  # ~51 MB
     _Handler.payload = payload
-    original_chunk = download_mod._CHUNK_SIZE
-    download_mod._CHUNK_SIZE = 4 * 1024 * 1024
     try:
         result = MediaDownloader().download(
             f"{http_base}/big.mp4", tmp_path / "big.mp4"
         )
     finally:
-        download_mod._CHUNK_SIZE = original_chunk
         _Handler.payload = b"0123456789" * 1024
     assert result.ok is True
     assert result.path.read_bytes() == payload
     assert not list(tmp_path.glob("big.mp4*chunk*"))
+
+
+def test_cache_ranges(http_base: str, tmp_path: Path) -> None:
+    import httpx2
+
+    handle = MediaDownloader().start(
+        f"{http_base}/lecture.mp4", tmp_path / "lecture.mp4"
+    )
+    try:
+        with httpx2.Client() as client:
+            response = client.get(handle.input_url, headers={"Range": "bytes=-17"})
+            assert response.status_code == 206
+            assert response.content == _Handler.payload[-17:]
+            assert (
+                response.headers["content-range"]
+                == f"bytes {len(_Handler.payload) - 17}-{len(_Handler.payload) - 1}/{len(_Handler.payload)}"
+            )
+            for value in ("bytes=0-1,4-5", "bytes=-0", "bytes=900000-", "bytes=4-2"):
+                assert (
+                    client.get(handle.input_url, headers={"Range": value}).status_code
+                    == 416
+                )
+            response = client.head(handle.input_url)
+            assert response.status_code == 200
+            assert int(response.headers["content-length"]) == len(_Handler.payload)
+        assert handle.wait().ok
+        assert handle.wait().ok
+    finally:
+        handle.close()
+        handle.close()
+
+
+def test_sequential_source(http_base: str, tmp_path: Path) -> None:
+    result = MediaDownloader().download(
+        f"{http_base}/sequential", tmp_path / "media.mp4"
+    )
+    assert result.ok
+    assert result.path.read_bytes() == _Handler.payload
+
+
+def test_truncated_source_fails(http_base: str, tmp_path: Path) -> None:
+    result = MediaDownloader().download(
+        f"{http_base}/truncated", tmp_path / "media.mp4"
+    )
+    assert not result.ok
+    assert not (tmp_path / "media.mp4").exists()
+    assert not list(tmp_path.glob("*.part*"))
+
+
+def test_changed_resource_fails(http_base: str, tmp_path: Path) -> None:
+    result = MediaDownloader().download(f"{http_base}/changed", tmp_path / "media.mp4")
+    assert not result.ok
+    assert "changed" in result.error
+    assert not list(tmp_path.iterdir())

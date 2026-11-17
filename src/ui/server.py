@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from config import SHUTDOWN_TIMEOUT
+from core.services import ServiceNotFound
 from core.runtime import Runtime
 from ui.auth import COOKIE_NAME as AUTH_COOKIE, install as install_auth
 
@@ -55,6 +56,12 @@ class ActionRequest(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
     page_id: str | None = None
     item_id: str | None = None
+
+
+class NavigationRequest(BaseModel):
+    page: str = ""
+    class_id: str = Field(default="", alias="class")
+    doc: str = ""
 
 
 class _Broadcaster:
@@ -148,9 +155,9 @@ def create_app(runtime: Runtime) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owns_runtime = not runtime.started
         broadcaster.bind_loop(asyncio.get_running_loop())
-        app.state.media_client = httpx.AsyncClient(
+        app.state.media_client = httpx2.AsyncClient(
             follow_redirects=True,
-            timeout=httpx.Timeout(30.0, read=120.0),
+            timeout=httpx2.Timeout(30.0, read=120.0),
             headers={"User-Agent": "sjtu-skipper/0.1"},
         )
         subscription = runtime.bus.on(
@@ -181,7 +188,7 @@ def create_app(runtime: Runtime) -> FastAPI:
             notify_subscription.cancel()
             # Any subscription this adapter registered under "server" goes too.
             runtime.bus.remove_plugin("server")
-            client: httpx.AsyncClient | None = getattr(app.state, "media_client", None)
+            client: httpx2.AsyncClient | None = getattr(app.state, "media_client", None)
             if client is not None:
                 try:
                     await client.aclose()
@@ -215,9 +222,71 @@ def create_app(runtime: Runtime) -> FastAPI:
             "plugin_order": runtime.plugins.order,
         }
 
+    def navigation_state() -> dict[str, Any]:
+        state = runtime.ui.state()
+        page = state.get("active_page") or ""
+        navigation = {"page": page}
+        input_service = runtime.services.get("input")
+        reader = runtime.services.get("reader")
+        if page == "input:session" and input_service is not None:
+            navigation["class"] = input_service.selected_class()
+        if page.startswith("reader:") and reader is not None:
+            navigation["doc"] = reader.navigation(page)
+        state["navigation"] = navigation
+        return state
+
     @app.get("/api/ui/state")
     def ui_state() -> JSONResponse:
-        return JSONResponse(runtime.ui.state())
+        return JSONResponse(navigation_state())
+
+    @app.post("/api/ui/navigate")
+    def navigate(request: NavigationRequest) -> JSONResponse:
+        page = request.page
+        try:
+            if not page:
+                runtime.ui.show_home()
+            else:
+                if page == "input:session" and request.class_id:
+                    runtime.services.require("input").open_class(request.class_id)
+                elif page.startswith("reader:notes:") and page.endswith(
+                    (":summarize", ":instant-summarize")
+                ):
+                    kind = page.rsplit(":", 1)[1]
+                    sid = page.removeprefix("reader:notes:").removesuffix(f":{kind}")
+                    if not sid or Path(sid).name != sid or sid in {".", ".."}:
+                        raise ValueError("Invalid session ID")
+                    if not (runtime.data_dir / "sessions" / sid).is_dir():
+                        raise KeyError("Session not found")
+                    if kind == "instant-summarize":
+                        result = runtime.ui.dispatch_action(
+                            "instant-summarize.read",
+                            {"session_id": sid, "doc": request.doc or "knowledge"},
+                        )
+                        if not result.ok:
+                            raise KeyError(result.message)
+                    else:
+                        runtime.services.require("summarize").open_notes(
+                            sid, request.doc or "knowledge"
+                        )
+                elif page.startswith("summarize:logs:"):
+                    sid = page.removeprefix("summarize:logs:")
+                    if not sid or Path(sid).name != sid or sid in {".", ".."}:
+                        raise ValueError("Invalid session ID")
+                    if not (runtime.data_dir / "sessions" / sid).is_dir():
+                        raise KeyError("Session not found")
+                    runtime.services.require("summarize").open_logs(sid)
+                if request.doc:
+                    runtime.services.require("reader").select_document(
+                        page, request.doc
+                    )
+                runtime.ui.open_page(page)
+        except (KeyError, ServiceNotFound) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(
+            {"ok": True, "navigation": navigation_state()["navigation"]}
+        )
 
     @app.get("/api/runtime")
     def runtime_status() -> JSONResponse:
@@ -268,7 +337,9 @@ def create_app(runtime: Runtime) -> FastAPI:
         """
 
         url = _allowed_media_url(src)
-        client: httpx.AsyncClient | None = getattr(request.app.state, "media_client", None)
+        client: httpx2.AsyncClient | None = getattr(
+            request.app.state, "media_client", None
+        )
         if client is None:
             raise HTTPException(status_code=503, detail="media relay unavailable")
 
@@ -285,7 +356,7 @@ def create_app(runtime: Runtime) -> FastAPI:
         )
         try:
             upstream = await client.send(upstream_request, stream=True)
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             logger.warning("media relay failed for %s: %s", url, exc)
             raise HTTPException(status_code=502, detail=f"media relay failed: {exc}")
 
@@ -296,7 +367,9 @@ def create_app(runtime: Runtime) -> FastAPI:
         }
         if request.method == "HEAD":
             await upstream.aclose()
-            return StreamingResponse(iter(()), status_code=upstream.status_code, headers=passthrough)
+            return StreamingResponse(
+                iter(()), status_code=upstream.status_code, headers=passthrough
+            )
         return StreamingResponse(
             upstream.aiter_bytes(),
             status_code=upstream.status_code,

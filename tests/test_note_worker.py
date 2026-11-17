@@ -1,0 +1,181 @@
+"""Verify note cancellation and preview through the shared runtime bridge."""
+
+import queue
+import threading
+from contextlib import contextmanager
+from types import SimpleNamespace
+
+
+from core.streams import StreamHub
+from core.workspace import FileWorkspace
+from plugins.agent import AgentService
+from plugins.notes_pipeline.plugin import NotesPipelinePlugin
+from plugins.notes_pipeline.prompts import NOTE_HEADERS, SOURCE_FILENAME
+from tests.support import FakeSettings
+from tests.test_agent import ScriptedRuntime
+
+
+@contextmanager
+def pipeline_context(tmp_path, script):
+    sdk = ScriptedRuntime(script)
+    settings = FakeSettings(
+        {"notes.concurrency": 4, "instant-summarize.enabled": False}
+    )
+    ctx = SimpleNamespace(
+        data_dir=tmp_path,
+        streams=StreamHub(),
+        llm=sdk,
+        events=SimpleNamespace(on=lambda *a, **k: None, emit=lambda *a, **k: None),
+        ui=SimpleNamespace(
+            refresh=lambda reason: None,
+            register_task_provider=lambda *a, **k: None,
+            register_action=lambda *a, **k: None,
+        ),
+        register_service=lambda *a: None,
+        require=lambda name: sdk if name == "llm" else settings,
+    )
+    agent = AgentService(ctx)
+    ctx.require = lambda name: {"settings": settings, "agent": agent, "llm": sdk}[name]
+    ctx.service = lambda name: None
+    pipeline = NotesPipelinePlugin()
+    pipeline.setup(ctx)
+    try:
+        yield pipeline, agent, sdk
+    finally:
+        pipeline.teardown()
+
+
+def test_stop_cancels_all_active_sdk_sessions(tmp_path):
+    started = queue.Queue()
+
+    def script(sdk, params):
+        started.put(params["session_id"])
+        assert sdk.cancelled[params["session_id"]].wait(5)
+        yield {"type": "result", "result": {"error": "cancelled"}}
+
+    with pipeline_context(tmp_path, script) as (pipeline, agent, sdk):
+        errors = queue.Queue()
+        threads = []
+        for role in ("note_writer", "note_review"):
+            session = agent.create_session(role, role=role, tools=[])
+
+            def execute(session=session):
+                try:
+                    pipeline._agent_run("lecture", session.id, "Wait")
+                except Exception as exc:
+                    errors.put(exc)
+                finally:
+                    agent.close(session.id)
+
+            thread = threading.Thread(target=execute)
+            thread.start()
+            threads.append(thread)
+        ids = [started.get(timeout=3) for _ in threads]
+        assert pipeline.stop("lecture")
+        for thread in threads:
+            thread.join(3)
+            assert not thread.is_alive()
+        assert all(sdk.cancelled[sid].is_set() for sid in ids)
+        assert errors.qsize() == 2
+        assert not pipeline.agent_tasks
+        assert pipeline.status("lecture")["generation_state"] == "finished"
+
+
+def test_writer_preview_is_published_before_terminal_result(tmp_path):
+    release = threading.Event()
+    changed = threading.Event()
+
+    def script(sdk, params):
+        yield {
+            "type": "event",
+            "name": "agent.file",
+            "data": {
+                "file": "note_knowledge.md",
+                "content": "# Notes\n\nFirst theorem and all conditions.\n",
+            },
+        }
+        changed.set()
+        assert release.wait(5)
+        yield {"type": "result", "result": {"final_message": "Saved", "steps": 2}}
+
+    with pipeline_context(tmp_path, script) as (pipeline, agent, sdk):
+        directory = tmp_path / "private"
+        directory.mkdir()
+        files = {name: directory / name for name in (*NOTE_HEADERS, SOURCE_FILENAME)}
+        for name, path in files.items():
+            path.write_text(NOTE_HEADERS.get(name, "Complete original source"))
+        session = agent.create_session(
+            "writer",
+            role="note_writer",
+            workspace=FileWorkspace(files, readonly=(SOURCE_FILENAME,)),
+            meta={"role": "writer", "lecture_session": "lecture"},
+        )
+        results = queue.Queue()
+        thread = threading.Thread(
+            target=lambda: results.put(
+                pipeline._agent_run("lecture", session.id, "Write chapters")
+            )
+        )
+        thread.start()
+        try:
+            assert changed.wait(3)
+            assert thread.is_alive()
+            notes = tmp_path / "sessions" / "lecture" / "notes"
+            assert "First theorem" in (notes / "note_knowledge.md").read_text()
+            assert "未审阅" in (notes / "note_knowledge.md").read_text()
+            assert "First theorem" in files["note_knowledge.md"].read_text()
+            assert pipeline.status("lecture")["phase"] != "published"
+        finally:
+            release.set()
+            thread.join(3)
+            agent.close(session.id)
+        assert not results.get(timeout=1).error
+
+
+def test_note_runs_send_only_session_and_instruction(tmp_path):
+    with pipeline_context(tmp_path, None) as (pipeline, agent, sdk):
+        session = agent.create_session("writer", role="note_writer", tools=[])
+        try:
+            first = pipeline._agent_run("lecture", session.id, "First stage")
+            second = pipeline._agent_run("lecture", session.id, "Continue")
+            assert first.final_message == second.final_message == "Answer"
+            assert len(sdk.runs) == 2
+            assert all(set(run) == {"session_id", "instruction"} for run in sdk.runs)
+            assert all(run["session_id"] == session.id for run in sdk.runs)
+            assert "lecture" in sdk.runs[0]["instruction"]
+        finally:
+            agent.close(session.id)
+
+
+def test_empty_finalization_releases_generation(tmp_path):
+    with pipeline_context(tmp_path, None) as (pipeline, agent, sdk):
+        session = pipeline.ctx.streams.start_session()
+        session.input_done = True
+        with pipeline.condition:
+            assert pipeline.finalize(session.session_id)
+            pipeline._schedule(session.session_id)
+            assert (
+                pipeline.status(session.session_id)["generation_state"] == "not_started"
+            )
+            assert not pipeline.queue
+            assert not pipeline.stop(session.session_id)
+
+
+def test_chunk_only_completion_releases_generation(tmp_path):
+    with pipeline_context(tmp_path, None) as (pipeline, agent, sdk):
+        pipeline.settings.set("instant-summarize.enabled", True)
+        pipeline.settings.set("summarize.on_stop", "skip")
+        session = pipeline.ctx.streams.start_session()
+        with pipeline.condition:
+            state = pipeline._state(session.session_id)
+            assert (
+                pipeline.status(session.session_id)["generation_state"] == "generating"
+            )
+            state["chunks"] = [{"state": "empty", "index": 0, "end": 600}]
+            session.input_done = True
+            assert pipeline.status(session.session_id)["generation_state"] == "finished"
+            assert not pipeline.stop(session.session_id)
+            assert pipeline.delete(session.session_id)
+            assert (
+                pipeline.status(session.session_id)["generation_state"] == "not_started"
+            )

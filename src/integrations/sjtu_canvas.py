@@ -1,9 +1,8 @@
 """SJTU Canvas & video portal integration.
 
 Wraps the vendored ``sjtu_canvas_assistant`` package into a catalog that the
-input plugin consumes.  Each Canvas course gets its own ``SJTUVideoClient`` to
-avoid auth crossover.  The old submodule is kept only in local ``legacy/`` and
-is not required at runtime.
+input plugin consumes. Each Canvas course gets its own ``SJTUVideoClient`` to
+avoid auth crossover.
 """
 
 from __future__ import annotations
@@ -43,8 +42,9 @@ class InputError(RuntimeError):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def load_token_from_env() -> str:
-    """Read the Canvas token from the project or legacy .env file."""
+    """Read the Canvas token from the project .env file."""
 
     from dotenv import load_dotenv
 
@@ -59,34 +59,10 @@ def _load_base_url(default: str = "https://oc.sjtu.edu.cn") -> str:
     return _clean_base_url(raw)
 
 
-def _extract_stream_url(info: Any) -> str:
-    """Support both the user's enhanced VideoInfo and the stock submodule."""
-
-    getter = getattr(info, "get_stream_url", None)
-    if callable(getter):
-        try:
-            url = getter()
-            if url:
-                return str(url)
-        except Exception:  # noqa: BLE001 - fall through to play_items
-            pass
-    items = getattr(info, "play_items", None) or []
-    for item in items:
-        if isinstance(item, dict):
-            url = (
-                item.get("url")
-                or item.get("playUrl")
-                or item.get("videoUrl")
-                or item.get("hlsUrl")
-            )
-            if url:
-                return str(url)
-    return ""
-
-
 # ---------------------------------------------------------------------------
 # SJTUCatalog
 # ---------------------------------------------------------------------------
+
 
 class SJTUCatalog:
     """Thin catalog that combines Canvas courses and SJTU video portal data.
@@ -180,9 +156,7 @@ class SJTUCatalog:
         try:
             courses = client.list_courses(active_only=True)
         except CanvasAuthError:
-            raise InputError(
-                "Canvas token 无效，请在设置中更新 input.canvas_token。"
-            )
+            raise InputError("Canvas token 无效，请在设置中更新 input.canvas_token。")
         except CanvasNetworkError as exc:
             raise InputError(f"Canvas 网络错误：{exc}")
         except (CanvasAPIError, CanvasPermissionError, CanvasNotFoundError) as exc:
@@ -190,7 +164,9 @@ class SJTUCatalog:
 
         result: list[dict[str, Any]] = []
         for c in courses:
-            teacher_names = [t.display_name for t in (c.teachers or []) if t.display_name]
+            teacher_names = [
+                t.display_name for t in (c.teachers or []) if t.display_name
+            ]
             term_name = c.term.name if c.term and c.term.name else ""
             result.append(
                 {
@@ -257,7 +233,7 @@ class SJTUCatalog:
         except (VideoIntegrationError, VideoNetworkError) as exc:
             raise InputError(f"获取视频信息失败：{exc}")
 
-        url = _extract_stream_url(info)
+        url = info.get_stream_url() or ""
         if not url:
             # Try to re-auth and retry once
             _log.info("No stream URL in first attempt, retrying auth for %s", video_id)
@@ -266,7 +242,7 @@ class SJTUCatalog:
             try:
                 vc2.resolve_course_video_auth(cid_int)
                 info2 = vc2.get_video_info(cid_int, video_id)
-                url = _extract_stream_url(info2)
+                url = info2.get_stream_url() or ""
             except Exception as exc:
                 raise InputError(f"重试获取视频 URL 失败：{exc}")
         if not url:
@@ -275,9 +251,7 @@ class SJTUCatalog:
             )
         return url
 
-    def get_recording_streams(
-        self, course_id: str, video_id: str
-    ) -> dict[str, str]:
+    def get_recording_streams(self, course_id: str, video_id: str) -> dict[str, str]:
         """Return per-view stream URLs for one recording.
 
         The platform publishes several views per class; ``viewNum`` 1 is the
@@ -313,7 +287,7 @@ class SJTUCatalog:
                 view = 0
             views.setdefault(view, str(url))
         if not views:
-            url = _extract_stream_url(info)
+            url = info.get_stream_url() or ""
             if url:
                 views[0] = url
         return {str(key): value for key, value in views.items()}
@@ -339,7 +313,7 @@ class SJTUCatalog:
                 headers = self._live_headers(token)
                 return token, headers
 
-        # No cached token — iterate active courses
+        # No cached token. Iterate active courses.
         client = self._canvas_client()
         try:
             courses = client.list_courses(active_only=True)
@@ -358,14 +332,17 @@ class SJTUCatalog:
                 if token:
                     return token, self._live_headers(token)
             except Exception as exc:
-                _log.debug("Live token: course %s (%s) auth failed: %s",
-                           cid, course.name or cid, exc)
+                _log.debug(
+                    "Live token: course %s (%s) auth failed: %s",
+                    cid,
+                    course.name or cid,
+                    exc,
+                )
                 errors.append(f"  - {course.name or cid}: {exc}")
                 continue
 
         raise InputError(
-            "无法获取视频访问令牌。已尝试所有活跃课程，均未成功：\n"
-            + "\n".join(errors)
+            "无法获取视频访问令牌。已尝试所有活跃课程，均未成功：\n" + "\n".join(errors)
         )
 
     def _live_headers(self, token: str) -> dict[str, str]:
@@ -394,10 +371,7 @@ class SJTUCatalog:
         ``start`` / ``end`` format: ``YYYY-MM-DD HH:MM:SS``.
         """
         self._require_token()
-        try:
-            import httpx
-        except ImportError:
-            raise InputError("httpx 未安装，无法查询直播列表。")
+        import httpx2
 
         _token, headers = self._ensure_live_token()
 
@@ -410,7 +384,7 @@ class SJTUCatalog:
             "page.orders[0].field": "courBeginTime",
         }
 
-        with httpx.Client(timeout=httpx.Timeout(15.0), follow_redirects=True) as cl:
+        with httpx2.Client(timeout=httpx2.Timeout(15.0), follow_redirects=True) as cl:
             try:
                 resp = cl.get(
                     f"{NEW_VIDEO_SERVICE_ROOT}/v1/vod_live",
@@ -418,11 +392,11 @@ class SJTUCatalog:
                     headers=headers,
                 )
                 resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
+            except httpx2.HTTPStatusError as exc:
                 raise InputError(f"直播列表查询失败 (HTTP {exc.response.status_code})")
-            except httpx.TimeoutException:
+            except httpx2.TimeoutException:
                 raise InputError("直播列表查询超时")
-            except httpx.TransportError as exc:
+            except httpx2.TransportError as exc:
                 raise InputError(f"直播列表网络错误：{exc}")
 
         try:
@@ -443,8 +417,12 @@ class SJTUCatalog:
                         or item.get("courName")
                         or item.get("name", "")
                     ),
-                    "classroom": str(item.get("clroName") or item.get("classroomName", "")),
-                    "begin": str(item.get("courBeginTime") or item.get("beginTime", "")),
+                    "classroom": str(
+                        item.get("clroName") or item.get("classroomName", "")
+                    ),
+                    "begin": str(
+                        item.get("courBeginTime") or item.get("beginTime", "")
+                    ),
                     "end": str(item.get("courEndTime") or item.get("endTime", "")),
                     "status": str(item.get("status") or item.get("liveStatus", "")),
                 }
@@ -453,14 +431,11 @@ class SJTUCatalog:
 
     def get_live_devices(self, live_id: str) -> list[dict[str, Any]]:
         """Fetch camera/device list for a live stream."""
-        try:
-            import httpx
-        except ImportError:
-            raise InputError("httpx 未安装。")
+        import httpx2
 
         _token, headers = self._ensure_live_token()
 
-        with httpx.Client(timeout=httpx.Timeout(15.0), follow_redirects=True) as cl:
+        with httpx2.Client(timeout=httpx2.Timeout(15.0), follow_redirects=True) as cl:
             try:
                 resp = cl.get(
                     f"{NEW_VIDEO_SERVICE_ROOT}/v1/course_vod_videoinfos",
@@ -468,11 +443,11 @@ class SJTUCatalog:
                     headers=headers,
                 )
                 resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
+            except httpx2.HTTPStatusError as exc:
                 raise InputError(f"直播设备查询失败 (HTTP {exc.response.status_code})")
-            except httpx.TimeoutException:
+            except httpx2.TimeoutException:
                 raise InputError("直播设备查询超时")
-            except httpx.TransportError as exc:
+            except httpx2.TransportError as exc:
                 raise InputError(f"直播设备网络错误：{exc}")
 
         try:
@@ -482,9 +457,7 @@ class SJTUCatalog:
 
         data = payload.get("data") if isinstance(payload, dict) else payload
         devices = (
-            data.get("courseDeviceViewDtoList")
-            if isinstance(data, dict)
-            else []
+            data.get("courseDeviceViewDtoList") if isinstance(data, dict) else []
         ) or []
 
         result: list[dict[str, Any]] = []
@@ -494,7 +467,9 @@ class SJTUCatalog:
                     "name": str(d.get("chanNameMain") or d.get("deviceName", "")),
                     "url": str(d.get("chanNameMainPlayUrl") or d.get("playUrl", "")),
                     "view_num": d.get("deviViewNum") or d.get("viewNum", 0),
-                    "device_id": str(d.get("deviId") or d.get("deviceId") or d.get("chanId", "")),
+                    "device_id": str(
+                        d.get("deviId") or d.get("deviceId") or d.get("chanId", "")
+                    ),
                 }
             )
         return result

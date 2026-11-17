@@ -60,9 +60,7 @@ class ServiceRegistry:
             return []
         with self._lock:
             removed = [
-                name
-                for name, owner in list(self._owners.items())
-                if owner == plugin_id
+                name for name, owner in list(self._owners.items()) if owner == plugin_id
             ]
             for name in removed:
                 self._services.pop(name, None)

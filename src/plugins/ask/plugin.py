@@ -7,10 +7,10 @@ back.  Answers live in the note as ``qa`` markdown blocks (owned by ``reader``).
 
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -18,6 +18,8 @@ from core.agent_types import AgentProfile, AgentTool
 from core.plugin import Plugin, PluginContext
 from core.settings_spec import SettingsSpec
 from core.ui import render_markdown
+from core.file_access import publication_lock
+from core.workspace import FileWorkspace
 
 from .prompts import ASK_PROMPT_TEMPLATE, INSTANT_SYSTEM_PROMPT, RESEARCH_SYSTEM_PROMPT
 
@@ -27,14 +29,9 @@ SELECTION_ID = "ask.ask"
 INSTANT = "instant"
 RESEARCH = "research"
 
-# Tool parameters for the research intensity; the read line cap lives here,
-# not inside the tool implementation.
-READ_MAX_LINES_DEFAULT = 50
-SEARCH_MAX_HITS_DEFAULT = 200
-
 
 class AskService:
-    """Narrow public ``ask`` service (1 method)."""
+    """Submit questions and read active execution snapshots."""
 
     __slots__ = ("_plugin",)
 
@@ -46,13 +43,16 @@ class AskService:
 
         return self._plugin._on_ask(payload)  # noqa: SLF001 - the plugin owns it
 
+    def activity(self, path: str, qa_id: str) -> dict[str, Any] | None:
+        return self._plugin._activity(path, qa_id)
+
 
 class AskPlugin(Plugin):
     """Reader selection menu → in-note Q&A with a live, collapsible answer."""
 
     id = "ask"
     requires = ("settings", "llm-agent", "reader")
-    optional_requires = ("summarize", "instant-summarize")
+    optional_requires = ("notes-pipeline",)
     provides = ("ask",)
 
     def setup(self, ctx: PluginContext) -> None:
@@ -60,12 +60,17 @@ class AskPlugin(Plugin):
         self._settings = ctx.require("settings")
         self._agent = ctx.require("agent")
         self._reader = ctx.require("reader")
+        self._active: set[str] = set()
+        self._live: dict[tuple[str, str], _Live] = {}
+        self._active_lock = threading.Lock()
+        self._closed = False
 
         for spec in _SETTING_SPECS:
             self._settings.register(spec)
 
         ctx.register_service("ask", AskService(self))
         ctx.ui.register_action(ACTION, self._on_ask, plugin_id=self.id)
+        self._reader.register_activity_provider(self.id, self._activity)
 
         self._reader.register_selection_action(
             "",
@@ -88,6 +93,10 @@ class AskPlugin(Plugin):
     def teardown(self) -> None:
         """Drop the UI action and the selection-menu item this plugin added."""
 
+        with self._active_lock:
+            self._closed = True
+            for session_id in tuple(self._active):
+                self._agent.cancel(session_id)
         ctx = getattr(self, "ctx", None)
         if ctx is not None:
             try:
@@ -98,30 +107,20 @@ class AskPlugin(Plugin):
         if reader is not None:
             try:
                 reader.unregister_selection_action("", SELECTION_ID, owner=self.id)
+                reader.unregister_activity_provider(self.id)
             except Exception:  # noqa: BLE001 - shutdown is best effort
                 pass
 
     # ------------------------------------------------------------------
     # Settings
     # ------------------------------------------------------------------
+    def _activity(self, path, qa_id):
+        with self._active_lock:
+            live = self._live.get((str(Path(path).resolve()), qa_id))
+        return live.activity() if live is not None else None
+
     def _setting(self, key: str, default: Any) -> Any:
         return self._settings.get(f"ask.{key}", default)
-
-    @property
-    def _model(self) -> str:
-        return str(self._setting("model", "") or "")
-
-    @property
-    def _instant_max_tokens(self) -> int:
-        return max(1000, int(self._setting("instant_max_tokens", 16000)))
-
-    @property
-    def _research_max_tokens(self) -> int:
-        return max(1000, int(self._setting("research_max_tokens", 131072)))
-
-    @property
-    def _research_max_steps(self) -> int:
-        return max(1, int(self._setting("research_max_steps", 24)))
 
     @property
     def _before_words(self) -> int:
@@ -140,20 +139,18 @@ class AskPlugin(Plugin):
         return max(50, int(self._setting("selection_words", 800)))
 
     @property
-    def _read_max_lines(self) -> int:
-        return max(1, int(self._setting("read_max_lines", READ_MAX_LINES_DEFAULT)))
-
-    @property
-    def _search_max_hits(self) -> int:
-        return max(1, int(self._setting("search_max_hits", SEARCH_MAX_HITS_DEFAULT)))
-
-    @property
     def _instant_prompt(self) -> str:
-        return str(self._setting("instant_prompt", INSTANT_SYSTEM_PROMPT) or INSTANT_SYSTEM_PROMPT)
+        return str(
+            self._setting("instant_prompt", INSTANT_SYSTEM_PROMPT)
+            or INSTANT_SYSTEM_PROMPT
+        )
 
     @property
     def _research_prompt(self) -> str:
-        return str(self._setting("research_prompt", RESEARCH_SYSTEM_PROMPT) or RESEARCH_SYSTEM_PROMPT)
+        return str(
+            self._setting("research_prompt", RESEARCH_SYSTEM_PROMPT)
+            or RESEARCH_SYSTEM_PROMPT
+        )
 
     # ------------------------------------------------------------------
     # Action
@@ -187,10 +184,11 @@ class AskPlugin(Plugin):
             message += "（未能定位选中片段，已附在笔记末尾）"
         return {"ok": True, "message": message, "refresh": True}
 
-    def _run(
-        self, path: str, qa_id: str, selection: str, intensity: str
-    ) -> None:
+    def _run(self, path: str, qa_id: str, selection: str, intensity: str) -> None:
         live = _Live(self, path, qa_id)
+        key = (str(Path(path).resolve()), qa_id)
+        with self._active_lock:
+            self._live[key] = live
         status = "done"
         answer = ""
         started = time.time()
@@ -201,14 +199,18 @@ class AskPlugin(Plugin):
             status = "error"
             answer = f"（回答失败：{exc}）"
 
-        self._reader.qa_finish(
-            path,
-            qa_id,
-            answer=answer,
-            status=status,
-            collapsed=(status == "done"),
-        )
-        live.finish(status=status, answer=answer, elapsed=time.time() - started)
+        try:
+            self._reader.qa_finish(
+                path,
+                qa_id,
+                answer=answer,
+                status=status,
+                collapsed=(status == "done"),
+            )
+            live.finish(status=status, answer=answer, elapsed=time.time() - started)
+        finally:
+            with self._active_lock:
+                self._live.pop(key, None)
 
     def _answer(
         self,
@@ -227,26 +229,39 @@ class AskPlugin(Plugin):
         )
         prompt = self._build_prompt(path, context, selection, intensity)
         files = self._workspace_files(path) if intensity == RESEARCH else {}
-
-        profile = self._profile(intensity)
-        self._agent.register_agent(profile)
-        session = self._agent.create_session(
-            name=f"ask-{qa_id}",
-            agent=profile.name,
-            files=files,
-            meta={
-                "internal": True,
-                "role": "ask",
-                "qa_id": qa_id,
-                "intensity": intensity,
-            },
-        )
-
         started = time.time()
-        try:
-            result = self._agent.run(session.id, prompt, on_event=live.on_event)
-        finally:
-            self._agent.close(session.id)
+        with tempfile.TemporaryDirectory(prefix="notes-ask-") as snapshot:
+            frozen = {}
+            with publication_lock(Path(path).parent):
+                for name, original in files.items():
+                    destination = Path(snapshot) / name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(Path(original).read_bytes())
+                    frozen[name] = destination
+            profile = self._profile(intensity)
+            with self._active_lock:
+                if self._closed:
+                    raise RuntimeError("Ask service is closed")
+                session = self._agent.create_session(
+                    name=f"ask-{qa_id}",
+                    agent=profile,
+                    workspace=FileWorkspace(frozen, readonly=frozen),
+                    meta={
+                        "internal": True,
+                        "role": "ask",
+                        "qa_id": qa_id,
+                        "intensity": intensity,
+                    },
+                )
+                self._active.add(session.id)
+            try:
+                result = self._agent.run(session.id, prompt, on_event=live.on_event)
+            finally:
+                try:
+                    self._agent.close(session.id)
+                finally:
+                    with self._active_lock:
+                        self._active.discard(session.id)
 
         self.ctx.logger.info(
             "ask %s finished in %.1fs: intensity=%s steps=%s tokens=%s error=%s",
@@ -262,35 +277,15 @@ class AskPlugin(Plugin):
         return result.final_message.strip() or "（模型没有返回内容）"
 
     def _profile(self, intensity: str) -> AgentProfile:
-        if intensity == INSTANT:
-            return AgentProfile(
-                name="ask.instant",
-                system_prompt=self._instant_prompt,
-                tools=[],
-                model=self._model or None,
-                max_steps=1,
-                max_tokens=self._instant_max_tokens,
-                llm_extra={"reasoning_effort": "max"},
-                stream=True,
-            )
-        research_prompt = self._research_prompt
-        if "{read_max_lines}" in research_prompt:
-            research_prompt = research_prompt.format(
-                read_max_lines=self._read_max_lines
-            )
         return AgentProfile(
-            name="ask.research",
-            system_prompt=research_prompt,
-            tools=[
-                AgentTool("read", {"max_lines": self._read_max_lines}),
-                AgentTool("search", {"max_hits": self._search_max_hits}),
-            ],
-            model=self._model or None,
-            max_steps=self._research_max_steps,
-            max_tokens=self._research_max_tokens,
-            llm_extra={"reasoning_effort": "max"},
-            final_answer_on_limit=True,
-            stream=True,
+            name=f"ask.{intensity}",
+            role="ask_instant" if intensity == INSTANT else "ask_research",
+            system_prompt=self._instant_prompt
+            if intensity == INSTANT
+            else self._research_prompt,
+            tools=[]
+            if intensity == INSTANT
+            else [AgentTool(name) for name in ("read", "grep", "glob")],
         )
 
     def _build_prompt(
@@ -304,8 +299,7 @@ class AskPlugin(Plugin):
         if intensity == RESEARCH:
             readable = "、".join(f"`{item}`" for item in self._workspace_files(path))
             instructions = (
-                f"可以先 `search` 再用 `read` 核对材料；`read` 单次最多 {self._read_max_lines} 行。\n"
-                f"可读文件：{readable}。"
+                f"可用 read、grep、glob 核对完整授权材料．可读文件：{readable}．"
             )
         else:
             instructions = "材料已经足够，直接回答；本题没有工具可用。"
@@ -327,10 +321,16 @@ class AskPlugin(Plugin):
 
     def _workspace_files(self, path: str) -> dict[str, str]:
         note = Path(path)
+        names = set()
+        names.add(note.name)
+        pipeline = self.ctx.service("notes-pipeline")
+        if pipeline is not None:
+            for kind in ("final", "instant"):
+                names.update(name for name, _ in pipeline.note_files(kind).values())
         files = {
-            item.name: str(item)
-            for item in sorted(note.parent.glob("*.md"))
-            if item.is_file()
+            name: str(note.parent / name)
+            for name in sorted(names)
+            if (note.parent / name).is_file()
         }
         source = self._source_file(note)
         if source is not None:
@@ -338,36 +338,25 @@ class AskPlugin(Plugin):
         return files
 
     def _source_file(self, note: Path) -> Path | None:
-        """The lecture record that belongs to *note*, asked from its owner."""
+        """Locate the complete source through its owning pipeline."""
 
-        service = self.ctx.service("summarize")
-        if service is not None:
-            for session_id in (
-                note.parent.parent.name,
-                self.ctx.streams.notes_session_id,
-            ):
-                if not session_id:
-                    continue
-                found = service.source_path(session_id)
-                if found is not None and Path(found).exists():
-                    return Path(found)
+        pipeline = self.ctx.service("notes-pipeline")
+        if pipeline is not None:
+            found = pipeline.source_path(note.parent.parent.name)
+            if found is not None and Path(found).exists():
+                return Path(found)
         fallback = note.parent.parent / "lecture_source.md"
         return fallback if fallback.exists() else None
 
     def _doc_label(self, name: str) -> str:
         """Human title of a note file, asked from the plugin that writes it."""
 
-        for service_name in ("summarize", "instant-summarize"):
-            service = self.ctx.service(service_name)
-            if service is None:
-                continue
-            try:
-                files = service.note_files()
-            except Exception:  # noqa: BLE001 - a label must never break an answer
-                continue
-            for filename, title in (files or {}).values():
-                if filename == name:
-                    return title
+        pipeline = self.ctx.service("notes-pipeline")
+        if pipeline is not None:
+            for kind in ("final", "instant"):
+                for filename, title in pipeline.note_files(kind).values():
+                    if filename == name:
+                        return title
         return _DEFAULT_DOC_LABELS.get(name, Path(name).stem)
 
     def _course_name(self) -> str:
@@ -382,7 +371,7 @@ class AskPlugin(Plugin):
 # Live streaming helper
 # ---------------------------------------------------------------------------
 class _Live:
-    """Accumulates the agent's stream and pushes throttled UI notifications."""
+    """Accumulate native execution events and throttle full UI snapshots."""
 
     _INTERVAL = 0.1
 
@@ -390,122 +379,91 @@ class _Live:
         self._plugin = plugin
         self._path = path
         self._qa_id = qa_id
-        self._phase = "thinking"
-        self._tools: list[dict[str, Any]] = []
-        self._reasoning = ""
-        self._answer = ""
-        self._pending_reasoning = ""
-        self._pending_text = ""
-        self._started = time.time()
-        self._last = 0.0
+        self._agent: dict[str, Any] = {
+            "id": "main",
+            "role": "qa",
+            "label": "Agent 回答",
+            "status": "running",
+            "model": "",
+            "thinking": "",
+            "context_tokens": 0,
+            "context_window": 0,
+            "llm_seconds": 0,
+            "tool_seconds": 0,
+            "output_tokens": 0,
+            "tokens_per_second": 0,
+            "blocks": [],
+        }
+        self._started = time.monotonic()
+        self._last = self._started
         self._lock = threading.Lock()
+        self.publish(force=True)
 
     def on_event(self, event: Any) -> None:
-        kind = event.type
+        if event.type != "agent.execution":
+            return
         data = event.data or {}
-        step = event.step
-        logger = self._plugin.ctx.logger
-
-        if kind == "agent.reasoning":
-            delta = str(data.get("text") or "")
-            if not delta:
-                return
-            with self._lock:
-                self._reasoning += delta
-                self._pending_reasoning += delta
-                self._phase = "thinking"
-            self.publish()
-        elif kind == "agent.delta":
-            delta = str(data.get("text") or "")
-            if not delta:
-                return
-            with self._lock:
-                self._answer += delta
-                self._pending_text += delta
-                self._phase = "answering"
-            self.publish()
-        elif kind == "agent.tool_call":
-            name = str(data.get("name") or "?")
-            arguments = data.get("arguments") or {}
-            logger.info(
-                "ask %s step %s tool %s %s",
-                self._qa_id,
-                step,
-                name,
-                json.dumps(arguments, ensure_ascii=False),
-            )
-            with self._lock:
-                self._tools.append(
-                    {"name": name, "detail": _tool_detail(name, arguments), "done": False}
-                )
-                self._phase = "tool"
-            self.publish(force=True)
-        elif kind == "agent.tool_result":
-            logger.info(
-                "ask %s step %s tool %s result: %s",
-                self._qa_id,
-                step,
-                data.get("name", "?"),
-                str(data.get("result", ""))[:500],
-            )
-            with self._lock:
-                for tool in reversed(self._tools):
-                    if not tool["done"]:
-                        tool["done"] = True
+        with self._lock:
+            self._agent.update(data.get("metrics") or {})
+            block = data.get("block")
+            if block is not None:
+                blocks = self._agent["blocks"]
+                for index, existing in enumerate(blocks):
+                    if existing["id"] == block["id"]:
+                        blocks[index] = dict(block)
                         break
-            self.publish(force=True)
-        elif kind == "agent.message":
-            content = str(data.get("content") or "")
-            if content:
-                logger.info("ask %s step %s reply:\n%s", self._qa_id, step, content)
-        elif kind == "agent.error":
-            logger.warning(
-                "ask %s step %s error: %s", self._qa_id, step, data.get("error")
-            )
+                else:
+                    blocks.append(dict(block))
+        self.publish()
+
+    def activity(self) -> dict[str, Any]:
+        with self._lock:
+            return self._activity()
+
+    def _activity(self) -> dict[str, Any]:
+        return {
+            "id": f"qa-{self._qa_id}",
+            "agents": [
+                {
+                    **self._agent,
+                    "blocks": [dict(block) for block in self._agent["blocks"]],
+                }
+            ],
+        }
 
     def publish(self, *, force: bool = False) -> None:
         with self._lock:
-            now = time.time()
+            now = time.monotonic()
             if not force and now - self._last < self._INTERVAL:
                 return
             self._last = now
-            reasoning = self._pending_reasoning
-            text = self._pending_text
-            self._pending_reasoning = ""
-            self._pending_text = ""
             payload = {
                 "path": self._path,
                 "id": self._qa_id,
                 "status": "pending",
-                "phase": self._phase,
-                "reasoning_delta": reasoning,
-                "text_delta": text,
-                "tools": [dict(tool) for tool in self._tools],
+                "activity": self._activity(),
                 "elapsed": round(now - self._started, 1),
             }
         self._plugin.ctx.ui.notify("qa.live", payload)
 
     def finish(self, *, status: str, answer: str, elapsed: float) -> None:
-        payload = {
-            "path": self._path,
-            "id": self._qa_id,
-            "status": status,
-            "phase": "done" if status == "done" else "error",
-            "answer": answer,
-            "answer_html": render_markdown(answer),
-            "collapsed": status == "done",
-            "elapsed": round(elapsed, 1),
-        }
-        logger = self._plugin.ctx.logger
-        # The full thinking trace goes to the log verbatim, never truncated.
-        if self._reasoning:
-            logger.info(
-                "ask %s reasoning (%d chars):\n%s",
-                self._qa_id,
-                len(self._reasoning),
-                self._reasoning,
-            )
-        logger.info(
+        with self._lock:
+            execution_status = "completed" if status == "done" else "failed"
+            self._agent["status"] = execution_status
+            for block in self._agent["blocks"]:
+                if block["status"] in ("streaming", "running"):
+                    block["status"] = execution_status
+            payload = {
+                "path": self._path,
+                "id": self._qa_id,
+                "status": status,
+                "activity": self._activity(),
+                "answer": answer,
+                "answer_html": render_markdown(answer),
+                "collapsed": status == "done",
+                "elapsed": round(elapsed, 1),
+            }
+        self._plugin.ctx.logger.info(
             "ask %s answer (%s, %.1fs):\n%s",
             self._qa_id,
             status,
@@ -513,20 +471,6 @@ class _Live:
             answer,
         )
         self._plugin.ctx.ui.notify("qa.live", payload)
-
-
-def _tool_detail(name: str, arguments: Mapping[str, Any]) -> str:
-    if name == "read":
-        file = arguments.get("file", "?")
-        left = arguments.get("l", 1)
-        right = arguments.get("r", -1)
-        return f"{file} {left}-{right}"
-    if name == "search":
-        keywords = arguments.get("keywords") or []
-        file = arguments.get("file")
-        text = "、".join(str(item) for item in keywords)
-        return f"{text} @ {file}" if file else text
-    return json.dumps(arguments, ensure_ascii=False)[:120]
 
 
 # Fallback titles when the notes plugins are not loaded (service API first).
@@ -570,43 +514,11 @@ def _format_history(entries: list[dict[str, str]]) -> str:
 # ---------------------------------------------------------------------------
 _SETTING_SPECS: list[SettingsSpec] = [
     SettingsSpec(
-        key="ask.model",
-        label="提问模型",
-        type="string",
-        default="",
-        group="Ask · 提问",
-        description="回答提问使用的模型（空=agent 默认）",
-    ),
-    SettingsSpec(
-        key="ask.instant_max_tokens",
-        label="快速模式输出上限",
-        type="int",
-        default=16000,
-        group="Ask · 提问",
-        description="快速模式单次调用的输出 token 上限（含思考 token）",
-    ),
-    SettingsSpec(
-        key="ask.research_max_tokens",
-        label="研究模式输出上限",
-        type="int",
-        default=131072,
-        group="Ask · 提问",
-        description="研究模式单次调用的输出 token 上限（含思考 token）",
-    ),
-    SettingsSpec(
-        key="ask.research_max_steps",
-        label="研究模式步数上限",
-        type="int",
-        default=24,
-        group="Ask · 提问",
-        description="研究模式最多几轮工具调用；最后一步强制直接回答",
-    ),
-    SettingsSpec(
         key="ask.before_words",
         label="选中前文词数",
         type="int",
         default=2000,
-        group="Ask · 提问",
+        group="提问",
         description="上下文里选中段落之前的笔记内容（按词计，中文按字计）",
     ),
     SettingsSpec(
@@ -614,7 +526,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="选中后文词数",
         type="int",
         default=2000,
-        group="Ask · 提问",
+        group="提问",
         description="上下文里选中段落之后的笔记内容",
     ),
     SettingsSpec(
@@ -622,7 +534,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="历史问答词数",
         type="int",
         default=1000,
-        group="Ask · 提问",
+        group="提问",
         description="同一条笔记中此前问答记录的独立限额",
     ),
     SettingsSpec(
@@ -630,31 +542,15 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="选中内容词数",
         type="int",
         default=800,
-        group="Ask · 提问",
+        group="提问",
         description="选中片段送入模型的上限，超出部分截断",
-    ),
-    SettingsSpec(
-        key="ask.read_max_lines",
-        label="研究模式 read 行数",
-        type="int",
-        default=50,
-        group="Ask · 提问",
-        description="研究模式单次 read 最多返回的行数",
-    ),
-    SettingsSpec(
-        key="ask.search_max_hits",
-        label="search 命中上限",
-        type="int",
-        default=200,
-        group="Ask · 提问",
-        description="search 工具最多返回的命中行数",
     ),
     SettingsSpec(
         key="ask.instant_prompt",
         label="快速模式提示词",
         type="text",
         default=INSTANT_SYSTEM_PROMPT,
-        group="Ask · 提问",
+        group="提问",
         description="快速模式（无工具、一步回答）的系统提示词",
     ),
     SettingsSpec(
@@ -662,8 +558,8 @@ _SETTING_SPECS: list[SettingsSpec] = [
         label="研究模式提示词",
         type="text",
         default=RESEARCH_SYSTEM_PROMPT,
-        group="Ask · 提问",
-        description="研究模式（search + read）的系统提示词；支持 {read_max_lines}",
+        group="提问",
+        description="研究模式只读答疑的系统提示词",
     ),
 ]
 
