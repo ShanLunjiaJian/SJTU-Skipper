@@ -165,9 +165,6 @@ class Runtime:
             },
             "session": current.status(),
             "sessions": [dataclasses.asdict(s) for s in self.hub.list_sessions()][-10:],
-            "llm": self.llm.call("info")
-            if self.services.get("llm") is not None
-            else {"registered": False},
         }
 
 

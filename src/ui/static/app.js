@@ -2601,7 +2601,6 @@
     const status = state.ui.status || {};
     const session = status.session || {};
     const runtime = status.runtime || {};
-    const llm = status.llm || {};
     const bar = $("#statusbar");
     bar.replaceChildren();
 
@@ -2632,13 +2631,6 @@
         "插件",
         (runtime.plugins_loaded || runtime.plugin_order || []).length || 0,
         runtime.started ? "ok" : "",
-      ),
-    );
-    bar.appendChild(
-      item(
-        "LLM",
-        llm.provider || (llm.registered ? "已注册" : "未配置"),
-        llm.registered ? "ok" : "",
       ),
     );
     const tasks = state.ui.tasks || [];
