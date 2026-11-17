@@ -1,11 +1,11 @@
-"""Collect lecture records with explicit session and time boundaries."""
-
 from __future__ import annotations
 
 import hashlib
 import json
 from collections import Counter
 from pathlib import Path
+
+from core.streams import StreamKind
 
 
 def read_log(path: Path) -> list[dict]:
@@ -52,8 +52,8 @@ def collect_material(ctx, session_id: str) -> list[dict]:
     for sid, shift in [(session_id, 0.0), *fill_sessions(ctx.data_dir, session_id)]:
         session = ctx.streams.get_session(sid)
         for stream, filename in (
-            ("transcript", "transcript.jsonl"),
-            ("visual", "visual.jsonl"),
+            (StreamKind.TRANSCRIPT, "transcript.jsonl"),
+            (StreamKind.VISUAL, "visual.jsonl"),
         ):
             records = read_log(ctx.data_dir / "sessions" / sid / filename)
             if session is not None:
@@ -78,6 +78,12 @@ def collect_material(ctx, session_id: str) -> list[dict]:
                     else:
                         records.append(record)
             for record in shift_records(records, shift):
+                if stream == StreamKind.VISUAL and record.get("error"):
+                    error = record["error"]
+                    record["text"] = (
+                        f"该时间段未取得板书：{error['message']} "
+                        f"({error['code']}, attempts={error['attempts']})"
+                    )
                 if str(record.get("text", "")).strip():
                     result.append({**record, "stream": stream, "origin": sid})
     return sorted(
@@ -95,7 +101,13 @@ def render(records: list[dict]) -> str:
     for record in records:
         start = record.get("start")
         stamp = "manual" if start is None else f"{float(start):.3f}s"
-        label = "板书增量" if record["stream"] == "visual" else "讲授"
+        label = (
+            ("板书识别缺口" if record.get("error") else "板书增量")
+            if record["stream"] == StreamKind.VISUAL
+            else "讲授"
+        )
+        if record.get("error") and record.get("end") is not None:
+            stamp += f"-{float(record['end']):.3f}s"
         entries.append(f"[{stamp}] {label}\n{record['text']}")
     return "\n\n".join(entries) + ("\n" if entries else "")
 
@@ -122,7 +134,7 @@ def chunk_material(records: list[dict], start: float, end: float, overlap: float
     previous_visual = [
         record
         for record in records
-        if record["stream"] == "visual"
+        if record["stream"] == StreamKind.VISUAL
         and record.get("start") is not None
         and float(record["start"]) < start
     ][-3:]

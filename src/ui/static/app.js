@@ -1,6 +1,130 @@
 (() => {
   "use strict";
 
+  const EXECUTION_ROLE = Object.freeze({
+    WRITER: "writer",
+    QUESTION_ANSWER: "question_answer",
+    REVIEWER: "reviewer",
+    CHUNK_WRITER: "chunk_writer",
+  });
+  const TASK_STATE = Object.freeze({
+    PENDING: "pending",
+    RUNNING: "running",
+  });
+
+  const REVIEW_STATUS = Object.freeze({
+    PASSED: "passed",
+    FAILED: "failed",
+    NOT_REVIEWED: "not_reviewed",
+  });
+
+  function reviewStatusLabel(status) {
+    if (status === REVIEW_STATUS.PASSED) return "Passed";
+    if (status === REVIEW_STATUS.FAILED) return "Failed";
+    return "Not reviewed";
+  }
+
+  const BLOCK_TYPE = Object.freeze({
+    AGENT_ACTIVITY: "agent_activity",
+    TASK_QUEUE: "task_queue",
+    HTML: "html",
+    MARKDOWN: "markdown",
+    TEXT: "text",
+    KEYVALUE: "keyvalue",
+    TABLE: "table",
+    CARDS: "cards",
+    ROWS: "rows",
+    TREE: "tree",
+    LIST: "list",
+    BUTTONS: "buttons",
+    FORM: "form",
+    LOG: "log",
+    IMAGE: "image",
+    VIDEO: "video",
+    TABS: "tabs",
+    PLAYER: "player",
+    SWITCH: "switch",
+    QA: "qa",
+    PROGRESS: "progress",
+    BADGE: "badge",
+  });
+
+  const QA_STATUS = Object.freeze({
+    PENDING: "pending",
+    DONE: "done",
+    ERROR: "error",
+  });
+
+  const ASK_INTENSITY = Object.freeze({
+    INSTANT: "instant",
+    RESEARCH: "research",
+  });
+
+  const EXECUTION_BLOCK_KIND = Object.freeze({
+    TEXT: "text",
+    THINKING: "thinking",
+    TOOL: "tool",
+    REVIEW: "review",
+    USER: "user",
+  });
+
+  const EXECUTION_BLOCK_STATUS = Object.freeze({
+    STREAMING: "streaming",
+    RUNNING: "running",
+    COMPLETED: "completed",
+    FAILED: "failed",
+    CANCELLED: "cancelled",
+  });
+
+  const SIDEBAR_SIDE = Object.freeze({
+    LEFT: "left",
+    RIGHT: "right",
+  });
+
+  const HISTORY_MODE = Object.freeze({
+    PUSH: "push",
+    REPLACE: "replace",
+  });
+
+  const TOAST_KIND = Object.freeze({
+    DEFAULT: "",
+    OK: "ok",
+    ERR: "err",
+  });
+
+  const SETTING_TYPE = Object.freeze({
+    STRING: "string",
+    TEXT: "text",
+    INT: "int",
+    FLOAT: "float",
+    BOOL: "bool",
+    SELECT: "select",
+    SECRET: "secret",
+    JSON: "json",
+    ACTION: "action",
+  });
+
+  const FIELD_INPUT = Object.freeze({
+    BUTTON: "button",
+    PASSWORD: "password",
+    TEXTAREA: "textarea",
+    SELECT: "select",
+    CHECKBOX: "checkbox",
+    NUMBER: "number",
+    TEXT: "text",
+    SUBMIT: "submit",
+  });
+
+  const SELECTION_ACTION_KIND = Object.freeze({
+    PROMPT: "prompt",
+    ACTION: "action",
+  });
+
+  const WS_MESSAGE_TYPE = Object.freeze({
+    REFRESH: "refresh",
+    NOTIFY: "notify",
+  });
+
   const state = {
     ui: null,
     activeTab: { left: null, right: null },
@@ -65,7 +189,7 @@
 
   const shortId = (id) => (id ? String(id).slice(0, 18) : "-");
 
-  function toast(message, kind = "") {
+  function toast(message, kind = TOAST_KIND.DEFAULT) {
     if (!message) return;
     const node = $("#toast");
     node.textContent = message;
@@ -124,7 +248,7 @@
 
   async function loadState({
     quiet = false,
-    historyMode = "replace",
+    historyMode = HISTORY_MODE.REPLACE,
     navigationVersion = null,
   } = {}) {
     if (navigationVersion === null && state.navigationPending) return;
@@ -143,7 +267,7 @@
         state.ui = ui;
         state.lastLoad = Date.now();
         if (previousPage !== ui.navigation?.page) {
-          for (const side of ["left", "right"]) {
+          for (const side of Object.values(SIDEBAR_SIDE)) {
             const tab = (ui[`${side}_tabs`] || []).find((item) =>
               (item.toolbox || []).some((tool) => tool.page === ui.active_page),
             );
@@ -155,7 +279,7 @@
         setConnection(true);
       } catch (err) {
         setConnection(false);
-        if (!quiet) toast(`加载状态失败：${err.message}`, "err");
+        if (!quiet) toast(`加载状态失败：${err.message}`, TOAST_KIND.ERR);
       } finally {
         state.loading = null;
       }
@@ -163,7 +287,7 @@
     await state.loading;
   }
 
-  function changeNavigation(callback, historyMode = "push") {
+  function changeNavigation(callback, historyMode = HISTORY_MODE.PUSH) {
     const version = state.navigationVersion;
     state.navigationPending += 1;
     const task = state.navigationQueue.then(async () => {
@@ -197,9 +321,9 @@
             body: JSON.stringify(navigation),
           });
         }
-      }, "replace");
+      }, HISTORY_MODE.REPLACE);
     } catch (err) {
-      toast(`加载状态失败：${err.message}`, "err");
+      toast(`加载状态失败：${err.message}`, TOAST_KIND.ERR);
     }
   }
 
@@ -235,9 +359,6 @@
     }
   }
 
-  // ------------------------------------------------------------------
-  // Blocks
-  // ------------------------------------------------------------------
   function actionButton(
     label,
     action,
@@ -247,7 +368,7 @@
   ) {
     const attrs = { class: cls, dataset: { action } };
     if (value !== undefined) attrs.dataset.value = JSON.stringify(value);
-    attrs.type = "button";
+    attrs.type = FIELD_INPUT.BUTTON;
     const btn = el("button", { ...attrs, text: String(label) }, []);
     if (disabled) btn.disabled = true;
     return btn;
@@ -361,7 +482,7 @@
     });
     const caret = el("button", {
       class: `tree-caret ${canExpand ? "" : "leaf"}`,
-      type: "button",
+      type: FIELD_INPUT.BUTTON,
       text: node.expanded ? "▾" : "▸",
       title: canExpand ? (node.expanded ? "折叠" : "展开") : "",
     });
@@ -434,46 +555,68 @@
     return wrap;
   }
 
-  function renderCards(block) {
-    const wrap = el("div", { class: "cards" });
-    for (const item of block.items || []) {
-      const card = el("div", { class: "card" });
+  function renderCards(block, existing = null) {
+    const wrap = existing || el("div", { class: "cards" });
+    const previous = new Map(
+      Array.from(wrap.children, (card) => [card._cardKey, card]),
+    );
+    const wanted = new Set();
+    (block.items || []).forEach((item, index) => {
+      const key = item.id || item.key || `card:${index}`;
+      let card = previous.get(key);
+      if (!card) {
+        card = el("div", { class: "card" }, [el("div"), el("div"), el("div")]);
+        card._cardKey = key;
+      }
+      const [head, body, actions] = card.children;
+      head.replaceChildren();
       if (item.title)
-        card.appendChild(el("div", { class: "card-title", text: item.title }));
+        head.appendChild(el("div", { class: "card-title", text: item.title }));
       if (item.subtitle)
-        card.appendChild(el("div", { class: "card-sub", text: item.subtitle }));
+        head.appendChild(el("div", { class: "card-sub", text: item.subtitle }));
       if (item.meta) {
         const meta = el("div", { class: "card-meta" });
-        const entries = Array.isArray(item.meta)
+        for (const entry of Array.isArray(item.meta)
           ? item.meta
-          : Object.entries(item.meta);
-        for (const entry of entries) {
-          const text = Array.isArray(entry)
-            ? `${entry[0]}: ${entry[1]}`
-            : String(entry);
-          meta.appendChild(el("span", { text }));
-        }
-        card.appendChild(meta);
-      }
-      if (item.blocks) card.appendChild(renderBlocks(item.blocks));
-      if (item.actions && item.actions.length) {
-        const actions = el("div", { class: "card-actions" });
-        for (const action of item.actions) {
-          actions.appendChild(
-            actionButton(
-              action.label || "执行",
-              action.action,
-              action.value,
-              action.class || "btn btn-sm",
-            ),
+          : Object.entries(item.meta))
+          meta.appendChild(
+            el("span", {
+              text: Array.isArray(entry)
+                ? `${entry[0]}: ${entry[1]}`
+                : String(entry),
+            }),
           );
-        }
-        card.appendChild(actions);
+        head.appendChild(meta);
       }
-      wrap.appendChild(card);
-    }
+      updateBlocks(body, item.blocks || []);
+      actions.className = "card-actions";
+      actions.replaceChildren();
+      for (const action of item.actions || [])
+        actions.appendChild(
+          actionButton(
+            action.label || "执行",
+            action.action,
+            action.value,
+            action.class || "btn btn-sm",
+          ),
+        );
+      wanted.add(card);
+      if (wrap.children[index] !== card && !composingWithin(card))
+        moveActivityNode(wrap, card, wrap.children[index] || null);
+    });
+    for (const card of Array.from(wrap.children))
+      if (!wanted.has(card) && !composingWithin(card)) {
+        destroyPlayers(card);
+        card.remove();
+      }
     if (!wrap.children.length)
       wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    wrap._deferred = Array.from(wrap.children).some(
+      (card) =>
+        !wanted.has(card) ||
+        composingWithin(card) ||
+        card.children[1]?._deferred,
+    );
     return wrap;
   }
 
@@ -487,7 +630,10 @@
       const id = `f-${Math.random().toString(36).slice(2)}`;
       const fieldName = field.name || field.key;
       row.appendChild(el("label", { for: id, text: field.label || fieldName }));
-      if (field.type === "action" || field.input === "button") {
+      if (
+        field.type === SETTING_TYPE.ACTION ||
+        field.input === FIELD_INPUT.BUTTON
+      ) {
         row.appendChild(
           actionButton(
             field.button_label || field.label || "执行",
@@ -503,10 +649,12 @@
         form.appendChild(row);
         continue;
       }
-      const rawType = field.type || (field.secret ? "secret" : "text");
-      const type = field.input || (field.secret ? "password" : rawType);
+      const rawType =
+        field.type || (field.secret ? SETTING_TYPE.SECRET : SETTING_TYPE.TEXT);
+      const type =
+        field.input || (field.secret ? FIELD_INPUT.PASSWORD : rawType);
       let input;
-      if (type === "textarea") {
+      if (type === FIELD_INPUT.TEXTAREA) {
         input = el("textarea", {
           class: "textarea",
           id,
@@ -514,7 +662,7 @@
           placeholder: field.placeholder || "",
         });
         input.value = field.value ?? "";
-      } else if (type === "select") {
+      } else if (type === FIELD_INPUT.SELECT) {
         input = el("select", { class: "select", id, name: fieldName });
         const options = field.option_items || field.options || [];
         for (const option of options) {
@@ -531,8 +679,15 @@
             opt.selected = true;
           input.appendChild(opt);
         }
-      } else if (type === "checkbox" || rawType === "bool") {
-        input = el("input", { type: "checkbox", id, name: fieldName });
+      } else if (
+        type === FIELD_INPUT.CHECKBOX ||
+        rawType === SETTING_TYPE.BOOL
+      ) {
+        input = el("input", {
+          type: FIELD_INPUT.CHECKBOX,
+          id,
+          name: fieldName,
+        });
         input.checked = Boolean(field.value);
         const label = row.querySelector("label");
         label.classList.add("checkbox");
@@ -543,11 +698,13 @@
           id,
           name: fieldName,
           type:
-            type === "password" || field.secret
-              ? "password"
-              : type === "number" || rawType === "int" || rawType === "float"
-                ? "number"
-                : "text",
+            type === FIELD_INPUT.PASSWORD || field.secret
+              ? FIELD_INPUT.PASSWORD
+              : type === FIELD_INPUT.NUMBER ||
+                  rawType === SETTING_TYPE.INT ||
+                  rawType === SETTING_TYPE.FLOAT
+                ? FIELD_INPUT.NUMBER
+                : FIELD_INPUT.TEXT,
         });
         if (
           !field.secret &&
@@ -563,15 +720,16 @@
         } else if (field.placeholder) {
           input.placeholder = field.placeholder;
         }
-        if (rawType === "int" || type === "number") input.step = "1";
-        if (rawType === "float") input.step = "any";
+        if (rawType === SETTING_TYPE.INT || type === FIELD_INPUT.NUMBER)
+          input.step = "1";
+        if (rawType === SETTING_TYPE.FLOAT) input.step = "any";
       }
       input.dataset.fieldType = rawType;
       if (field.readonly) {
         input.readOnly = true;
         input.classList.add("input-readonly");
       }
-      if (input.type !== "checkbox") row.appendChild(input);
+      if (input.type !== FIELD_INPUT.CHECKBOX) row.appendChild(input);
       if (field.secret) {
         const status = el("div", {
           class: `form-status ${field.is_set ? "ok" : ""}`,
@@ -599,7 +757,7 @@
     const actions = el("div", { class: "form-actions" });
     const submit = el("button", {
       class: "btn btn-primary",
-      type: "submit",
+      type: FIELD_INPUT.SUBMIT,
       text: block.submit_label || submitSpec.label || "保存",
     });
     actions.appendChild(submit);
@@ -607,86 +765,141 @@
     return form;
   }
 
-  function renderTabs(block) {
-    const wrap = el("div", { class: "tabs" });
-    const bar = el("div", { class: "tabs-bar" });
-    const body = el("div", { class: "tabs-body" });
+  function renderTabs(block, existing = null) {
+    const wrap = existing || el("div", { class: "tabs" });
+    if (!wrap._tabState) {
+      const bar = el("div", { class: "tabs-bar" });
+      wrap.appendChild(bar);
+      wrap._tabState = {
+        bar,
+        panels: new Map(),
+        buttons: new Map(),
+        active: null,
+      };
+    }
+    const data = wrap._tabState;
     const tabs = block.tabs || [];
     const key =
       block.id ||
       block.key ||
-      `tabs:${tabs.map((t) => t.title || "").join("\u0001")}`;
-    const savedTitle = state.blockTabs[key];
+      `tabs:${tabs.map((tab) => tab.title || "").join("\u0001")}`;
+    const tabKey = (tab, index) =>
+      tab.id || tab.key || tab.title || `tab:${index}`;
     const navigation = state.ui?.navigation;
-    let active = tabs.findIndex(
-      (t) =>
+    const requested = tabs.find(
+      (tab) =>
         navigation?.doc &&
-        t.meta?.doc_key === navigation.doc &&
-        t.meta?.page_id === navigation?.page,
+        tab.meta?.doc_key === navigation.doc &&
+        tab.meta?.page_id === navigation.page,
     );
-    if (active < 0)
-      active = tabs.findIndex((t) => (t.title || "") === savedTitle);
-    if (active < 0) active = tabs.findIndex((t) => t.active);
-    if (active < 0) active = 0;
-    // Selection-menu context of the visible tab: which document is displayed
-    // and which menu items its owning plugin registered for this reader page.
-    const applyMeta = (tab) => {
-      const meta = (tab && tab.meta) || {};
-      body.dataset.docKey = meta.doc_key || "";
-      body.dataset.docPath = meta.path || "";
-      body.dataset.pageId = meta.page_id || "";
-      body.dataset.owner = meta.owner || "";
-      body.dataset.selectionActions = JSON.stringify(
-        meta.selection_actions || [],
+    const remembered = tabs.find((tab) => tab.title === state.blockTabs[key]);
+    const selected =
+      requested || remembered || tabs.find((tab) => tab.active) || tabs[0];
+    let active = selected ? tabKey(selected, tabs.indexOf(selected)) : null;
+    const focusedView = Array.from(agentViews.values()).find(
+      (view) => wrap.contains(view.root) && agentDraft(view).composing,
+    );
+    if (focusedView && data.active !== active) active = data.active;
+    const show = (target, remember = true) => {
+      const index = tabs.findIndex(
+        (tab, index) => tabKey(tab, index) === target,
       );
-    };
-    const show = (index, remember = true) => {
-      active = index;
-      if (remember) state.blockTabs[key] = tabs[index]?.title || "";
-      $$(".tab-btn", bar).forEach((b, i) =>
-        b.classList.toggle("active", i === active),
-      );
-      applyMeta(tabs[index]);
-      body.replaceChildren(renderBlocks(tabs[index]?.blocks || []));
+      if (index < 0) return;
       if (
-        remember &&
-        (body.textContent.includes("$") || body.textContent.includes("\\("))
+        Array.from(data.panels.values()).some(
+          (panel) => !panel.hidden && composingWithin(panel),
+        )
       ) {
-        typeset(body);
+        data.deferredTarget = target;
+        return;
       }
-    };
-    tabs.forEach((tab, i) => {
-      const btn = el("button", {
-        class: "tab-btn",
-        type: "button",
-        text: tab.title || `Tab ${i + 1}`,
-      });
-      btn.addEventListener("click", async () => {
-        show(i);
-        const meta = tab.meta || {};
-        if (!meta.doc_key || !meta.page_id) return;
-        try {
-          await changeNavigation(() =>
-            api("/api/ui/navigate", {
-              method: "POST",
-              body: JSON.stringify({ page: meta.page_id, doc: meta.doc_key }),
-            }),
-          );
-        } catch (err) {
-          toast(`打开页面失败：${err.message}`, "err");
+      for (const view of agentViews.values())
+        if (wrap.contains(view.root)) {
+          saveAgentEditor(view);
+          if (document.activeElement === view.input) view.restoreFocus = true;
         }
+      const changed = data.active !== target;
+      data.active = target;
+      if (remember) state.blockTabs[key] = tabs[index].title || "";
+      for (const [id, panel] of data.panels) panel.hidden = id !== target;
+      for (const [id, button] of data.buttons)
+        button.classList.toggle("active", id === target);
+      const panel = data.panels.get(target);
+      for (const view of agentViews.values())
+        if (
+          changed &&
+          panel.contains(view.root) &&
+          view.input.getClientRects().length
+        ) {
+          restoreAgentEditor(view, remember && Boolean(view.restoreFocus));
+          if (remember) view.restoreFocus = false;
+        }
+      if (remember) typeset(panel);
+    };
+    data.show = show;
+    const wanted = new Set();
+    tabs.forEach((tab, index) => {
+      const id = tabKey(tab, index);
+      wanted.add(id);
+      let panel = data.panels.get(id);
+      let button = data.buttons.get(id);
+      if (!panel) {
+        panel = el("div", { class: "tabs-body" });
+        button = el("button", { class: "tab-btn", type: FIELD_INPUT.BUTTON });
+        data.panels.set(id, panel);
+        data.buttons.set(id, button);
+        wrap.appendChild(panel);
+        data.bar.appendChild(button);
+        panel.addEventListener("compositionend", () => {
+          if (data.deferredTarget !== undefined) {
+            const target = data.deferredTarget;
+            delete data.deferredTarget;
+            data.show(target);
+          }
+        });
+        button.addEventListener("click", async () => {
+          data.show(id);
+          const meta = button._tab.meta || {};
+          if (!meta.doc_key || !meta.page_id) return;
+          try {
+            await changeNavigation(() =>
+              api("/api/ui/navigate", {
+                method: "POST",
+                body: JSON.stringify({ page: meta.page_id, doc: meta.doc_key }),
+              }),
+            );
+          } catch (err) {
+            toast(`打开页面失败：${err.message}`, TOAST_KIND.ERR);
+          }
+        });
+      }
+      button._tab = tab;
+      button.textContent = tab.title || `Tab ${index + 1}`;
+      const meta = tab.meta || {};
+      Object.assign(panel.dataset, {
+        docKey: meta.doc_key || "",
+        docPath: meta.path || "",
+        pageId: meta.page_id || "",
+        owner: meta.owner || "",
+        selectionActions: JSON.stringify(meta.selection_actions || []),
       });
-      bar.appendChild(btn);
+      updateBlocks(panel, tab.blocks || []);
     });
-    wrap.appendChild(bar);
-    wrap.appendChild(body);
-    if (tabs.length) show(active, false);
+    for (const [id, panel] of data.panels)
+      if (!wanted.has(id) && !composingWithin(panel)) {
+        destroyPlayers(panel);
+        panel.remove();
+        data.buttons.get(id).remove();
+        data.panels.delete(id);
+        data.buttons.delete(id);
+      }
+    if (!focusedView) show(active, false);
+    wrap._deferred =
+      Boolean(focusedView) ||
+      Array.from(data.panels.values()).some((panel) => panel._deferred);
     return wrap;
   }
 
-  // ------------------------------------------------------------------
-  // Video player (class page)
-  // ------------------------------------------------------------------
   function playerKey(block) {
     return block.id || "player";
   }
@@ -819,7 +1032,7 @@
     const stateEl = el("span", { class: "player-state", text: stateText() });
     const toggle = el("button", {
       class: "btn btn-sm btn-primary",
-      type: "button",
+      type: FIELD_INPUT.BUTTON,
       text: finished
         ? "已结束"
         : block.queued
@@ -888,12 +1101,12 @@
     return wrap;
   }
 
-  // ------------------------------------------------------------------
-  // Switch + Q&A blocks
-  // ------------------------------------------------------------------
   function renderSwitch(block) {
     const wrap = el("div", { class: "block switch-block" });
-    const input = el("input", { type: "checkbox", class: "switch-input" });
+    const input = el("input", {
+      type: FIELD_INPUT.CHECKBOX,
+      class: "switch-input",
+    });
     input.checked = Boolean(block.checked);
     const label = el("label", { class: "switch-label" }, [
       input,
@@ -917,8 +1130,8 @@
   }
 
   function qaLevelLabel(intensity) {
-    if (intensity === "research") return "研究";
-    if (intensity === "instant") return "快速";
+    if (intensity === ASK_INTENSITY.RESEARCH) return "研究";
+    if (intensity === ASK_INTENSITY.INSTANT) return "快速";
     return "";
   }
 
@@ -935,11 +1148,44 @@
     );
   }
 
-  function renderQA(block) {
-    const cached = qaLiveCache.get(qaKey(block.path, block.id));
-    if (block.status === "pending" && cached) block = { ...block, ...cached };
-    const pending = String(block.status || "") === "pending";
-    const collapsed = Boolean(block.collapsed) && !pending;
+  function renderQA(block, existing = null) {
+    const cacheKey = qaKey(block.path, block.id);
+    const cached = qaLiveCache.get(cacheKey);
+    if (block.status === QA_STATUS.PENDING && cached)
+      block =
+        cached.status && cached.status !== QA_STATUS.PENDING
+          ? { ...block, ...cached }
+          : {
+              ...cached,
+              ...block,
+              activity: block.activity || cached.activity,
+            };
+    const pending = block.status === QA_STATUS.PENDING;
+    const retained = retainedQaActivity(block);
+    if (pending)
+      qaLiveCache.set(cacheKey, {
+        ...cached,
+        ...block,
+        activity: block.activity || qaActivity(block),
+      });
+    if (!pending && retained)
+      qaLiveCache.set(cacheKey, {
+        ...cached,
+        ...block,
+        activity: qaActivity(block),
+      });
+    if (existing) {
+      if (pending) {
+        const activity = qaActivity(block);
+        const root = renderAgentActivity(activity);
+        const view = activityView(activity);
+        view.qa = cacheKey;
+        const answer = existing.querySelector(".qa-answer");
+        if (root.parentNode !== answer) answer.appendChild(root);
+      } else finishQaBlock(existing, block);
+      return existing;
+    }
+    const collapsed = Boolean(block.collapsed) && !pending && !retained;
     const wrap = el("section", {
       class: `qa ${collapsed ? "collapsed" : ""}`,
       dataset: {
@@ -951,7 +1197,7 @@
     const head = el("div", { class: "qa-head" });
     const toggle = el("button", {
       class: "qa-toggle",
-      type: "button",
+      type: FIELD_INPUT.BUTTON,
       text: collapsed ? "▸" : "▾",
       title: "折叠 / 展开",
     });
@@ -987,11 +1233,14 @@
 
     const body = el("div", { class: "qa-body" });
     const answerBox = el("div", {
-      class: `qa-answer ${pending ? "pending" : ""} ${block.status === "error" ? "qa-failed" : ""}`,
+      class: `qa-answer ${pending ? "pending" : ""} ${block.status === QA_STATUS.ERROR ? "qa-failed" : ""}`,
     });
-    if (pending) {
-      answerBox.appendChild(renderAgentActivity(qaActivity(block)));
-    } else {
+    if (pending || retained) {
+      const activity = qaActivity(block);
+      answerBox.appendChild(renderAgentActivity(activity));
+      activityView(activity).qa = cacheKey;
+    }
+    if (!pending) {
       answerBox.appendChild(
         el("div", {
           class: "qa-text markdown",
@@ -1006,9 +1255,6 @@
     return wrap;
   }
 
-  // ------------------------------------------------------------------
-  // Live Q&A patches (WebSocket notify, never a full-page refresh)
-  // ------------------------------------------------------------------
   function qaNode(path, id) {
     return (
       $$(".qa").find(
@@ -1033,23 +1279,40 @@
   }
 
   function finishQaBlock(node, payload) {
-    node.dataset.qaStatus = payload.status || "done";
+    node.dataset.qaStatus = payload.status || QA_STATUS.DONE;
     const answerBox = node.querySelector(".qa-answer");
+    const activity = node.querySelector(".agent-workflow");
+    const view = Array.from(agentViews.values()).find(
+      (item) => item.root === activity,
+    );
+    const retained = retainAgentView(view);
     if (answerBox) {
       answerBox.classList.remove("pending");
-      if (payload.status === "error") answerBox.classList.add("qa-failed");
-      answerBox.replaceChildren(
-        el("div", {
-          class: "qa-text markdown",
-          html:
-            payload.answer_html || escapeHtml(payload.answer || "（无内容）"),
-        }),
+      answerBox.classList.toggle(
+        "qa-failed",
+        payload.status === QA_STATUS.ERROR,
       );
-      typeset(answerBox);
+      let answer = answerBox.querySelector(".qa-text");
+      if (!answer) {
+        answer = el("div", { class: "qa-text markdown" });
+        answerBox.appendChild(answer);
+      }
+      const html =
+        payload.answer_html || escapeHtml(payload.answer || "（无内容）");
+      if (answer._answerHtml !== html) {
+        answer.innerHTML = html;
+        answer._answerHtml = html;
+        typeset(answer);
+      }
+      if (view && !retained) disposeAgentView(view.key);
     }
     const pending = node.querySelector(".qa-pending");
     if (pending) pending.remove();
-    if (payload.collapsed !== false) {
+    if (retained) {
+      node.classList.remove("collapsed");
+      const toggle = node.querySelector(".qa-toggle");
+      if (toggle) toggle.textContent = "▾";
+    } else if (payload.collapsed !== false) {
       node.classList.add("collapsed");
       const toggle = node.querySelector(".qa-toggle");
       if (toggle) toggle.textContent = "▸";
@@ -1060,21 +1323,28 @@
     if (!payload || !payload.id) return;
     const key = qaKey(payload.path, payload.id);
     const cached = { ...qaLiveCache.get(key), ...payload };
-    const finished = payload.status && payload.status !== "pending";
-    if (finished) delete cached.activity;
+    const finished = payload.status && payload.status !== QA_STATUS.PENDING;
     qaLiveCache.set(key, cached);
     const node = qaNode(payload.path || "", payload.id);
     const update = () => {
       if (finished) {
         const activityId = payload.activity?.id || `qa-${payload.id}`;
         for (const viewKey of agentViews.keys()) {
-          if (JSON.parse(viewKey)[1] === activityId) disposeAgentView(viewKey);
+          if (
+            JSON.parse(viewKey)[1] === activityId &&
+            !retainAgentView(agentViews.get(viewKey))
+          )
+            disposeAgentView(viewKey);
         }
         if (node) finishQaBlock(node, payload);
-      } else if (payload.activity && node?.dataset.qaStatus === "pending") {
+      } else if (
+        payload.activity &&
+        node?.dataset.qaStatus === QA_STATUS.PENDING
+      ) {
         const answerBox = node.querySelector(".qa-answer");
         if (answerBox) {
           const activity = renderAgentActivity(payload.activity);
+          activityView(payload.activity).qa = key;
           if (activity.parentNode !== answerBox)
             answerBox.appendChild(activity);
         }
@@ -1088,9 +1358,95 @@
     const frag = document.createDocumentFragment();
     for (const block of blocks || []) {
       const node = renderBlock(block);
+      if (node) {
+        node._blockKey = stableBlockKey(block, frag.childNodes.length);
+        node._block = block;
+        node._blockSignature = JSON.stringify(block);
+      }
       if (node) frag.appendChild(node);
     }
     return frag;
+  }
+
+  function stableBlockKey(block, index) {
+    return block.type === BLOCK_TYPE.QA
+      ? `qa:${qaKey(block.path, block.id)}`
+      : `${block.type || BLOCK_TYPE.TEXT}:${block.id || block.key || index}`;
+  }
+
+  function composingWithin(node) {
+    return Array.from(agentViews.values()).some(
+      (view) => node.contains(view.root) && agentDraft(view).composing,
+    );
+  }
+
+  function moveActivityNode(parent, node, before) {
+    const focused = Array.from(agentViews.values()).find(
+      (view) =>
+        node.contains(view.input) && document.activeElement === view.input,
+    );
+    if (focused) saveAgentEditor(focused);
+    parent.insertBefore(node, before);
+    if (focused && !agentDraft(focused).composing)
+      restoreAgentEditor(focused, true);
+  }
+
+  function updateBlocks(parent, blocks) {
+    const previous = new Map(
+      Array.from(parent.children, (node) => [node._blockKey, node]),
+    );
+    const wanted = new Set();
+    let deferred = false;
+    (blocks || []).forEach((block, index) => {
+      const key = stableBlockKey(block, index);
+      let node = previous.get(key);
+      const signature = JSON.stringify(block);
+      if (node) {
+        if (block.type === BLOCK_TYPE.AGENT_ACTIVITY)
+          renderAgentActivity(block);
+        else if (block.type === BLOCK_TYPE.QA) renderQA(block, node);
+        else if (block.type === BLOCK_TYPE.TABS)
+          renderTabs(block, node.firstElementChild);
+        else if (block.type === BLOCK_TYPE.CARDS)
+          renderCards(block, node.firstElementChild);
+        else if (node._blockSignature !== signature) {
+          const focused = document.activeElement;
+          if (!(
+            node.contains(focused) &&
+            ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName)
+          )) {
+            destroyPlayers(node);
+            const replacement = renderBlock(block);
+            if (replacement) {
+              node.replaceWith(replacement);
+              node = replacement;
+            }
+          } else deferred = true;
+        }
+      } else node = renderBlock(block);
+      if (!node) return;
+      node._blockKey = key;
+      node._block = block;
+      if (!deferred) node._blockSignature = signature;
+      if (node.firstElementChild?._deferred) deferred = true;
+      wanted.add(node);
+      const current = parent.children[index];
+      if (current !== node) {
+        if (composingWithin(node) || (current && composingWithin(current)))
+          deferred = true;
+        else moveActivityNode(parent, node, current || null);
+      }
+    });
+    for (const node of Array.from(parent.children)) {
+      if (wanted.has(node)) continue;
+      if (composingWithin(node)) deferred = true;
+      else {
+        destroyPlayers(node);
+        node.remove();
+      }
+    }
+    parent._deferred = deferred;
+    return !deferred;
   }
 
   function destroyPlayers(root) {
@@ -1113,9 +1469,148 @@
 
   const agentSelections = new Map();
   const agentViews = new Map();
+  const agentDrafts = new Map();
+  const pageSurfaces = new Map();
+
+  function agentDraft(view, target = view.target) {
+    const key = JSON.stringify([view.key, target]);
+    if (!agentDrafts.has(key))
+      agentDrafts.set(key, {
+        value: "",
+        start: 0,
+        end: 0,
+        direction: "none",
+        top: 0,
+        left: 0,
+        revision: 0,
+        pending: false,
+        composing: false,
+      });
+    return agentDrafts.get(key);
+  }
+
+  function saveAgentEditor(view) {
+    if (
+      view.target === undefined ||
+      view.editorSuspended ||
+      !view.input.getClientRects().length
+    )
+      return;
+    const draft = agentDraft(view);
+    const input = view.input;
+    if (draft.value !== input.value) {
+      draft.value = input.value;
+      draft.revision += 1;
+    }
+    draft.start = input.selectionStart;
+    draft.end = input.selectionEnd;
+    draft.direction = input.selectionDirection;
+    draft.top = input.scrollTop;
+    draft.left = input.scrollLeft;
+  }
+
+  function restoreAgentEditor(view, focus = false) {
+    const draft = agentDraft(view);
+    if (draft.composing) return;
+    if (view.input.value !== draft.value) view.input.value = draft.value;
+    if (focus) view.input.focus({ preventScroll: true });
+    view.input.setSelectionRange(draft.start, draft.end, draft.direction);
+    view.input.scrollTop = draft.top;
+    view.input.scrollLeft = draft.left;
+    const target = view.target;
+    const revision = draft.revision;
+    const top = draft.top;
+    const left = draft.left;
+    view.editorRestoring = true;
+    requestAnimationFrame(() => {
+      if (
+        view.target === target &&
+        draft.revision === revision &&
+        !draft.composing &&
+        view.input.getClientRects().length
+      ) {
+        view.input.scrollTop = top;
+        view.input.scrollLeft = left;
+      }
+      view.editorRestoring = false;
+    });
+    updateAgentSend(view);
+  }
+
+  function retainAgentView(view) {
+    if (!view) return false;
+    saveAgentEditor(view);
+    return Array.from(view.targets.keys()).some((target) => {
+      const draft = agentDraft(view, target);
+      return draft.value.length > 0 || draft.pending || draft.composing;
+    });
+  }
+
+  function updateAgentSend(view) {
+    const pending = agentDraft(view).pending;
+    view.send.disabled = pending;
+    view.send.textContent = pending ? "发送中…" : "发送";
+  }
+
+  async function sendAgentMessage(view) {
+    saveAgentEditor(view);
+    const target = view.target;
+    const draft = agentDraft(view, target);
+    if (draft.pending || draft.composing || !draft.value.trim()) return;
+    const sessionId = view.targets.get(target)?.session_id;
+    if (!sessionId || !view.sendAction) {
+      toast("会话记录不可用", TOAST_KIND.ERR);
+      return;
+    }
+    const message = draft.value;
+    const revision = draft.revision;
+    const action = view.sendAction;
+    const values = { ...view.sendValues, agent_session_id: sessionId, message };
+    draft.pending = true;
+    updateAgentSend(view);
+    try {
+      const result = await postAction(action, values, view.page, null, true);
+      if (view.target === target) saveAgentEditor(view);
+      if (result?.ok && draft.revision === revision && draft.composing)
+        draft.clearRevision = revision;
+      if (result?.ok && draft.revision === revision && !draft.composing) {
+        draft.value = "";
+        draft.start = draft.end = draft.top = draft.left = 0;
+        draft.direction = "none";
+        draft.revision += 1;
+        if (view.target === target) restoreAgentEditor(view);
+      }
+    } finally {
+      draft.pending = false;
+      if (view.target === target) updateAgentSend(view);
+      settleQaEditor(view);
+    }
+  }
+
+  function activityView(block, page = state.ui.active_page) {
+    return agentViews.get(JSON.stringify([page, block.id]));
+  }
+
+  function retainedQaActivity(block, page = state.ui.active_page) {
+    const activity = qaActivity(block);
+    return retainAgentView(activityView(activity, page));
+  }
+
+  function settleQaEditor(view) {
+    if (!view.qa || retainAgentView(view)) return;
+    const cached = qaLiveCache.get(view.qa);
+    if (!cached?.status || cached.status === QA_STATUS.PENDING) return;
+    const node = view.root.closest(".qa");
+    if (node) finishQaBlock(node, cached);
+    disposeAgentView(view.key);
+  }
 
   function disposeAgentView(key) {
-    agentViews.get(key)?.dispose();
+    const view = agentViews.get(key);
+    view?.dispose();
+    if (view)
+      for (const target of view.targets.keys())
+        agentDrafts.delete(JSON.stringify([key, target]));
     agentViews.delete(key);
     agentSelections.delete(key);
   }
@@ -1129,24 +1624,32 @@
     const qaKeys = new Set();
     const collect = (blocks, page) => {
       for (const block of blocks || []) {
-        if (block.type === "agent_activity")
+        if (block.type === BLOCK_TYPE.AGENT_ACTIVITY)
           activeKeys.add(JSON.stringify([page, block.id]));
-        if (block.type === "qa") {
+        if (block.type === BLOCK_TYPE.QA) {
           const key = qaKey(block.path, block.id);
           qaKeys.add(key);
           const cached = qaLiveCache.get(key);
-          if (block.status !== "pending") qaLiveCache.delete(key);
-          else if (!cached?.status || cached.status === "pending")
+          const retained = retainedQaActivity(block, page);
+          if (block.status !== QA_STATUS.PENDING && !retained)
+            qaLiveCache.delete(key);
+          if (
+            retained ||
+            (block.status === QA_STATUS.PENDING &&
+              (!cached?.status || cached.status === QA_STATUS.PENDING))
+          )
             activeKeys.add(JSON.stringify([page, qaActivity(block).id]));
         }
-        if (block.type === "tabs")
+        if (block.type === BLOCK_TYPE.TABS)
           for (const tab of block.tabs || []) collect(tab.blocks, page);
-        if (block.type === "cards")
+        if (block.type === BLOCK_TYPE.CARDS)
           for (const item of block.items || []) collect(item.blocks, page);
       }
     };
     for (const [page, blocks] of Object.entries(state.ui.page_content || {}))
       collect(blocks, page);
+    for (const page of pageSurfaces.keys())
+      if (!pages.has(page) || !openPages.has(page)) pageSurfaces.delete(page);
     for (const key of qaLiveCache.keys())
       if (!qaKeys.has(key)) qaLiveCache.delete(key);
     for (const [key, view] of agentViews) {
@@ -1213,7 +1716,7 @@
   function renderExecutionBlock(block, row) {
     const args = executionArgs(block.arguments);
     const name = (block.name || "").split(/[.:/]/).at(-1);
-    const isRead = block.kind === "tool" && name === "read";
+    const isRead = block.kind === EXECUTION_BLOCK_KIND.TOOL && name === "read";
     const text = executionText(block.text);
     const latestLine =
       text
@@ -1222,15 +1725,15 @@
         .at(-1)
         ?.split("\n")[0] || "";
     const title =
-      block.kind === "tool"
+      block.kind === EXECUTION_BLOCK_KIND.TOOL
         ? executionToolTitle(block, args)
-        : block.kind === "thinking"
+        : block.kind === EXECUTION_BLOCK_KIND.THINKING
           ? `Thinking${latestLine ? `: ${latestLine.replaceAll("**", "")}` : ""}`
-          : block.kind === "review"
-            ? "Review report"
-            : `Text${text ? `: ${text.trim().split("\n")[0]}` : ""}`;
-    row.className = `execution-block execution-${block.kind || "text"}`;
-    row.dataset.status = block.status || "completed";
+          : block.kind === EXECUTION_BLOCK_KIND.REVIEW
+            ? `Review report${block.round !== undefined ? ` ${block.round}` : ""}`
+            : `${block.kind === EXECUTION_BLOCK_KIND.USER ? "User" : "Text"}${text ? `: ${text.trim().split("\n")[0]}` : ""}`;
+    row.className = `execution-block execution-${block.kind || EXECUTION_BLOCK_KIND.TEXT}`;
+    row.dataset.status = block.status || EXECUTION_BLOCK_STATUS.COMPLETED;
     const header = el(
       isRead ? "div" : "summary",
       { class: "execution-header" },
@@ -1238,7 +1741,7 @@
         el("span", { class: "execution-title", text: title }),
         el("span", {
           class: "execution-status",
-          text: block.status || "completed",
+          text: block.status || EXECUTION_BLOCK_STATUS.COMPLETED,
         }),
         el("span", {
           class: "execution-seconds",
@@ -1253,7 +1756,7 @@
       return;
     }
     const body = el("div", { class: "execution-body" });
-    if (block.kind === "tool") {
+    if (block.kind === EXECUTION_BLOCK_KIND.TOOL) {
       body.append(
         el("h4", { text: "Arguments" }),
         el("pre", { text: executionText(block.arguments) || "Unavailable" }),
@@ -1263,17 +1766,21 @@
           el("h4", { text: "Result" }),
           el("pre", { text: executionText(block.result) }),
         );
-    } else if (block.kind === "review") {
+    } else if (block.kind === EXECUTION_BLOCK_KIND.REVIEW) {
       const report = executionArgs(block.report);
-      const verdict = report.overall_correctness;
-      if (verdict)
+      const verdict = report.correct;
+      if (typeof verdict === "boolean")
         body.appendChild(
-          el("strong", { class: "execution-verdict", text: verdict }),
+          el("strong", {
+            class: "execution-verdict",
+            text: verdict ? "Correct" : "Incorrect",
+          }),
         );
-      if (report.explanation || report.summary || text)
-        body.appendChild(
-          el("p", { text: report.explanation || report.summary || text }),
-        );
+      if (block.error) body.appendChild(el("p", { text: block.error }));
+      if (typeof verdict === "boolean") {
+        if (report.explanation)
+          body.appendChild(el("p", { text: report.explanation }));
+      } else if (text) body.appendChild(el("pre", { text }));
       for (const finding of report.findings || []) {
         body.appendChild(
           el("article", { class: "execution-finding" }, [
@@ -1293,14 +1800,14 @@
         body.appendChild(el("pre", { text: executionText(block.report) }));
     } else body.appendChild(el("pre", { text }));
     const preview = el("pre", { class: "execution-preview", text: "" });
-    if (block.kind === "tool") {
+    if (block.kind === EXECUTION_BLOCK_KIND.TOOL) {
       if (["grep", "glob"].includes(name) && block.result !== undefined) {
         const result = block.result;
         const output =
           result?.details?.displayContent ??
           (Array.isArray(result?.content)
             ? result.content
-                .filter((part) => part.type === "text")
+                .filter((part) => part.type === FIELD_INPUT.TEXT)
                 .map((part) => part.text || "")
                 .join("\n")
             : result);
@@ -1310,7 +1817,10 @@
           .join("\n");
       } else if (
         ["write", "edit", "apply_patch"].includes(name) ||
-        ["streaming", "running"].includes(block.status)
+        [
+          EXECUTION_BLOCK_STATUS.STREAMING,
+          EXECUTION_BLOCK_STATUS.RUNNING,
+        ].includes(block.status)
       ) {
         const writing = ["write", "edit", "apply_patch"].includes(name);
         const content = executionText(
@@ -1348,7 +1858,7 @@
       const root = el("section", { class: "block agent-workflow" });
       const select = el("button", {
         class: "execution-select",
-        type: "button",
+        type: FIELD_INPUT.BUTTON,
         "aria-label": "查看会话",
         "aria-haspopup": "listbox",
         "aria-expanded": "false",
@@ -1369,11 +1879,28 @@
         tabindex: "0",
         "aria-label": "Execution blocks",
       });
+      const input = el("textarea", {
+        class: "execution-message",
+        rows: "3",
+        "aria-label": "发送给 Agent",
+      });
+      const send = el("button", {
+        type: FIELD_INPUT.BUTTON,
+        class: "btn btn-primary",
+        text: "发送",
+      });
       root.append(
         el("div", { class: "execution-bar" }, [select, metrics]),
         log,
+        el("div", { class: "execution-composer" }, [input, send]),
       );
       view = {
+        key,
+        page: state.ui.active_page,
+        input,
+        send,
+        targets: new Map(),
+        labels: new Map(),
         root,
         select,
         menu,
@@ -1404,9 +1931,14 @@
         )?.focus();
       });
       menu.addEventListener("click", (event) => {
-        const option = event.target.closest("[data-role]");
+        const option = event.target.closest("[data-target]");
         if (!option) return;
-        agentSelections.set(key, option.dataset.role);
+        if (agentDraft(view).composing) {
+          view.deferredTarget = option.dataset.target;
+          close();
+          return;
+        }
+        agentSelections.set(key, option.dataset.target);
         close();
         showAgentExecution(view, key);
         select.focus();
@@ -1451,28 +1983,113 @@
       };
       log.addEventListener("scroll", () => {
         if (!view.updating)
-          view.positions.set(view.role, executionPosition(view));
+          view.positions.set(view.target, executionPosition(view));
       });
+      for (const type of ["input", "select", "keyup", "scroll"])
+        input.addEventListener(type, () => {
+          if (type !== "scroll" || !view.editorRestoring) saveAgentEditor(view);
+          if (type === "input") settleQaEditor(view);
+        });
+      input.addEventListener("focus", () => {
+        view.wasFocused = true;
+      });
+      input.addEventListener("blur", (event) => {
+        saveAgentEditor(view);
+        if (
+          event.relatedTarget &&
+          $("#page-content").contains(event.relatedTarget) &&
+          !event.relatedTarget.closest(".tab-btn")
+        )
+          view.wasFocused = false;
+      });
+      input.addEventListener("compositionstart", () => {
+        agentDraft(view).composing = true;
+      });
+      input.addEventListener("compositionend", () => {
+        agentDraft(view).composing = false;
+        saveAgentEditor(view);
+        const draft = agentDraft(view);
+        if (draft.clearRevision === draft.revision) {
+          draft.value = "";
+          draft.start = draft.end = draft.top = draft.left = 0;
+          draft.direction = "none";
+          draft.revision += 1;
+          restoreAgentEditor(view);
+        }
+        delete draft.clearRevision;
+        if (view.deferredTarget !== undefined) {
+          agentSelections.set(key, view.deferredTarget);
+          delete view.deferredTarget;
+          showAgentExecution(view, key);
+        }
+        state.pageKey = null;
+        renderPageContent();
+        settleQaEditor(view);
+      });
+      input.addEventListener("keydown", (event) => {
+        if (
+          event.key === "Enter" &&
+          (event.shiftKey || event.ctrlKey) &&
+          !event.isComposing &&
+          event.keyCode !== 229 &&
+          !agentDraft(view).composing
+        ) {
+          event.preventDefault();
+          sendAgentMessage(view);
+        }
+      });
+      send.addEventListener("click", () => sendAgentMessage(view));
       agentViews.set(key, view);
     }
+    view.sendAction = block.send_action;
+    view.sendValues = block.send_values || {};
     view.agents = Array.isArray(block.agents) ? block.agents : [];
-    const roles = view.agents.some((agent) => agent.role === "main")
-      ? new Map([
-          ["main", "主写作"],
-          ["note_review", "笔记审阅"],
-        ])
-      : new Map();
-    for (const agent of view.agents)
-      if (agent.role && !roles.has(agent.role))
-        roles.set(agent.role, agent.label || agent.role);
-    view.roles = roles;
-    for (const [value, text] of roles) {
+    const targets = new Map();
+    view.agents.forEach((agent, index) => {
+      const target = agent.session_id || `legacy:${agent.id || index}`;
+      targets.set(target, agent);
+      if (!view.labels.has(target)) {
+        const label =
+          agent.label ||
+          (agent.role === EXECUTION_ROLE.WRITER
+            ? "主写作"
+            : agent.role === EXECUTION_ROLE.REVIEWER
+              ? "笔记审阅"
+              : agent.role) ||
+          "Agent";
+        const number =
+          Array.from(view.labels.values()).filter(
+            (entry) => entry.base === label,
+          ).length + 1;
+        view.labels.set(target, { base: label, number });
+      }
+    });
+    for (const [target, agent] of view.targets) {
+      const draft = agentDraft(view, target);
+      if (
+        !targets.has(target) &&
+        (target === view.target || draft.value.length || draft.pending)
+      )
+        targets.set(target, { ...agent, closed: true });
+    }
+    if (!targets.size) targets.set("legacy:unavailable", {});
+    view.targets = targets;
+    for (const [value, agent] of targets) {
+      const label = view.labels.get(value);
+      const duplicates =
+        label &&
+        Array.from(view.labels.values()).filter(
+          (entry) => entry.base === label.base,
+        ).length > 1;
+      const text = label
+        ? `${label.base}${duplicates ? ` ${label.number}` : ""}${agent.role === EXECUTION_ROLE.REVIEWER ? ` (${reviewStatusLabel(agent.review_status)})` : ""}${agent.closed ? "（已关闭）" : ""}`
+        : "查看会话";
       let option = view.options.get(value);
       if (!option) {
         option = el("button", {
-          type: "button",
+          type: FIELD_INPUT.BUTTON,
           role: "option",
-          dataset: { role: value },
+          dataset: { target: value },
         });
         view.options.set(value, option);
         view.menu.appendChild(option);
@@ -1480,9 +2097,10 @@
       if (option.textContent !== text) option.textContent = text;
     }
     for (const [value, option] of view.options) {
-      if (!roles.has(value)) {
+      if (!targets.has(value)) {
         option.remove();
         view.options.delete(value);
+        agentDrafts.delete(JSON.stringify([key, value]));
       }
     }
     showAgentExecution(view, key);
@@ -1491,23 +2109,29 @@
 
   function showAgentExecution(view, key) {
     const { select, metrics, log } = view;
-    if (view.role && log.isConnected)
-      view.positions.set(view.role, executionPosition(view));
+    if (view.target !== undefined && log.isConnected)
+      view.positions.set(view.target, executionPosition(view));
     view.updating = true;
-    const preferred = agentSelections.get(key);
-    const role =
-      preferred && view.roles.has(preferred)
-        ? preferred
-        : view.agents.some((agent) => agent.role === "main")
-          ? "main"
-          : view.agents[0]?.role || "main";
-    view.role = role;
-    const label = `${view.roles.get(role) || "查看会话"} ▾`;
+    const preferred = agentSelections.get(key) ?? view.target;
+    const target = view.targets.has(preferred)
+      ? preferred
+      : Array.from(view.targets).find(
+          ([, agent]) => agent.role === EXECUTION_ROLE.WRITER,
+        )?.[0] || view.targets.keys().next().value;
+    if (view.target !== target) {
+      saveAgentEditor(view);
+      view.target = target;
+      restoreAgentEditor(view);
+    }
+    updateAgentSend(view);
+    agentSelections.set(key, target);
+    view.root.dataset.sessionId = view.targets.get(target)?.session_id || "";
+    const label = `${view.options.get(target)?.textContent || "查看会话"} ▾`;
     if (select.textContent !== label) select.textContent = label;
     for (const [value, option] of view.options)
-      option.setAttribute("aria-selected", String(value === role));
-    const agents = view.agents.filter((agent) => agent.role === role);
-    const latest = agents.at(-1) || {};
+      option.setAttribute("aria-selected", String(value === target));
+    const latest = view.targets.get(target) || {};
+    const agents = [latest];
     const context =
       executionNumber(latest.context_tokens) &&
       executionNumber(latest.context_window) &&
@@ -1532,7 +2156,7 @@
       for (const block of agent.blocks || []) {
         const id = JSON.stringify([agent.id, block.id]);
         const tag =
-          block.kind === "tool" &&
+          block.kind === EXECUTION_BLOCK_KIND.TOOL &&
           (block.name || "").split(/[.:/]/).at(-1) === "read"
             ? "div"
             : "details";
@@ -1563,7 +2187,7 @@
       if (log.children[index] !== row)
         log.insertBefore(row, log.children[index] || null);
     });
-    const position = view.positions.get(role);
+    const position = view.positions.get(target);
     const restore = () => {
       if (!position || position.bottom) log.scrollTop = log.scrollHeight;
       else if (position.anchor?.parentNode === log) {
@@ -1577,9 +2201,9 @@
     view.updating = false;
     const revision = (view.revision = (view.revision || 0) + 1);
     requestAnimationFrame(() => {
-      if (view.role === role && view.revision === revision) {
+      if (view.target === target && view.revision === revision) {
         restore();
-        view.positions.set(role, executionPosition(view));
+        view.positions.set(target, executionPosition(view));
       }
     });
   }
@@ -1597,7 +2221,9 @@
         el("ul", { class: "task-list", "aria-label": "任务队列" }),
       ]);
     const tasks = state.ui.tasks || [];
-    const pending = tasks.filter((task) => task.state === "pending").length;
+    const pending = tasks.filter(
+      (task) => task.state === TASK_STATE.PENDING,
+    ).length;
     $(".task-summary", root).textContent =
       `等待中 ${pending} 个，运行中 ${tasks.length - pending} 个`;
     $(".task-empty", root).hidden = tasks.length > 0;
@@ -1617,7 +2243,7 @@
           ]),
           el("span", { class: "badge task-state" }),
           el("button", {
-            type: "button",
+            type: FIELD_INPUT.BUTTON,
             class: "btn btn-sm btn-danger task-cancel",
             text: "停止任务",
           }),
@@ -1642,7 +2268,7 @@
       session.textContent = task.session_id ? `会话：${task.session_id}` : "";
       session.hidden = !task.session_id;
       $(".task-state", row).textContent =
-        task.state === "pending" ? "等待中" : "运行中";
+        task.state === TASK_STATE.PENDING ? "等待中" : "运行中";
       const button = $(".task-cancel", row);
       button.hidden = !task.cancel?.action;
       button.setAttribute(
@@ -1658,20 +2284,20 @@
 
   function renderBlock(block) {
     if (!block || typeof block !== "object") return null;
-    const type = block.type || "text";
-    if (type === "agent_activity") return renderAgentActivity(block);
-    if (type === "task_queue") return renderTaskQueue();
-    if (type === "html")
+    const type = block.type || BLOCK_TYPE.TEXT;
+    if (type === BLOCK_TYPE.AGENT_ACTIVITY) return renderAgentActivity(block);
+    if (type === BLOCK_TYPE.TASK_QUEUE) return renderTaskQueue();
+    if (type === BLOCK_TYPE.HTML)
       return el("div", { class: "block", html: block.html || "" });
-    if (type === "markdown") {
+    if (type === BLOCK_TYPE.MARKDOWN) {
       return el("div", {
         class: "block markdown",
         html: block.html || escapeHtml(block.text || ""),
       });
     }
-    if (type === "text")
+    if (type === BLOCK_TYPE.TEXT)
       return el("pre", { class: "block pre", text: block.text ?? "" });
-    if (type === "keyvalue") {
+    if (type === BLOCK_TYPE.KEYVALUE) {
       const items = Array.isArray(block.items)
         ? block.items
         : Object.entries(block.items || {});
@@ -1686,14 +2312,14 @@
       }
       return el("div", { class: "block" }, [grid]);
     }
-    if (type === "table")
+    if (type === BLOCK_TYPE.TABLE)
       return el("div", { class: "block" }, [renderTable(block)]);
-    if (type === "cards")
+    if (type === BLOCK_TYPE.CARDS)
       return el("div", { class: "block" }, [renderCards(block)]);
-    if (type === "rows") return renderRows(block);
-    if (type === "tree")
+    if (type === BLOCK_TYPE.ROWS) return renderRows(block);
+    if (type === BLOCK_TYPE.TREE)
       return el("div", { class: "block" }, [renderTree(block)]);
-    if (type === "list") {
+    if (type === BLOCK_TYPE.LIST) {
       const list = el("div", { class: "block btn-row" });
       for (const item of block.items || []) {
         if (typeof item === "string")
@@ -1714,7 +2340,7 @@
       }
       return list;
     }
-    if (type === "buttons") {
+    if (type === BLOCK_TYPE.BUTTONS) {
       const row = el("div", { class: "block btn-row" });
       for (const b of block.buttons || []) {
         row.appendChild(
@@ -1729,25 +2355,25 @@
       }
       return row;
     }
-    if (type === "form")
+    if (type === BLOCK_TYPE.FORM)
       return el("div", { class: "block" }, [renderForm(block)]);
-    if (type === "log")
+    if (type === BLOCK_TYPE.LOG)
       return el("div", { class: "block" }, [renderLog(block)]);
-    if (type === "image") {
+    if (type === BLOCK_TYPE.IMAGE) {
       return el("div", { class: "block" }, [
         el("img", { class: "image", src: block.src, alt: block.alt || "" }),
       ]);
     }
-    if (type === "video") {
+    if (type === BLOCK_TYPE.VIDEO) {
       const video = el("video", { controls: "controls", src: block.src });
       return el("div", { class: "block" }, [video]);
     }
-    if (type === "tabs")
+    if (type === BLOCK_TYPE.TABS)
       return el("div", { class: "block" }, [renderTabs(block)]);
-    if (type === "player") return renderPlayer(block);
-    if (type === "switch") return renderSwitch(block);
-    if (type === "qa") return renderQA(block);
-    if (type === "progress") {
+    if (type === BLOCK_TYPE.PLAYER) return renderPlayer(block);
+    if (type === BLOCK_TYPE.SWITCH) return renderSwitch(block);
+    if (type === BLOCK_TYPE.QA) return renderQA(block);
+    if (type === BLOCK_TYPE.PROGRESS) {
       const value = Number(block.value ?? 0);
       const pct = value <= 1 ? value * 100 : value;
       return el("div", { class: "block" }, [
@@ -1760,7 +2386,7 @@
         ]),
       ]);
     }
-    if (type === "badge")
+    if (type === BLOCK_TYPE.BADGE)
       return el("span", {
         class: `badge ${block.class || ""}`,
         text: block.text || "",
@@ -1771,24 +2397,18 @@
     });
   }
 
-  // ------------------------------------------------------------------
-  // Layout
-  // ------------------------------------------------------------------
   function renderAll() {
     if (!state.ui) return;
     cleanupAgentViews();
     renderMenubar();
-    renderSidebar("left");
-    renderSidebar("right");
+    renderSidebar(SIDEBAR_SIDE.LEFT);
+    renderSidebar(SIDEBAR_SIDE.RIGHT);
     renderPageTabs();
     const pageChanged = renderPageContent();
     renderStatus();
     if (pageChanged) typeset();
   }
 
-  // ------------------------------------------------------------------
-  // Menubar + command palette
-  // ------------------------------------------------------------------
   function commands() {
     return state.ui?.commands || [];
   }
@@ -1825,7 +2445,7 @@
       const wrap = el("div", { class: "menu-wrap" });
       const btn = el("button", {
         class: "menu-btn",
-        type: "button",
+        type: FIELD_INPUT.BUTTON,
         text: name,
       });
       btn.addEventListener("click", (event) => {
@@ -1837,14 +2457,18 @@
         btn.classList.add("open");
         const drop = el("div", { class: "menu-drop" });
         for (const cmd of items) {
-          const item = el("button", { class: "menu-item", type: "button" }, [
-            el("span", {
-              text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}`,
-            }),
-            cmd.subtitle
-              ? el("span", { class: "sub", text: cmd.subtitle })
-              : null,
-          ]);
+          const item = el(
+            "button",
+            { class: "menu-item", type: FIELD_INPUT.BUTTON },
+            [
+              el("span", {
+                text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}`,
+              }),
+              cmd.subtitle
+                ? el("span", { class: "sub", text: cmd.subtitle })
+                : null,
+            ],
+          );
           item.addEventListener("click", (event) => {
             event.stopPropagation();
             runCommand(cmd);
@@ -1889,7 +2513,7 @@
         "button",
         {
           class: `palette-item ${index === state.paletteIndex ? "active" : ""}`,
-          type: "button",
+          type: FIELD_INPUT.BUTTON,
         },
         [
           cmd.category
@@ -1988,14 +2612,11 @@
     }
   }
 
-  // ------------------------------------------------------------------
-  // Collapsible, resizable sidebars
-  // ------------------------------------------------------------------
   const SIDEBAR_MIN = 200;
   const SIDEBAR_MAX = 560;
 
   function sidebarWidth(side) {
-    const fallback = side === "left" ? 280 : 320;
+    const fallback = side === SIDEBAR_SIDE.LEFT ? 280 : 320;
     const stored = Number(
       localStorage.getItem(`lecture-agent.sidebar.${side}.w`),
     );
@@ -2015,9 +2636,9 @@
   function applySidebarState() {
     const app = $("#app");
     if (!app) return;
-    for (const side of ["left", "right"]) {
+    for (const side of Object.values(SIDEBAR_SIDE)) {
       const collapsed =
-        localStorage.getItem(`lecture-agent.sidebar.${side}`) === "collapsed";
+        localStorage.getItem(`lecture-agent.sidebar.${side}`) === "true";
       app.classList.toggle(`${side}-collapsed`, collapsed);
       app.style.setProperty(
         `--${side}-col`,
@@ -2034,10 +2655,7 @@
       `--${side}-col`,
       collapsed ? "0px" : `${sidebarWidth(side)}px`,
     );
-    localStorage.setItem(
-      `lecture-agent.sidebar.${side}`,
-      collapsed ? "collapsed" : "open",
-    );
+    localStorage.setItem(`lecture-agent.sidebar.${side}`, String(collapsed));
   }
 
   function bindSidebarControls() {
@@ -2065,7 +2683,9 @@
         document.body.classList.add("resizing");
         const move = (ev) => {
           const width =
-            side === "left" ? ev.clientX - rect.left : rect.right - ev.clientX;
+            side === SIDEBAR_SIDE.LEFT
+              ? ev.clientX - rect.left
+              : rect.right - ev.clientX;
           const value = `${clampWidth(width)}px`;
           app.style.setProperty(`--${side}-col`, value);
         };
@@ -2089,7 +2709,6 @@
         handle.addEventListener("pointerup", stop);
         handle.addEventListener("pointercancel", stop);
       });
-      // Double-click a gutter to reset that panel to its default width.
       handle.addEventListener("dblclick", () => {
         localStorage.removeItem(`lecture-agent.sidebar.${side}.w`);
         if (!$("#app").classList.contains(`${side}-collapsed`)) {
@@ -2103,16 +2722,13 @@
     window.addEventListener("resize", () => {
       const app = $("#app");
       if (!app) return;
-      for (const side of ["left", "right"]) {
+      for (const side of Object.values(SIDEBAR_SIDE)) {
         if (app.classList.contains(`${side}-collapsed`)) continue;
         app.style.setProperty(`--${side}-col`, `${sidebarWidth(side)}px`);
       }
     });
   }
 
-  // ------------------------------------------------------------------
-  // Selection menu (reader pages) + ask dialog
-  // ------------------------------------------------------------------
   function hideSelectionMenu() {
     const menu = $("#selection-menu");
     if (!menu) return;
@@ -2157,12 +2773,12 @@
     for (const item of ctx.actions) {
       const btn = el("button", {
         class: "selection-item",
-        type: "button",
+        type: FIELD_INPUT.BUTTON,
         text: `${item.icon ? item.icon + " " : ""}${item.label || item.id}`,
       });
       btn.addEventListener("click", () => {
         hideSelectionMenu();
-        if (item.kind === "prompt") {
+        if (item.kind === SELECTION_ACTION_KIND.PROMPT) {
           openAskDialog(item, ctx, text);
           return;
         }
@@ -2207,8 +2823,8 @@
         Array.isArray(item.intensities) && item.intensities.length
           ? item.intensities
           : [
-              { value: "instant", label: "快速" },
-              { value: "research", label: "研究" },
+              { value: ASK_INTENSITY.INSTANT, label: "快速" },
+              { value: ASK_INTENSITY.RESEARCH, label: "研究" },
             ];
       for (const option of options) {
         const value = typeof option === "object" ? option.value : option;
@@ -2236,11 +2852,12 @@
     const input = $("#ask-input");
     const question = (input.value || "").trim();
     if (!question) {
-      toast("请先输入问题", "err");
+      toast("请先输入问题", TOAST_KIND.ERR);
       return;
     }
     const { item, ctx, selection } = askContext;
-    const intensity = ($("#ask-intensity") || {}).value || "instant";
+    const intensity =
+      ($("#ask-intensity") || {}).value || ASK_INTENSITY.INSTANT;
     closeAskDialog();
     await postAction(item.action, {
       ...(item.value || {}),
@@ -2331,28 +2948,26 @@
   }
 
   function renderSidebar(side) {
-    const tabs = side === "left" ? state.ui.left_tabs : state.ui.right_tabs;
+    const tabs =
+      side === SIDEBAR_SIDE.LEFT ? state.ui.left_tabs : state.ui.right_tabs;
     const tabsEl = $(`#${side}-tabs`);
     const toolboxEl = $(`#${side}-toolbox`);
     const sidebarKey = JSON.stringify([
       tabs,
       state.activeTab[side],
       state.ui.active_page,
-      side === "right" ? state.ui.context : null,
+      side === SIDEBAR_SIDE.RIGHT ? state.ui.context : null,
     ]);
     if (toolboxEl.dataset.renderKey === sidebarKey) return;
     toolboxEl.dataset.renderKey = sidebarKey;
     const sidebarScroll = toolboxEl.scrollTop;
-    if (side === "right") renderSidebarContext();
+    if (side === SIDEBAR_SIDE.RIGHT) renderSidebarContext();
     const contextKnown = Object.prototype.hasOwnProperty.call(
       state.ui,
       "context",
     );
-    const context = side === "right" ? state.ui.context : null;
-    if (side === "right" && contextKnown && !context) {
-      // Nothing is selected and there is no class history: the right panel has
-      // nothing meaningful to show, so keep it out of the way instead of
-      // displaying a stack of "未选择课程" widgets.
+    const context = side === SIDEBAR_SIDE.RIGHT ? state.ui.context : null;
+    if (side === SIDEBAR_SIDE.RIGHT && contextKnown && !context) {
       tabsEl.replaceChildren();
       tabsEl.hidden = true;
       toolboxEl.replaceChildren(
@@ -2364,7 +2979,6 @@
       return;
     }
     tabsEl.replaceChildren();
-    // A single tab needs no tab strip: the left sidebar is just the course tree.
     tabsEl.hidden = (tabs || []).length <= 1;
     const active = pickTab(tabs || [], side);
     state.activeTab[side] = active;
@@ -2374,7 +2988,7 @@
         "button",
         {
           class: `side-tab ${tab.id === active ? "active" : ""}`,
-          type: "button",
+          type: FIELD_INPUT.BUTTON,
         },
         [
           tab.icon ? el("span", { class: "icon", text: tab.icon }) : null,
@@ -2429,7 +3043,9 @@
       if (item.blocks && item.blocks.length) {
         body.appendChild(
           renderBlocks(
-            item.blocks.filter((block) => block.type !== "agent_activity"),
+            item.blocks.filter(
+              (block) => block.type !== BLOCK_TYPE.AGENT_ACTIVITY,
+            ),
           ),
         );
       } else {
@@ -2460,7 +3076,7 @@
         page.closable
           ? el("button", {
               class: "close",
-              type: "button",
+              type: FIELD_INPUT.BUTTON,
               text: "×",
               title: "关闭",
             })
@@ -2485,104 +3101,114 @@
     const container = $("#page-content");
     const active = state.ui.active_page || "";
     const blocks = active ? state.ui.page_content?.[active] : null;
-    if (active === "ui:tasks" && container.dataset.pageId === active) {
+    const previousPage = container.dataset.pageId;
+    const samePage = previousPage === active;
+    if (active === "ui:tasks" && samePage) {
       const queue = $(".task-queue", container);
       if (queue) {
         renderTaskQueue(queue);
         return false;
       }
     }
-    // ``collapsed`` is client-side fold state persisted in the note; ignoring
-    // it here keeps polling refreshes from re-rendering after a fold toggle.
     const key = active
-      ? `${active}\u0000${JSON.stringify(blocks || [], (k, v) => (k === "collapsed" ? undefined : v))}`
+      ? `${active}\u0000${JSON.stringify(blocks || [], (k, v) => (k === "true" ? undefined : v))}`
       : "__welcome__";
-    const samePage = container.dataset.pageId === active;
-    // Page content is polled every few seconds; never re-render or re-run
-    // KaTeX when the payload is identical.  This is what made the board and
-    // notes pages feel like they were reloading constantly.
     if (samePage && state.pageKey === key) return false;
+    if (!samePage && composingWithin(container)) return false;
+    const focused = document.activeElement;
+    const activityPage =
+      blocks?.some(hasActivityBlock) ||
+      container.querySelector(".agent-workflow");
     if (
       samePage &&
-      blocks?.length &&
-      blocks.some((block) => block.type === "agent_activity") &&
-      container.children.length === blocks.length
-    ) {
-      blocks.forEach((block, index) => {
-        const current = container.children[index];
-        if (block.type === "agent_activity") {
-          const view = renderAgentActivity(block);
-          if (view !== current) current.replaceWith(view);
-        } else {
-          const signature = JSON.stringify(block);
-          if (current.dataset.blockSignature !== signature) {
-            const node = renderBlock(block);
-            if (node) {
-              node.dataset.blockSignature = signature;
-              current.replaceWith(node);
-            }
-          }
-        }
-      });
-      state.pageKey = key;
-      return true;
-    }
-    const scrollTop = samePage ? container.scrollTop : 0;
-    const focused = document.activeElement;
-    const editing =
-      samePage &&
-      focused &&
+      !activityPage &&
       container.contains(focused) &&
-      !focused.classList.contains("execution-select") &&
-      ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName);
-    if (editing) return false; // don't wipe out a form the user is typing in
-    // Q&A blocks grow and shrink as answers stream in.  Record, for blocks
-    // above the viewport, how tall they were, and put the scroll back so the
-    // visible content does not move.
+      ["INPUT", "TEXTAREA", "SELECT"].includes(focused?.tagName)
+    )
+      return false;
     const qaBefore = new Map();
     if (samePage) {
-      const scrollerTop = container.getBoundingClientRect().top;
-      for (const node of $$(".qa", container)) {
-        qaBefore.set(`${node.dataset.qaPath}\u0000${node.dataset.qaId}`, {
+      const edge = container.getBoundingClientRect().top;
+      for (const node of $$(".qa", container))
+        qaBefore.set(qaKey(node.dataset.qaPath, node.dataset.qaId), {
           height: node.offsetHeight,
-          above: node.getBoundingClientRect().bottom <= scrollerTop,
+          above: node.getBoundingClientRect().bottom <= edge,
         });
+    }
+    const scrollTop = container.scrollTop;
+    if (!samePage) {
+      for (const view of agentViews.values()) {
+        if (!container.contains(view.root)) continue;
+        saveAgentEditor(view);
+        view.positions.set(view.target, executionPosition(view));
+        if (focused === view.input || view.wasFocused) view.restoreFocus = true;
+        view.editorSuspended = true;
+        view.close();
       }
+      if (
+        previousPage !== undefined &&
+        (state.ui.open_pages || []).includes(previousPage)
+      )
+        pageSurfaces.set(previousPage, {
+          nodes: Array.from(container.childNodes),
+          scrollTop,
+        });
+      container.replaceChildren();
+      container.dataset.pageId = active;
+      const saved = pageSurfaces.get(active);
+      if (saved) for (const node of saved.nodes) container.appendChild(node);
     }
-    for (const view of agentViews.values()) {
-      if (view.log.isConnected)
-        view.positions.set(view.role, executionPosition(view));
-    }
-    destroyPlayers(container);
-    container.replaceChildren();
-    container.dataset.pageId = active;
-    state.pageKey = key;
+    let complete = true;
     if (!active || !blocks) {
-      container.appendChild(
-        el("div", { class: "welcome" }, [
-          el("div", { class: "welcome-mark", text: "∮" }),
-          el("h2", { text: "选择一节课" }),
-          el("p", {
-            text: "左侧课程树里展开课程，选择录播或直播。按 Ctrl+P 打开命令面板。",
-          }),
-        ]),
-      );
-      container.scrollTop = 0;
-      return true;
-    }
-    container.appendChild(renderBlocks(blocks));
-    container.scrollTop = samePage ? scrollTop : 0;
-    if (samePage && qaBefore.size) {
-      let adjust = 0;
-      for (const node of $$(".qa", container)) {
-        const prev = qaBefore.get(
-          `${node.dataset.qaPath}\u0000${node.dataset.qaId}`,
+      if (!samePage || !container.children.length)
+        container.replaceChildren(
+          el("div", { class: "welcome" }, [
+            el("div", { class: "welcome-mark", text: "∮" }),
+            el("h2", { text: "选择一节课" }),
+            el("p", {
+              text: "左侧课程树里展开课程，选择录播或直播．按 Ctrl+P 打开命令面板．",
+            }),
+          ]),
         );
-        if (prev && prev.above) adjust += node.offsetHeight - prev.height;
+    } else complete = updateBlocks(container, blocks);
+    state.pageKey = complete ? key : null;
+    container.scrollTop = samePage
+      ? scrollTop
+      : pageSurfaces.get(active)?.scrollTop || 0;
+    if (!samePage) {
+      for (const view of agentViews.values()) {
+        if (!container.contains(view.root)) continue;
+        view.editorSuspended = false;
+        if (view.input.getClientRects().length) {
+          restoreAgentEditor(view, Boolean(view.restoreFocus));
+          view.restoreFocus = false;
+        }
       }
-      if (adjust) container.scrollTop += adjust;
     }
+    let adjust = 0;
+    for (const node of $$(".qa", container)) {
+      const before = qaBefore.get(
+        qaKey(node.dataset.qaPath, node.dataset.qaId),
+      );
+      if (before?.above) adjust += node.offsetHeight - before.height;
+    }
+    if (adjust) container.scrollTop += adjust;
     return true;
+  }
+
+  function hasActivityBlock(block) {
+    return (
+      block.type === BLOCK_TYPE.AGENT_ACTIVITY ||
+      block.type === BLOCK_TYPE.QA ||
+      (block.type === BLOCK_TYPE.TABS &&
+        (block.tabs || []).some((tab) =>
+          (tab.blocks || []).some(hasActivityBlock),
+        )) ||
+      (block.type === BLOCK_TYPE.CARDS &&
+        (block.items || []).some((item) =>
+          (item.blocks || []).some(hasActivityBlock),
+        ))
+    );
   }
 
   function renderStatus() {
@@ -2626,7 +3252,7 @@
       el(
         "button",
         {
-          type: "button",
+          type: FIELD_INPUT.BUTTON,
           class: "status-item status-task-link",
           "aria-label": `打开任务队列，共 ${tasks.length} 个任务`,
           onclick: () => openPage("ui:tasks"),
@@ -2657,7 +3283,7 @@
         }),
       );
     } catch (err) {
-      toast(`打开页面失败：${err.message}`, "err");
+      toast(`打开页面失败：${err.message}`, TOAST_KIND.ERR);
     }
   }
 
@@ -2669,33 +3295,34 @@
         }),
       );
     } catch (err) {
-      toast(`关闭页面失败：${err.message}`, "err");
+      toast(`关闭页面失败：${err.message}`, TOAST_KIND.ERR);
     }
   }
 
-  // ------------------------------------------------------------------
-  // Actions
-  // ------------------------------------------------------------------
   function formValues(form) {
     const values = {};
     for (const field of Array.from(form.elements)) {
-      if (!field.name || field.type === "submit" || field.type === "button")
+      if (
+        !field.name ||
+        field.type === FIELD_INPUT.SUBMIT ||
+        field.type === FIELD_INPUT.BUTTON
+      )
         continue;
-      if (field.type === "checkbox") {
+      if (field.type === FIELD_INPUT.CHECKBOX) {
         values[field.name] = field.checked;
-      } else if (field.dataset.fieldType === "json") {
+      } else if (field.dataset.fieldType === SETTING_TYPE.JSON) {
         try {
           values[field.name] = JSON.parse(field.value);
         } catch (_) {
           values[field.name] = field.value;
         }
       } else if (
-        field.dataset.fieldType === "int" ||
-        field.dataset.fieldType === "number"
+        field.dataset.fieldType === SETTING_TYPE.INT ||
+        field.dataset.fieldType === FIELD_INPUT.NUMBER
       ) {
         values[field.name] =
           field.value === "" ? null : Number.parseInt(field.value, 10);
-      } else if (field.dataset.fieldType === "float") {
+      } else if (field.dataset.fieldType === SETTING_TYPE.FLOAT) {
         values[field.name] =
           field.value === "" ? null : Number.parseFloat(field.value);
       } else {
@@ -2705,9 +3332,15 @@
     return values;
   }
 
-  async function postAction(action, values = {}, pageId = null, itemId = null) {
+  async function postAction(
+    action,
+    values = {},
+    pageId = null,
+    itemId = null,
+    independent = false,
+  ) {
     try {
-      return await changeNavigation(async () => {
+      const request = async () => {
         const result = await api("/api/ui/action", {
           method: "POST",
           body: JSON.stringify({
@@ -2717,7 +3350,8 @@
             item_id: itemId || null,
           }),
         });
-        if (result.message) toast(result.message, result.ok ? "ok" : "err");
+        if (result.message)
+          toast(result.message, result.ok ? TOAST_KIND.OK : TOAST_KIND.ERR);
         if (result.open_page) {
           await api(
             `/api/ui/pages/${encodeURIComponent(result.open_page)}/open`,
@@ -2727,9 +3361,14 @@
           );
         }
         return result;
-      });
+      };
+      if (!independent) return await changeNavigation(request);
+      const result = await request();
+      if (result?.refresh !== false || result?.open_page)
+        await loadState({ quiet: true });
+      return result;
     } catch (err) {
-      toast(`操作失败：${err.message}`, "err");
+      toast(`操作失败：${err.message}`, TOAST_KIND.ERR);
       return { ok: false };
     }
   }
@@ -2748,9 +3387,7 @@
     if (btn.dataset.value) {
       try {
         values = { ...values, ...JSON.parse(btn.dataset.value) };
-      } catch (_) {
-        /* keep dataset */
-      }
+      } catch (_) {}
     }
     const form = btn.closest("form");
     if (form) values = { ...formValues(form), ...values };
@@ -2769,9 +3406,6 @@
     postAction(form.dataset.action, formValues(form));
   });
 
-  // ------------------------------------------------------------------
-  // WebSocket / polling
-  // ------------------------------------------------------------------
   let refreshTimer = null;
   function scheduleRefresh() {
     clearTimeout(refreshTimer);
@@ -2791,13 +3425,14 @@
     ws.addEventListener("message", (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === "refresh") scheduleRefresh();
-        else if (data.type === "notify" && data.topic === "qa.live") {
+        if (data.type === WS_MESSAGE_TYPE.REFRESH) scheduleRefresh();
+        else if (
+          data.type === WS_MESSAGE_TYPE.NOTIFY &&
+          data.topic === "qa.live"
+        ) {
           applyQaLive(data.payload || {});
         }
-      } catch (_) {
-        /* ignore */
-      }
+      } catch (_) {}
     });
     ws.addEventListener("close", () => {
       setConnection(false);

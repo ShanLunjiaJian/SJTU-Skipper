@@ -1,5 +1,3 @@
-"""Tests for the shared reader plugin."""
-
 from __future__ import annotations
 
 from html.parser import HTMLParser
@@ -7,6 +5,7 @@ from pathlib import Path
 
 from config import load_config
 from core.runtime import build_runtime
+from core.ui import BlockType
 from plugins.reader import ReaderPlugin
 
 
@@ -44,14 +43,15 @@ def test_show_opens_reader_page(tmp_path: Path) -> None:
         state = runtime.ui.state()
         assert state["active_page"] == "reader:main"
         blocks = state["page_content"]["reader:main"]
-        tabs = next(block for block in blocks if block["type"] == "tabs")
+        tabs = next(block for block in blocks if block["type"] == BlockType.TABS)
         assert [tab["title"] for tab in tabs["tabs"]] == ["知识", "闲话"]
-        # The requested document is the active tab.
         assert tabs["tabs"][0]["active"] is False
         assert tabs["tabs"][1]["active"] is True
-        # Markdown is rendered (and therefore KaTeX-able).
         markdown = [
-            b for tab in tabs["tabs"] for b in tab["blocks"] if b["type"] == "markdown"
+            b
+            for tab in tabs["tabs"]
+            for b in tab["blocks"]
+            if b["type"] == BlockType.MARKDOWN
         ]
         assert markdown and "定义" in markdown[0]["html"]
     finally:
@@ -77,7 +77,7 @@ def test_reader_action_opens_page(tmp_path: Path) -> None:
         assert result.ok
         assert result.open_page == "reader:main"
         blocks = runtime.ui.state()["page_content"]["reader:main"]
-        assert any(b["type"] == "markdown" and "T" in b["text"] for b in blocks)
+        assert any(b["type"] == BlockType.MARKDOWN and "T" in b["text"] for b in blocks)
     finally:
         runtime.stop()
 
@@ -131,13 +131,15 @@ def test_document_footnotes_survive_length_and_qa(tmp_path: Path) -> None:
 
         def rendered() -> tuple[list[dict], str]:
             blocks = runtime.ui.state()["page_content"]["reader:main"]
-            tabs = next(block for block in blocks if block["type"] == "tabs")["tabs"]
+            tabs = next(block for block in blocks if block["type"] == BlockType.TABS)[
+                "tabs"
+            ]
             note_blocks = tabs[0]["blocks"]
             html = "".join(
                 block["html"]
                 for tab in tabs
                 for block in tab["blocks"]
-                if block["type"] == "markdown"
+                if block["type"] == BlockType.MARKDOWN
             )
             assert "[^normal-counterexample]" not in html
             assert formula in html and "$x_1*x_2$" in html
@@ -166,7 +168,7 @@ def test_document_footnotes_survive_length_and_qa(tmp_path: Path) -> None:
             "[^normal-counterexample]: Answer context.",
         )
         blocks, html = rendered()
-        question = next(block for block in blocks if block["type"] == "qa")
+        question = next(block for block in blocks if block["type"] == BlockType.QA)
         assert question["path"] == path and question["id"] == created["id"]
         assert question["delete_action"] == "reader.qa_delete"
         assert question["collapse_action"] == "reader.qa_collapse"
@@ -186,7 +188,7 @@ def test_document_footnotes_survive_length_and_qa(tmp_path: Path) -> None:
         )
         assert result.ok
         blocks, _ = rendered()
-        assert not any(block["type"] == "qa" for block in blocks)
+        assert not any(block["type"] == BlockType.QA for block in blocks)
         assert Path(path).read_text("utf-8").strip() == text.strip()
     finally:
         runtime.stop()

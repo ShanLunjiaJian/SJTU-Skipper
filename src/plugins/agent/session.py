@@ -1,5 +1,3 @@
-"""Application metadata for a conversation owned by the SDK."""
-
 from __future__ import annotations
 
 import threading
@@ -8,23 +6,22 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from core.agent_types import AgentRole, AgentToolName
 from core.workspace import FileWorkspace
 
 
 @dataclass(slots=True)
 class AgentSession:
-    """Keep task metadata outside the SDK context."""
-
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     name: str = "default"
-    role: str = "default"
+    role: AgentRole = AgentRole.DEFAULT
     agent: str = ""
     system_prompt: str = ""
     workspace: FileWorkspace = field(default_factory=FileWorkspace)
-    tools: tuple[str, ...] = ()
+    tools: tuple[AgentToolName, ...] = ()
     model: str = ""
     created_at: float = field(default_factory=time.time)
-    lock: threading.RLock = field(default_factory=threading.RLock)
+    lock: threading.Lock = field(default_factory=threading.Lock)
     cancelled: threading.Event = field(default_factory=threading.Event)
     runtime_ready: bool = False
     meta: dict[str, Any] = field(default_factory=dict)

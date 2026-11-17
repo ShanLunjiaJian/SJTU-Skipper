@@ -1,26 +1,7 @@
-"""Inline question/answer blocks stored inside note markdown files.
+"""Q&A blocks use HTML comment delimiters below the selected paragraph.
 
-A question asked about a selected passage is written **into the note file**
-right below the anchored paragraph, inside a private delimiter pair::
-
-    <!-- qa:begin {"id": "qa-1a2b3c4d", "ts": "2026-11-10 14:03", "status": "done", "intensity": "research", "collapsed": false} -->
-    **❓ 提问（2026-11-10 14:03）**
-
-    …question…
-
-    **🤖 回答**
-
-    …answer…
-
-    <!-- qa:end -->
-
-The delimiters are HTML comments, so any plain Markdown viewer still shows the
-question and the answer (only the markers are invisible).  The reader itself
-recognises the span, removes it from the Markdown stream and renders it with
-its own collapsible component. This is the "special format" the note files carry.
-
-Everything in this module is deterministic file surgery: the agent never edits
-the notes, it only produces the answer text which is inserted here.
+Plain Markdown viewers show the questions and answers. The reader replaces
+these spans with collapsible controls.
 """
 
 from __future__ import annotations
@@ -29,10 +10,22 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
+from enum import StrEnum
 
-# ---------------------------------------------------------------------------
-# Format
-# ---------------------------------------------------------------------------
+from .ui import BlockType
+
+
+class QaStatus(StrEnum):
+    PENDING = "pending"
+    DONE = "done"
+    ERROR = "error"
+
+
+class AskIntensity(StrEnum):
+    INSTANT = "instant"
+    RESEARCH = "research"
+
+
 QUESTION_PREFIX = "❓ 提问"
 ANSWER_PREFIX = "🤖 回答"
 
@@ -54,12 +47,12 @@ class QABlock:
 
     id: str
     ts: str
-    status: str
+    status: QaStatus
     question: str
     answer: str
     start: int
     end: int
-    intensity: str = ""
+    intensity: AskIntensity | None = None
     collapsed: bool = False
 
 
@@ -71,10 +64,10 @@ def build_block(
     qa_id: str,
     ts: str,
     *,
-    status: str = "pending",
+    status: QaStatus = QaStatus.PENDING,
     question: str = "",
     answer: str = "",
-    intensity: str = "",
+    intensity: AskIntensity | None = None,
     collapsed: bool = False,
 ) -> str:
     """Return the canonical on-disk representation of one Q&A pair."""
@@ -121,12 +114,14 @@ def parse_blocks(text: str) -> list[QABlock]:
             QABlock(
                 id=str(meta.get("id") or ""),
                 ts=str(meta.get("ts") or ""),
-                status=str(meta.get("status") or "done"),
+                status=QaStatus(meta.get("status") or QaStatus.DONE),
                 question=question,
                 answer=answer,
                 start=match.start(),
                 end=match.end(),
-                intensity=str(meta.get("intensity") or ""),
+                intensity=AskIntensity(meta["intensity"])
+                if meta.get("intensity")
+                else None,
                 collapsed=bool(meta.get("collapsed")),
             )
         )
@@ -137,18 +132,18 @@ def has_blocks(text: str) -> bool:
     return _BLOCK_RE.search(text) is not None
 
 
-def segments(text: str) -> list[tuple[str, object]]:
+def segments(text: str) -> list[tuple[BlockType, object]]:
     """Split *text* into ``("markdown", str)`` / ``("qa", QABlock)`` pieces."""
 
-    out: list[tuple[str, object]] = []
+    out: list[tuple[BlockType, object]] = []
     cursor = 0
     for block in parse_blocks(text):
         if block.start > cursor:
-            out.append(("markdown", text[cursor : block.start]))
-        out.append(("qa", block))
+            out.append((BlockType.MARKDOWN, text[cursor : block.start]))
+        out.append((BlockType.QA, block))
         cursor = block.end
     if cursor < len(text):
-        out.append(("markdown", text[cursor:]))
+        out.append((BlockType.MARKDOWN, text[cursor:]))
     return out
 
 
@@ -185,9 +180,6 @@ def remove_block(text: str, qa_id: str) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Anchoring: map a browser selection back to the raw Markdown paragraph
-# ---------------------------------------------------------------------------
 def find_anchor(text: str, selection: str) -> int | None:
     """Return the offset of the paragraph the user selected, or ``None``.
 
@@ -243,7 +235,6 @@ def insert_block(text: str, block: str, selection: str = "") -> tuple[str, bool]
         base = text.rstrip("\n")
         return (f"{base}\n\n{body}\n" if base else f"{body}\n"), False
 
-    # End of the paragraph that contains the anchor.
     end = text.find("\n\n", anchor)
     if end < 0:
         base = text.rstrip("\n")
@@ -266,9 +257,7 @@ def insert_block(text: str, block: str, selection: str = "") -> tuple[str, bool]
     return "\n\n".join(pieces) + "\n", True
 
 
-# ---------------------------------------------------------------------------
-# Word budgets (CJK characters count as one word each)
-# ---------------------------------------------------------------------------
+# CJK characters count as one word each.
 _WORD_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]|[A-Za-z]+|[0-9]+")
 
 
@@ -300,9 +289,6 @@ def head_words(text: str, limit: int) -> str:
     return text[:end].strip("\n")
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _split_body(body: str) -> tuple[str, str]:
     match = _ANSWER_SEP_RE.search(body)
     if match:

@@ -1,5 +1,3 @@
-"""Tests for the OpenCode Go OAuth client (no real network)."""
-
 from __future__ import annotations
 
 import httpx2

@@ -8,7 +8,25 @@ the same course) are merged into a single class node that keeps every part.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from enum import StrEnum
+
+from core.media import SourceKind
+
 from typing import Any, Iterable
+
+
+class LiveState(StrEnum):
+    UNKNOWN = ""
+    LIVE = "直播中"
+    UPCOMING = "未开始"
+    ENDED = "已结束"
+
+
+class TreeBadge(StrEnum):
+    DONE = "done"
+    LIVE = "live"
+    UPCOMING = "upcoming"
+
 
 _TIME_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
@@ -23,7 +41,6 @@ DEFAULT_MAX_PARTS = 3
 
 
 def parse_time(value: Any) -> datetime | None:
-    """Parse a Canvas/video-portal timestamp (campus local time)."""
 
     if isinstance(value, datetime):
         return value
@@ -39,7 +56,6 @@ def parse_time(value: Any) -> datetime | None:
 
 
 def local_time(value: Any, *, with_year: bool = False) -> str:
-    """Human readable local time, e.g. ``10-28 08:00``."""
 
     dt = parse_time(value)
     if dt is None:
@@ -47,19 +63,18 @@ def local_time(value: Any, *, with_year: bool = False) -> str:
     return dt.strftime("%Y-%m-%d %H:%M" if with_year else "%m-%d %H:%M")
 
 
-def live_state(begin: Any, end: Any, *, now: datetime | None = None) -> str:
-    """Return 直播中 / 未开始 / 已结束 for a time range."""
+def live_state(begin: Any, end: Any, *, now: datetime | None = None) -> LiveState:
 
     begin_dt = parse_time(begin)
     end_dt = parse_time(end)
     if begin_dt is None or end_dt is None:
-        return ""
+        return LiveState.UNKNOWN
     current = now or datetime.now()
     if begin_dt <= current <= end_dt:
-        return "直播中"
+        return LiveState.LIVE
     if current < begin_dt:
-        return "未开始"
-    return "已结束"
+        return LiveState.UPCOMING
+    return LiveState.ENDED
 
 
 def next_boundary(
@@ -85,9 +100,6 @@ def next_boundary(
     return min(upcoming) if upcoming else 0.0
 
 
-# ---------------------------------------------------------------------------
-# Merging consecutive periods
-# ---------------------------------------------------------------------------
 def merge_periods(
     recordings: Iterable[dict[str, Any]],
     *,
@@ -124,9 +136,6 @@ def merge_periods(
     return groups
 
 
-# ---------------------------------------------------------------------------
-# Course / class nodes
-# ---------------------------------------------------------------------------
 def _norm_name(text: Any) -> str:
     return "".join(str(text or "").split()).lower()
 
@@ -184,12 +193,12 @@ def _recording_child(
         "label": label,
         "subtitle": subtitle,
         "badge": "录播",
-        "badge_class": "done",
+        "badge_class": TreeBadge.DONE,
         "action": {
             "action": "input.open_class",
             "value": {
                 "id": f"class:{course_id}:rec:{video_ids[0] if video_ids else ''}",
-                "kind": "recording",
+                "kind": SourceKind.RECORDING,
                 "course": course_id,
                 "name": str(course.get("name", "")),
                 "label": label,
@@ -248,28 +257,27 @@ def _live_group_child(
     *,
     now: datetime,
 ) -> dict[str, Any] | None:
-    """One class node for a merged run of live periods."""
 
     parts: list[dict[str, Any]] = group["parts"]
     states = [live_state(part.get("begin"), part.get("end"), now=now) for part in parts]
     if not any(states):
         return None
-    if "直播中" in states:
-        state = "直播中"
-    elif "未开始" in states:
-        state = "未开始"
+    if LiveState.LIVE in states:
+        state = LiveState.LIVE
+    elif LiveState.UPCOMING in states:
+        state = LiveState.UPCOMING
     else:
-        state = "已结束"
+        state = LiveState.ENDED
 
     # Open the part that is live now, else the next upcoming one, else the last.
     active = None
     for part, part_state in zip(parts, states):
-        if part_state == "直播中":
+        if part_state == LiveState.LIVE:
             active = part
             break
     if active is None:
         for part, part_state in zip(parts, states):
-            if part_state == "未开始":
+            if part_state == LiveState.UPCOMING:
                 active = part
                 break
     if active is None:
@@ -295,13 +303,15 @@ def _live_group_child(
         "label": label,
         "subtitle": subtitle,
         "badge": state,
-        "badge_class": "live" if state == "直播中" else "upcoming",
-        "live": state == "直播中",
+        "badge_class": TreeBadge.LIVE
+        if state == LiveState.LIVE
+        else TreeBadge.UPCOMING,
+        "live": state == LiveState.LIVE,
         "action": {
             "action": "input.open_class",
             "value": {
                 "id": child_id,
-                "kind": "live",
+                "kind": SourceKind.LIVE,
                 "course": course_id,
                 "name": course_name,
                 "label": label,
@@ -323,7 +333,6 @@ def build_tree(
     max_gap_minutes: int = DEFAULT_MAX_GAP_MINUTES,
     max_parts: int = DEFAULT_MAX_PARTS,
 ) -> list[dict[str, Any]]:
-    """Build the unified course tree (course → class) for the sidebar."""
 
     now = now or datetime.now()
     expanded_ids = {str(item) for item in expanded}
@@ -349,7 +358,7 @@ def build_tree(
         cid = str(matched.get("id", ""))
         begin = parse_time(live.get("begin"))
         if _recording_overlaps(begin, groups_by_course.get(cid, [])):
-            continue  # The recording already represents this class.
+            continue
         lives_by_course.setdefault(cid, []).append(live)
         names_by_course[cid] = str(matched.get("name", ""))
 

@@ -88,7 +88,7 @@ ctx.events.emit("my.event", value=1)
 - `stream.appended` / `stream.sealed`
 - `settings.changed`
 - `ui.changed`
-- `agent.run.started` / `agent.delta` / `agent.reasoning` / `agent.message` / `agent.tool_call` / `agent.tool_result` / `agent.file` / `agent.run.finished` / `agent.error`
+- `agent.run.started` / `agent.run.ready` / `agent.delta` / `agent.reasoning` / `agent.message` / `agent.tool_call` / `agent.tool_result` / `agent.file` / `agent.run.finished` / `agent.error`
 - `vlm.segment` / `vlm.error`
 - `stt.partial` / `stt.segment` / `stt.anomaly` / `stt.error`
 - `input.status` / `input.error`
@@ -198,6 +198,17 @@ def handler(payload: dict):
 ```
 
 返回 `refresh=True` 会让前端重新拉取 state．长任务需在后台执行，action 立即返回．
+
+`agent_activity` 使用精确 SDK 会话 ID 发送消息：
+
+```python
+{"type": "agent_activity", "id": "my-log",
+ "send_action": "agent.message", "send_values": {},
+ "agents": [{"id": session.id, "session_id": session.id, "role": "main",
+             "label": "Agent", "status": "running", "blocks": []}]}
+```
+
+发送 action 收到 `{agent_session_id, message, **send_values}`．笔记使用 `notes-pipeline.message`，`send_values` 包含课堂 `session_id`，由流水线判断是否恢复主写作．控件 ID、角色和 SDK 会话 ID 不得混用．
 
 ### 6.1 reader：选中菜单与内联问答
 
@@ -333,7 +344,9 @@ agent.close(writer.id)
 
 `on_event` 接收 `AgentEvent`，事件名见第 3 节．文稿变化触发 `agent.file`，应用在 publication lock 内写回授权文件并刷新预览．
 
-`cancel` 取消模型与工具执行．`reset` 取消执行并清除模型历史和显示记录，保留会话．`close` 取消执行并释放会话．SDK 保存模型历史，Python 的显示记录用于界面展示．
+`message(session_id, message)` 返回 `{accepted, reason?}`．消息只进入活动 run，立即中断目标回合并在同一任务中继续；`agent.run.ready` 表示开始接纳．关闭目标拒绝消息，不创建空会话．`cancel` 终止整个任务；`close` 取消执行并释放会话．SDK 保存模型历史，Python 的显示记录用于界面展示．
+
+`reopen(session_id, *, name, workspace, system_prompt, role, tools, meta)` 恢复已关闭的会话．指针或 transcript 缺失时失败，不回退到创建．业务所有者负责重新进入原任务流程；笔记流水线只恢复已发布主写作，完成分段、审阅和问答不恢复．
 
 ## 9. 文件与数据目录
 

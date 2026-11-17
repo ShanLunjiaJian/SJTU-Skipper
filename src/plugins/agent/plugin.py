@@ -1,5 +1,3 @@
-"""Manage application sessions and forward SDK events to the UI."""
-
 from __future__ import annotations
 
 import threading
@@ -8,15 +6,31 @@ from typing import Any, Callable, Mapping
 from contextlib import AbstractContextManager
 
 from core.file_access import publication_lock
-from core.agent_types import AgentEvent, AgentProfile, AgentRunResult, AgentTool
+from core.agent_types import (
+    IpcMethod,
+    AgentEvent,
+    AgentEventType,
+    ExecutionBlockKind,
+    ExecutionBlockStatus,
+    ExecutionStatus,
+    FinishReason,
+    ReviewerEventType,
+    RuntimeFrameType,
+    AgentProfile,
+    AgentRunResult,
+    AgentRole,
+    AgentTool,
+    AgentToolName,
+    ReviewStatus,
+)
 from core.plugin import Plugin, PluginContext
-from core.settings_spec import SettingsSpec
+from core.settings_spec import SettingsSpec, SettingType
 
 from .prompts import DEFAULT_SYSTEM_PROMPT
 from .session import AgentSession
 from core.workspace import FileWorkspace
 
-_FILE_TOOLS = ("read", "grep", "glob", "edit", "write")
+_FILE_TOOLS = tuple(AgentToolName)
 
 
 class AgentService:
@@ -52,11 +66,11 @@ class AgentService:
         name: str,
         *,
         agent: str | AgentProfile | None = None,
-        role: str | None = None,
+        role: AgentRole | None = None,
         system_prompt: str | None = None,
         files: Mapping[str, str | Path] | FileWorkspace | None = None,
         workspace: FileWorkspace | None = None,
-        tools: list[str | AgentTool] | None = None,
+        tools: list[AgentToolName | AgentTool] | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> AgentSession:
         if isinstance(agent, str):
@@ -77,7 +91,8 @@ class AgentService:
             else (profile.tools if profile else list(_FILE_TOOLS))
         )
         names = tuple(
-            item.name if isinstance(item, AgentTool) else item for item in declarations
+            item.name if isinstance(item, AgentTool) else AgentToolName(item)
+            for item in declarations
         )
         unknown = set(names) - set(_FILE_TOOLS)
         if unknown:
@@ -94,7 +109,7 @@ class AgentService:
         session = AgentSession(
             name=name,
             agent=profile.name if profile else "",
-            role=role or (profile.role if profile else "default"),
+            role=AgentRole(role or (profile.role if profile else AgentRole.DEFAULT)),
             system_prompt=prompt,
             workspace=ws,
             tools=names,
@@ -105,9 +120,68 @@ class AgentService:
             self._sessions[session.id] = session
         return session
 
-    def _create_runtime_session(self, session: AgentSession) -> None:
+    def reopen(
+        self,
+        session_id: str,
+        *,
+        name: str,
+        workspace: FileWorkspace,
+        system_prompt: str,
+        role: AgentRole,
+        tools: list[AgentToolName],
+        meta: Mapping[str, Any],
+    ) -> AgentSession:
+        unknown = set(tools) - set(_FILE_TOOLS)
+        if unknown:
+            raise ValueError(f"Unsupported tools: {', '.join(sorted(unknown))}")
+        session = AgentSession(
+            id=session_id,
+            name=name,
+            workspace=workspace,
+            system_prompt=system_prompt,
+            role=AgentRole(role),
+            tools=tuple(AgentToolName(tool) for tool in tools),
+            meta=dict(meta),
+        )
+        with self._lock:
+            if session_id in self._sessions:
+                raise RuntimeError("Agent session is still live")
+            self._sessions[session_id] = session
+        try:
+            self._create_runtime_session(session, method=IpcMethod.REOPEN_SESSION)
+        except BaseException:
+            with self._lock:
+                self._sessions.pop(session_id, None)
+            raise
+        return session
+
+    def message(self, session_id: str, message: str) -> dict[str, Any]:
+        if not session_id or not message.strip():
+            return {
+                "accepted": False,
+                "reason": "A session and a non-empty message are required",
+            }
+        session = self.get_session(session_id)
+        if session is not None and session.cancelled.is_set():
+            return {"accepted": False, "reason": "Agent session is closing"}
+        # Bun owns reviewer sessions and checks admission for every exact ID.
+        try:
+            result = self._runtime.call(
+                IpcMethod.MESSAGE, session_id=session_id, message=message
+            )
+            if not isinstance(result, dict) or not isinstance(
+                result.get("accepted"), bool
+            ):
+                raise RuntimeError("Agent runtime returned no message admission result")
+            return result
+        except Exception as exc:
+            return {"accepted": False, "reason": str(exc)}
+
+    def _create_runtime_session(
+        self, session: AgentSession, *, method: IpcMethod = IpcMethod.CREATE_SESSION
+    ) -> None:
         result = self._runtime.call(
-            "create_session",
+            method,
             id=session.id,
             role=session.role,
             prompt=session.system_prompt,
@@ -149,7 +223,7 @@ class AgentService:
         finally:
             try:
                 with session.lock:
-                    self._runtime.call("close_session", session_id=session_id)
+                    self._runtime.call(IpcMethod.CLOSE_SESSION, session_id=session_id)
             finally:
                 with self._lock:
                     self._sessions.pop(session_id, None)
@@ -161,6 +235,7 @@ class AgentService:
         *,
         on_event: Callable[[AgentEvent], None] | None = None,
         write_guard: Callable[[Path], AbstractContextManager] | None = None,
+        follow_ups: tuple[str, ...] | list[str] = (),
     ) -> AgentRunResult:
         session = self._require_session(session_id)
         if not session.lock.acquire(blocking=False):
@@ -174,12 +249,15 @@ class AgentService:
                 raise RuntimeError("Agent run cancelled")
             if not session.runtime_ready:
                 self._create_runtime_session(session)
-            self._emit("agent.run.started", session, 0, on_event)
+            self._emit(AgentEventType.RUN_STARTED, session, 0, on_event)
             completed = False
             for frame in self._runtime.stream(
-                "run", session_id=session_id, instruction=user_input
+                IpcMethod.RUN,
+                session_id=session_id,
+                instruction=user_input,
+                **({"follow_ups": list(follow_ups)} if follow_ups else {}),
             ):
-                if frame.get("type") == "result":
+                if frame.get("type") == RuntimeFrameType.RESULT:
                     values = frame.get("result") or {}
                     result = AgentRunResult(
                         session_id=session_id,
@@ -188,26 +266,42 @@ class AgentService:
                         error=values.get("error"),
                         total_tokens=int(values.get("total_tokens") or 0),
                         tool_calls_made=calls,
-                        finish_reason=str(values.get("finish_reason") or "stop"),
+                        finish_reason=FinishReason(
+                            values.get("finish_reason") or FinishReason.STOP
+                        ),
+                        review_status=ReviewStatus(
+                            values.get("review_status", ReviewStatus.NOT_REVIEWED)
+                        ),
                     )
                     completed = True
                     continue
                 if session.cancelled.is_set():
                     continue
-                if frame.get("type") != "event":
+                if frame.get("type") != RuntimeFrameType.EVENT:
                     continue
-                name = str(frame.get("name") or "")
+                name = AgentEventType(frame["name"])
                 data = dict(frame.get("data") or {})
+                if name == AgentEventType.EXECUTION:
+                    self._decode_execution(data)
+                elif name == AgentEventType.REVIEWER:
+                    data["role"] = AgentRole(data["role"])
+                    event = data["event"]
+                    if event in ReviewerEventType:
+                        data["event"] = ReviewerEventType(event)
+                    else:
+                        data["event"] = AgentEventType(event)
+                        if data["event"] == AgentEventType.EXECUTION:
+                            self._decode_execution(data)
                 step = int(data.pop("step", 0))
                 data.pop("session_id", None)
                 session.meta["step"] = step
-                if name == "agent.execution":
+                if name == AgentEventType.EXECUTION:
                     model = (data.get("metrics") or {}).get("model")
                     if model is not None:
                         session.model = str(model)
-                elif name == "agent.tool_call":
+                elif name == AgentEventType.TOOL_CALL:
                     calls += 1
-                elif name == "agent.file":
+                elif name == AgentEventType.FILE:
                     logical = str(data.get("file") or "")
                     if logical not in session.workspace:
                         raise PermissionError(
@@ -229,7 +323,7 @@ class AgentService:
                             )
                         session.workspace.write(logical, str(data["content"]))
                 self._emit(name, session, step, on_event, **data)
-                if name == "agent.file":
+                if name == AgentEventType.FILE:
                     self._ctx.ui.refresh(f"agent.file:{data.get('path', '')}")
             if not completed:
                 raise RuntimeError("Agent runtime ended without a result")
@@ -246,14 +340,14 @@ class AgentService:
             try:
                 if result.error:
                     self._emit(
-                        "agent.error",
+                        AgentEventType.ERROR,
                         session,
                         result.steps,
                         on_event,
                         error=result.error,
                     )
                 self._emit(
-                    "agent.run.finished",
+                    AgentEventType.RUN_FINISHED,
                     session,
                     result.steps,
                     on_event,
@@ -264,6 +358,15 @@ class AgentService:
                 session.lock.release()
         return result
 
+    @staticmethod
+    def _decode_execution(data):
+        metrics = data.get("metrics") or {}
+        if "status" in metrics:
+            metrics["status"] = ExecutionStatus(metrics["status"])
+        if block := data.get("block"):
+            block["kind"] = ExecutionBlockKind(block["kind"])
+            block["status"] = ExecutionBlockStatus(block["status"])
+
     def _emit(self, event_type, session, step, on_event, **data):
         self._ctx.events.emit(event_type, session_id=session.id, step=step, **data)
         if on_event is not None:
@@ -272,16 +375,10 @@ class AgentService:
             )
 
 
-# ---------------------------------------------------------------------------
-# Plugin
-# ---------------------------------------------------------------------------
-
 _AGENT_SETTINGS_GROUP = "Agent"
 
 
 class AgentPlugin(Plugin):
-    """Register the agent task service and its settings."""
-
     id = "llm-agent"
     requires = ("settings", "llm")
     provides = ("agent",)
@@ -290,19 +387,15 @@ class AgentPlugin(Plugin):
         self.ctx: PluginContext | None = None
         self.service: AgentService | None = None
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
         settings = ctx.require("settings")
 
-        # --- register settings ---
         agent_specs = [
             SettingsSpec(
                 key="agent.system_prompt",
                 label="系统提示词",
-                type="text",
+                type=SettingType.TEXT,
                 default=DEFAULT_SYSTEM_PROMPT,
                 group=_AGENT_SETTINGS_GROUP,
                 description="新建 Agent 会话的默认系统提示词．",
@@ -314,7 +407,6 @@ class AgentPlugin(Plugin):
             except Exception:
                 ctx.logger.warning("settings register failed for %s", spec.key)
 
-        # --- build service ---
         default_system_prompt = str(
             settings.get("agent.system_prompt", DEFAULT_SYSTEM_PROMPT)
         )
@@ -325,8 +417,8 @@ class AgentPlugin(Plugin):
             settings_getter=settings.get,
         )
         ctx.register_service("agent", self.service)
+        ctx.ui.register_action("agent.message", self._message, plugin_id=self.id)
 
-        # --- meta ---
         ctx.meta.register(
             "agent",
             lambda: {
@@ -335,24 +427,37 @@ class AgentPlugin(Plugin):
             plugin_id=self.id,
         )
 
-        # --- event definitions ---
         for evt_name, evt_desc in [
-            ("agent.run.started", "Agent run started"),
-            ("agent.delta", "Streaming text delta"),
-            ("agent.reasoning", "Streaming reasoning delta"),
-            ("agent.message", "Assistant message received"),
-            ("agent.tool_call", "Tool call issued"),
-            ("agent.tool_result", "Tool result received"),
-            ("agent.file", "Authorized file changed"),
-            ("agent.run.finished", "Agent run finished"),
-            ("agent.error", "Agent error"),
+            (AgentEventType.RUN_STARTED, "Agent run started"),
+            (AgentEventType.RUN_READY, "Agent run accepts messages"),
+            (AgentEventType.DELTA, "Streaming text delta"),
+            (AgentEventType.REASONING, "Streaming reasoning delta"),
+            (AgentEventType.MESSAGE, "Assistant message received"),
+            (AgentEventType.TOOL_CALL, "Tool call issued"),
+            (AgentEventType.TOOL_RESULT, "Tool result received"),
+            (AgentEventType.FILE, "Authorized file changed"),
+            (AgentEventType.RUN_FINISHED, "Agent run finished"),
+            (AgentEventType.ERROR, "Agent error"),
         ]:
             ctx.events.define(evt_name, evt_desc)
 
         ctx.logger.info("agent plugin ready; %s sessions", 0)
 
+    def _message(self, payload):
+        result = self.service.message(
+            str(payload.get("agent_session_id") or ""),
+            str(payload.get("message") or ""),
+        )
+        return {
+            "ok": result["accepted"],
+            "message": result.get("reason", ""),
+            "refresh": False,
+        }
+
     def teardown(self) -> None:
         ctx = self.ctx
+        if ctx is not None:
+            ctx.ui.unregister_action("agent.message")
         if self.service is not None:
             for item in self.service.list_sessions():
                 try:

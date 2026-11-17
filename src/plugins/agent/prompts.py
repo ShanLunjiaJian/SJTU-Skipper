@@ -1,5 +1,3 @@
-"""Default system prompt for the LLM agent plugin."""
-
 from __future__ import annotations
 
 DEFAULT_SYSTEM_PROMPT = """你是课堂助手，负责处理和整理课堂内容．

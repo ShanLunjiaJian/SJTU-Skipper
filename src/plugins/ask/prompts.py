@@ -1,5 +1,3 @@
-"""Prompts for the ask plugin (in-note question answering)."""
-
 from __future__ import annotations
 
 INSTANT_SYSTEM_PROMPT = r"""你是课程笔记的答疑助手．

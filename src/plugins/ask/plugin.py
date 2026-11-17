@@ -14,25 +14,33 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
-from core.agent_types import AgentProfile, AgentTool
+from core.agent_types import (
+    AgentEventType,
+    AgentProfile,
+    AgentRole,
+    AgentTool,
+    AgentToolName,
+    ExecutionRole,
+    ExecutionBlockKind,
+    ExecutionBlockStatus,
+    ExecutionStatus,
+)
+from core.note_document import AskIntensity, QaStatus
 from core.plugin import Plugin, PluginContext
-from core.settings_spec import SettingsSpec
+from core.settings_spec import SettingsSpec, SettingType
 from core.ui import render_markdown
 from core.file_access import publication_lock
 from core.workspace import FileWorkspace
+from plugins.notes_pipeline.types import NotePublication
+from plugins.reader.plugin import SelectionKind
 
 from .prompts import ASK_PROMPT_TEMPLATE, INSTANT_SYSTEM_PROMPT, RESEARCH_SYSTEM_PROMPT
 
 ACTION = "ask.ask"
 SELECTION_ID = "ask.ask"
 
-INSTANT = "instant"
-RESEARCH = "research"
-
 
 class AskService:
-    """Submit questions and read active execution snapshots."""
-
     __slots__ = ("_plugin",)
 
     def __init__(self, plugin: "AskPlugin") -> None:
@@ -48,8 +56,6 @@ class AskService:
 
 
 class AskPlugin(Plugin):
-    """Reader selection menu → in-note Q&A with a live, collapsible answer."""
-
     id = "ask"
     requires = ("settings", "llm-agent", "reader")
     optional_requires = ("notes-pipeline",)
@@ -78,12 +84,12 @@ class AskPlugin(Plugin):
                 "id": SELECTION_ID,
                 "label": "提问",
                 "icon": "💬",
-                "kind": "prompt",
+                "kind": SelectionKind.PROMPT,
                 "action": ACTION,
                 "placeholder": "针对选中的内容提问，Enter 发送",
                 "intensities": [
-                    {"value": INSTANT, "label": "快速"},
-                    {"value": RESEARCH, "label": "研究"},
+                    {"value": AskIntensity.INSTANT, "label": "快速"},
+                    {"value": AskIntensity.RESEARCH, "label": "研究"},
                 ],
                 "order": 10,
             },
@@ -91,7 +97,6 @@ class AskPlugin(Plugin):
         )
 
     def teardown(self) -> None:
-        """Drop the UI action and the selection-menu item this plugin added."""
 
         with self._active_lock:
             self._closed = True
@@ -111,9 +116,6 @@ class AskPlugin(Plugin):
             except Exception:  # noqa: BLE001 - shutdown is best effort
                 pass
 
-    # ------------------------------------------------------------------
-    # Settings
-    # ------------------------------------------------------------------
     def _activity(self, path, qa_id):
         with self._active_lock:
             live = self._live.get((str(Path(path).resolve()), qa_id))
@@ -152,15 +154,13 @@ class AskPlugin(Plugin):
             or RESEARCH_SYSTEM_PROMPT
         )
 
-    # ------------------------------------------------------------------
-    # Action
-    # ------------------------------------------------------------------
     def _on_ask(self, payload: dict[str, Any]) -> dict[str, Any]:
         question = str(payload.get("question", "") or "").strip()
         selection = str(payload.get("selection", "") or "").strip()
-        intensity = str(payload.get("intensity", "") or INSTANT)
-        if intensity not in (INSTANT, RESEARCH):
-            intensity = INSTANT
+        try:
+            intensity = AskIntensity(payload.get("intensity") or AskIntensity.INSTANT)
+        except ValueError:
+            intensity = AskIntensity.INSTANT
         path = str(payload.get("path", "") or "")
         if not question:
             return {"ok": False, "message": "问题不能为空"}
@@ -184,19 +184,21 @@ class AskPlugin(Plugin):
             message += "（未能定位选中片段，已附在笔记末尾）"
         return {"ok": True, "message": message, "refresh": True}
 
-    def _run(self, path: str, qa_id: str, selection: str, intensity: str) -> None:
+    def _run(
+        self, path: str, qa_id: str, selection: str, intensity: AskIntensity
+    ) -> None:
         live = _Live(self, path, qa_id)
         key = (str(Path(path).resolve()), qa_id)
         with self._active_lock:
             self._live[key] = live
-        status = "done"
+        status = QaStatus.DONE
         answer = ""
         started = time.time()
         try:
             answer = self._answer(path, qa_id, selection, intensity, live)
         except Exception as exc:  # noqa: BLE001 - the failure belongs in the note
             self.ctx.logger.exception("ask %s failed", qa_id)
-            status = "error"
+            status = QaStatus.ERROR
             answer = f"（回答失败：{exc}）"
 
         try:
@@ -205,7 +207,7 @@ class AskPlugin(Plugin):
                 qa_id,
                 answer=answer,
                 status=status,
-                collapsed=(status == "done"),
+                collapsed=(status == QaStatus.DONE),
             )
             live.finish(status=status, answer=answer, elapsed=time.time() - started)
         finally:
@@ -217,7 +219,7 @@ class AskPlugin(Plugin):
         path: str,
         qa_id: str,
         selection: str,
-        intensity: str,
+        intensity: AskIntensity,
         live: "_Live",
     ) -> str:
         context = self._reader.qa_context(
@@ -228,7 +230,9 @@ class AskPlugin(Plugin):
             history_words=self._history_words,
         )
         prompt = self._build_prompt(path, context, selection, intensity)
-        files = self._workspace_files(path) if intensity == RESEARCH else {}
+        files = (
+            self._workspace_files(path) if intensity == AskIntensity.RESEARCH else {}
+        )
         started = time.time()
         with tempfile.TemporaryDirectory(prefix="notes-ask-") as snapshot:
             frozen = {}
@@ -247,13 +251,14 @@ class AskPlugin(Plugin):
                     agent=profile,
                     workspace=FileWorkspace(frozen, readonly=frozen),
                     meta={
-                        "role": "ask",
+                        "role": ExecutionRole.QUESTION_ANSWER,
                         "qa_id": qa_id,
                         "intensity": intensity,
                     },
                 )
                 self._active.add(session.id)
             try:
+                live.bind_session(session.id)
                 result = self._agent.run(session.id, prompt, on_event=live.on_event)
             finally:
                 try:
@@ -275,16 +280,21 @@ class AskPlugin(Plugin):
             raise RuntimeError(result.error)
         return result.final_message.strip() or "（模型没有返回内容）"
 
-    def _profile(self, intensity: str) -> AgentProfile:
+    def _profile(self, intensity: AskIntensity) -> AgentProfile:
         return AgentProfile(
             name=f"ask.{intensity}",
-            role="ask_instant" if intensity == INSTANT else "ask_research",
+            role=AgentRole.ASK_INSTANT
+            if intensity == AskIntensity.INSTANT
+            else AgentRole.ASK_RESEARCH,
             system_prompt=self._instant_prompt
-            if intensity == INSTANT
+            if intensity == AskIntensity.INSTANT
             else self._research_prompt,
             tools=[]
-            if intensity == INSTANT
-            else [AgentTool(name) for name in ("read", "grep", "glob")],
+            if intensity == AskIntensity.INSTANT
+            else [
+                AgentTool(name)
+                for name in (AgentToolName.READ, AgentToolName.GREP, AgentToolName.GLOB)
+            ],
         )
 
     def _build_prompt(
@@ -292,10 +302,10 @@ class AskPlugin(Plugin):
         path: str,
         context: Mapping[str, Any],
         selection: str,
-        intensity: str,
+        intensity: AskIntensity,
     ) -> str:
         name = Path(path).name
-        if intensity == RESEARCH:
+        if intensity == AskIntensity.RESEARCH:
             readable = "、".join(f"`{item}`" for item in self._workspace_files(path))
             instructions = (
                 f"可用 read、grep、glob 核对完整授权材料．可读文件：{readable}．"
@@ -324,7 +334,7 @@ class AskPlugin(Plugin):
         names.add(note.name)
         pipeline = self.ctx.service("notes-pipeline")
         if pipeline is not None:
-            for kind in ("final", "instant"):
+            for kind in NotePublication:
                 names.update(name for name, _ in pipeline.note_files(kind).values())
         files = {
             name: str(note.parent / name)
@@ -352,7 +362,7 @@ class AskPlugin(Plugin):
 
         pipeline = self.ctx.service("notes-pipeline")
         if pipeline is not None:
-            for kind in ("final", "instant"):
+            for kind in NotePublication:
                 for filename, title in pipeline.note_files(kind).values():
                     if filename == name:
                         return title
@@ -366,9 +376,6 @@ class AskPlugin(Plugin):
         return str(name or "").strip() or "未知课程"
 
 
-# ---------------------------------------------------------------------------
-# Live streaming helper
-# ---------------------------------------------------------------------------
 class _Live:
     """Accumulate native execution events and throttle full UI snapshots."""
 
@@ -380,9 +387,10 @@ class _Live:
         self._qa_id = qa_id
         self._agent: dict[str, Any] = {
             "id": "main",
-            "role": "qa",
+            "session_id": "",
+            "role": ExecutionRole.QUESTION_ANSWER,
             "label": "Agent 回答",
-            "status": "running",
+            "status": ExecutionStatus.RUNNING,
             "model": "",
             "thinking": "",
             "context_tokens": 0,
@@ -398,8 +406,13 @@ class _Live:
         self._lock = threading.Lock()
         self.publish(force=True)
 
+    def bind_session(self, session_id: str) -> None:
+        with self._lock:
+            self._agent["session_id"] = session_id
+        self.publish(force=True)
+
     def on_event(self, event: Any) -> None:
-        if event.type != "agent.execution":
+        if event.type != AgentEventType.EXECUTION:
             return
         data = event.data or {}
         with self._lock:
@@ -409,11 +422,19 @@ class _Live:
                 blocks = self._agent["blocks"]
                 for index, existing in enumerate(blocks):
                     if existing["id"] == block["id"]:
-                        blocks[index] = dict(block)
+                        blocks[index] = self._execution_block(block)
                         break
                 else:
-                    blocks.append(dict(block))
+                    blocks.append(self._execution_block(block))
         self.publish()
+
+    @staticmethod
+    def _execution_block(block: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            **block,
+            "kind": ExecutionBlockKind(block["kind"]),
+            "status": ExecutionBlockStatus(block["status"]),
+        }
 
     def activity(self) -> dict[str, Any]:
         with self._lock:
@@ -422,6 +443,8 @@ class _Live:
     def _activity(self) -> dict[str, Any]:
         return {
             "id": f"qa-{self._qa_id}",
+            "send_action": "agent.message",
+            "send_values": {},
             "agents": [
                 {
                     **self._agent,
@@ -439,19 +462,26 @@ class _Live:
             payload = {
                 "path": self._path,
                 "id": self._qa_id,
-                "status": "pending",
+                "status": QaStatus.PENDING,
                 "activity": self._activity(),
                 "elapsed": round(now - self._started, 1),
             }
         self._plugin.ctx.ui.notify("qa.live", payload)
 
-    def finish(self, *, status: str, answer: str, elapsed: float) -> None:
+    def finish(self, *, status: QaStatus, answer: str, elapsed: float) -> None:
         with self._lock:
-            execution_status = "completed" if status == "done" else "failed"
+            execution_status = (
+                ExecutionStatus.COMPLETED
+                if status == QaStatus.DONE
+                else ExecutionStatus.FAILED
+            )
             self._agent["status"] = execution_status
             for block in self._agent["blocks"]:
-                if block["status"] in ("streaming", "running"):
-                    block["status"] = execution_status
+                if block["status"] in (
+                    ExecutionBlockStatus.STREAMING,
+                    ExecutionBlockStatus.RUNNING,
+                ):
+                    block["status"] = ExecutionBlockStatus(execution_status)
             payload = {
                 "path": self._path,
                 "id": self._qa_id,
@@ -459,7 +489,7 @@ class _Live:
                 "activity": self._activity(),
                 "answer": answer,
                 "answer_html": render_markdown(answer),
-                "collapsed": status == "done",
+                "collapsed": status == QaStatus.DONE,
                 "elapsed": round(elapsed, 1),
             }
         self._plugin.ctx.logger.info(
@@ -508,14 +538,11 @@ def _format_history(entries: list[dict[str, str]]) -> str:
     return "\n\n".join(parts)
 
 
-# ---------------------------------------------------------------------------
-# Settings
-# ---------------------------------------------------------------------------
 _SETTING_SPECS: list[SettingsSpec] = [
     SettingsSpec(
         key="ask.before_words",
         label="选中前文词数",
-        type="int",
+        type=SettingType.INT,
         default=2000,
         group="提问",
         description="上下文里选中段落之前的笔记内容（按词计，中文按字计）",
@@ -523,7 +550,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
     SettingsSpec(
         key="ask.after_words",
         label="选中后文词数",
-        type="int",
+        type=SettingType.INT,
         default=2000,
         group="提问",
         description="上下文里选中段落之后的笔记内容",
@@ -531,7 +558,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
     SettingsSpec(
         key="ask.history_words",
         label="历史问答词数",
-        type="int",
+        type=SettingType.INT,
         default=1000,
         group="提问",
         description="同一条笔记中此前问答记录的独立限额",
@@ -539,7 +566,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
     SettingsSpec(
         key="ask.selection_words",
         label="选中内容词数",
-        type="int",
+        type=SettingType.INT,
         default=800,
         group="提问",
         description="选中片段送入模型的上限，超出部分截断",
@@ -547,7 +574,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
     SettingsSpec(
         key="ask.instant_prompt",
         label="快速模式提示词",
-        type="text",
+        type=SettingType.TEXT,
         default=INSTANT_SYSTEM_PROMPT,
         group="提问",
         description="快速模式（无工具、一步回答）的系统提示词",
@@ -555,7 +582,7 @@ _SETTING_SPECS: list[SettingsSpec] = [
     SettingsSpec(
         key="ask.research_prompt",
         label="研究模式提示词",
-        type="text",
+        type=SettingType.TEXT,
         default=RESEARCH_SYSTEM_PROMPT,
         group="提问",
         description="研究模式只读答疑的系统提示词",

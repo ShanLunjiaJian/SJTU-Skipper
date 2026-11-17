@@ -12,10 +12,8 @@ for (const key of Object.keys(process.env)) {
 }
 process.env.PI_CODING_AGENT_DIR = root;
 // SDK imports read environment settings. Load them only after environment isolation.
-const [{ Runtime }, { ipcRequestHeaderSchema, ipcRequestSchema }] = await Promise.all([
-  import("./runtime"),
-  import("./schemas"),
-]);
+const [{ Runtime }, { IpcResponseType, ipcRequestHeaderSchema, ipcRequestSchema }] =
+  await Promise.all([import("./runtime"), import("./schemas")]);
 const runtime = new Runtime(root);
 const send = (message: unknown) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const input = createInterface({ input: process.stdin });
@@ -30,19 +28,19 @@ for await (const line of input) {
     if ("summary" in parsed) throw new Error("Invalid IPC request");
     request = parsed;
   } catch {
-    send({ id: requestId, type: "error", error: "Invalid IPC request" });
+    send({ id: requestId, type: IpcResponseType.ERROR, error: "Invalid IPC request" });
     continue;
   }
   const operation = (async () => {
     try {
       const result = await runtime.dispatch(request.method, request.params, (name, data) =>
-        send({ id: request.id, type: "event", name, data }),
+        send({ id: request.id, type: IpcResponseType.EVENT, name, data }),
       );
-      send({ id: request.id, type: "result", result });
+      send({ id: request.id, type: IpcResponseType.RESULT, result });
     } catch (error) {
       send({
         id: request.id,
-        type: "error",
+        type: IpcResponseType.ERROR,
         error: error instanceof Error ? error.message : String(error),
       });
     }

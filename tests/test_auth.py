@@ -1,5 +1,3 @@
-"""Tests for the single-file web login."""
-
 from __future__ import annotations
 
 import html

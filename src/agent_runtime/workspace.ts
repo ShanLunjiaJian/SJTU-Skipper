@@ -5,6 +5,7 @@ import {
   splitPathAndSelPreferringLiteralSync,
   splitDelimitedPathEntry,
 } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
+import { WorkspaceTool } from "./schemas";
 type EditMode = Parameters<typeof editInspect>[0];
 
 export class Workspace {
@@ -27,10 +28,10 @@ export class Workspace {
     }
   }
 
-  async check(name: string, args: Record<string, unknown>, mode: EditMode) {
+  async check(name: WorkspaceTool, args: Record<string, unknown>, mode: EditMode) {
     const paths: string[] = [];
-    const writing = name === "edit" || name === "write";
-    if (name === "edit") {
+    const writing = name === WorkspaceTool.EDIT || name === WorkspaceTool.WRITE;
+    if (name === WorkspaceTool.EDIT) {
       const inspection = editInspect(mode, JSON.stringify(args));
       paths.push(...inspection.paths);
       for (const operation of inspection.fileOps)
@@ -49,7 +50,7 @@ export class Workspace {
           throw new Error(`Path leaves workspace: ${raw}`);
         if (writing && !this.writable.has(absolute))
           throw new Error(`Read-only or unknown target: ${raw}`);
-        if (name === "read" && !this.files.has(absolute) && absolute !== this.cwd)
+        if (name === WorkspaceTool.READ && !this.files.has(absolute) && absolute !== this.cwd)
           throw new Error(`Unknown file: ${raw}`);
       }
     }

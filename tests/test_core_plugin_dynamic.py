@@ -1,5 +1,3 @@
-"""Framework-level tests: scoped contexts, teardown cleanup and hot plugging."""
-
 from __future__ import annotations
 
 import textwrap
@@ -9,16 +7,12 @@ import pytest
 
 from config import load_config
 from core.events import EventBus
+from core.media import MediaKind
 from core.plugin import Plugin, PluginContext, PluginError
 from core.runtime import build_runtime
 from core.services import ServiceError, ServiceRegistry
 from core.streams import StreamHub
-from core.ui import UIManager
-
-
-# ---------------------------------------------------------------------------
-# Scoped context: plugin_id is injected, contributions are removable
-# ---------------------------------------------------------------------------
+from core.ui import Side, UIManager
 
 
 class ScopedPlugin(Plugin):
@@ -28,7 +22,7 @@ class ScopedPlugin(Plugin):
     def setup(self, ctx: PluginContext) -> None:
         # Every call below omits plugin_id on purpose.
         ctx.register_service("scoped", object())
-        ctx.ui.add_tab("left", "scoped.tab", "范围")
+        ctx.ui.add_tab(Side.LEFT, "scoped.tab", "范围")
         ctx.ui.add_page("scoped.page", "范围页", render=lambda: "hi")
         ctx.ui.register_action("scoped.ping", lambda payload: {"ok": True})
         ctx.ui.register_command("scoped.cmd", "命令", page_id="scoped.page")
@@ -126,16 +120,11 @@ def test_register_service_must_match_declared_provides() -> None:
         ctx.register_service("wrong", WrongName())
 
 
-# ---------------------------------------------------------------------------
-# Shared tabs
-# ---------------------------------------------------------------------------
-
-
 def test_shared_tab_keeps_other_owner_and_drops_when_last_leaves() -> None:
     ui = UIManager()
-    ui.add_tab("right", "note", "笔记", plugin_id="summarize")
+    ui.add_tab(Side.RIGHT, "note", "笔记", plugin_id="summarize")
     ui.add_toolbox_item("note", "note.a", "A", plugin_id="summarize")
-    ui.add_tab("right", "note", "笔记", plugin_id="instant-summarize")
+    ui.add_tab(Side.RIGHT, "note", "笔记", plugin_id="instant-summarize")
     ui.add_toolbox_item("note", "note.b", "B", plugin_id="instant-summarize")
     assert len(ui.state()["right_tabs"][0]["toolbox"]) == 2
 
@@ -145,11 +134,6 @@ def test_shared_tab_keeps_other_owner_and_drops_when_last_leaves() -> None:
 
     ui.remove_plugin("instant-summarize")
     assert not ui.has_tab("note")
-
-
-# ---------------------------------------------------------------------------
-# Services and events
-# ---------------------------------------------------------------------------
 
 
 def test_service_registry_replace_injected_and_refuse_private_calls() -> None:
@@ -197,37 +181,34 @@ def test_stream_hub_media_consumers() -> None:
     hub = StreamHub()
     hub.register_consumer(
         "stt",
-        "audio",
+        MediaKind.AUDIO,
         cursor_fn=lambda: 4.0,
         busy_fn=lambda: True,
         gate_limit_fn=lambda: 30.0,
     )
     hub.register_consumer(
         "vlm",
-        "audio",
+        MediaKind.AUDIO,
         cursor_fn=lambda: 2.0,
         busy_fn=lambda: False,
         gate_limit_fn=lambda: 60.0,
     )
-    assert hub.consumer_cursor("audio") == 2.0
-    assert hub.consumer_gate_limit("audio") == 30.0
+    assert hub.consumer_cursor(MediaKind.AUDIO) == 2.0
+    assert hub.consumer_gate_limit(MediaKind.AUDIO) == 30.0
     assert hub.consumers_busy() == ["stt"]
-    assert hub.consumer_cursor("video") == 0.0
-    hub.register_consumer("waiting", "audio", cursor_fn=lambda: 0.0)
-    assert hub.consumer_cursor("audio") == 0.0
+    assert hub.consumer_cursor(MediaKind.VIDEO) == 0.0
+    hub.register_consumer("waiting", MediaKind.AUDIO, cursor_fn=lambda: 0.0)
+    assert hub.consumer_cursor(MediaKind.AUDIO) == 0.0
     hub.remove_plugin("waiting")
 
     hub.remove_plugin("stt")
     assert hub.consumers_busy() == []
-    assert hub.consumer_cursor("audio") == 2.0
+    assert hub.consumer_cursor(MediaKind.AUDIO) == 2.0
 
-
-# ---------------------------------------------------------------------------
-# Dynamic load / unload / reload
-# ---------------------------------------------------------------------------
 
 _EXTERNAL = """
 from core.plugin import Plugin, PluginContext
+from core.ui import Side
 
 
 class External(Plugin):
@@ -236,7 +217,7 @@ class External(Plugin):
 
     def setup(self, ctx: PluginContext) -> None:
         ctx.register_service("external", object())
-        ctx.ui.add_tab("right", "external", "外部")
+        ctx.ui.add_tab(Side.RIGHT, "external", "外部")
 
     def teardown(self) -> None:
         pass

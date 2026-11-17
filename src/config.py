@@ -1,5 +1,3 @@
-"""Application configuration and path resolution."""
-
 from __future__ import annotations
 
 import os
@@ -10,18 +8,16 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from applog import LogLevel
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data" / "agent"
 
-# Seconds Ctrl+C / SIGTERM may spend tearing the server down before the
-# remaining work is abandoned. Bounds both the HTTP connection drain and the
-# plugin teardown, so a wedged network call cannot make the process unkillable.
+# Shared HTTP drain and plugin teardown deadline, in seconds.
 SHUTDOWN_TIMEOUT = 5
 
 
 def _load_env() -> None:
-    """Load project and submodule .env files without overriding real env."""
-
     for candidate in (PROJECT_ROOT / ".env",):
         if candidate.exists():
             load_dotenv(candidate, override=False)
@@ -38,7 +34,7 @@ class AppConfig:
     data_dir: Path = DATA_DIR
     host: str = "127.0.0.1"
     port: int = 8765
-    log_level: str = "INFO"
+    log_level: LogLevel = LogLevel.INFO
     plugins: list[str] = field(default_factory=list)
     enable_input: bool = True
     enable_stt: bool = True
@@ -95,7 +91,7 @@ def load_config(
         cfg.data_dir = Path(section.get("data_dir", cfg.data_dir))
         cfg.host = str(section.get("host", cfg.host))
         cfg.port = int(section.get("port", cfg.port))
-        cfg.log_level = str(section.get("log_level", cfg.log_level))
+        cfg.log_level = LogLevel(section.get("log_level", cfg.log_level))
         cfg.plugins = list(section.get("plugins", cfg.plugins))
         cfg.enable_input = _coerce_bool(section.get("enable_input"), cfg.enable_input)
         cfg.enable_stt = _coerce_bool(section.get("enable_stt"), cfg.enable_stt)
@@ -117,7 +113,7 @@ def load_config(
     cfg.data_dir = Path(os.environ.get("LECTURE_AGENT_DATA_DIR", cfg.data_dir))
     cfg.host = os.environ.get("LECTURE_AGENT_HOST", cfg.host)
     cfg.port = int(os.environ.get("LECTURE_AGENT_PORT", cfg.port))
-    cfg.log_level = os.environ.get("LECTURE_AGENT_LOG_LEVEL", cfg.log_level)
+    cfg.log_level = LogLevel(os.environ.get("LECTURE_AGENT_LOG_LEVEL", cfg.log_level))
     cfg.resolve()
     cfg.ensure_dirs()
     return cfg

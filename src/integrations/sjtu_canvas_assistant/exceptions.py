@@ -1,6 +1,3 @@
-"""Application-specific exceptions with token-safe messages."""
-
-
 class AssistantError(Exception):
     """Base class for expected user-facing errors."""
 

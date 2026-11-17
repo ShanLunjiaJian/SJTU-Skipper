@@ -1,5 +1,3 @@
-"""Media sources: FFmpeg-backed audio/video ingestion with lifecycle."""
-
 from __future__ import annotations
 
 import logging
@@ -8,7 +6,10 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, Protocol
+from enum import StrEnum
+from typing import Any, Callable, Protocol
+
+from core.media import MediaKind, ProcessingMode, SourceKind
 from urllib.parse import urlsplit
 
 from .download import MediaDownloader
@@ -23,14 +24,25 @@ from .ffmpeg import (
 
 _log = logging.getLogger("lecture_agent.plugins.input.sources")
 
-Kind = Literal["live", "recording", "url", "file"]
+
+class SourceState(StrEnum):
+    IDLE = "idle"
+    PLAYING = "playing"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+
+
+class DownloadState(StrEnum):
+    STARTED = "started"
+    PROGRESS = "progress"
+    DONE = "done"
 
 
 @dataclass(slots=True)
 class SourceSpec:
     """A resolved media source ready for playback."""
 
-    kind: Kind = "url"
+    kind: SourceKind = SourceKind.URL
     url: str = ""
     title: str = ""
     course: dict[str, Any] = field(default_factory=dict)
@@ -52,11 +64,6 @@ class SourceSpec:
     # Prefetch only the next file. Consumer queues continue across part EOF.
     next_source: SourceSpec | None = None
     final_part: bool = True
-
-
-# ---------------------------------------------------------------------------
-# MediaSource protocol
-# ---------------------------------------------------------------------------
 
 
 class MediaSource(Protocol):
@@ -84,10 +91,6 @@ class MediaSource(Protocol):
     def status(self) -> dict[str, Any]: ...
 
 
-# ---------------------------------------------------------------------------
-# FFmpegSource
-# ---------------------------------------------------------------------------
-
 _DEFAULT_CHUNK = 4096
 _AUDIO_RECONNECT_DELAY = 3.0  # seconds between reconnect attempts
 
@@ -106,7 +109,7 @@ class FFmpegSource:
         self,
         spec: SourceSpec,
         *,
-        hub: Any,  # StreamHub
+        hub: Any,
         emit: Callable[..., Any],
         sample_rate: int = 16000,
         video_fps: float = 4.0,
@@ -132,7 +135,7 @@ class FFmpegSource:
         self._reconnect_base_delay = float(reconnect_base_delay)
         self._reconnect_max_delay = float(reconnect_max_delay)
         self._buffer_size = int(buffer_size)
-        self._realtime = bool(realtime) or spec.kind == "live"
+        self._realtime = bool(realtime) or spec.kind == SourceKind.LIVE
         self._downloader = downloader
         if downloader is not None and spec.headers:
             self._downloader = downloader.for_headers(spec.headers)
@@ -162,19 +165,14 @@ class FFmpegSource:
         self._audio_stop = threading.Event()
         self._video_stop = threading.Event()
         self._pause_event = threading.Event()
-        self._pause_event.set()  # not paused initially
+        self._pause_event.set()
         self._lock = threading.RLock()
         self._started_at: float = 0.0
         self._running = False
         self._paused = False
         self._ended_emitted = False
 
-        # JPEG frame buffer for incomplete tail bytes
         self._jpeg_buffer = b""
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     @property
     def running(self) -> bool:
@@ -203,7 +201,7 @@ class FFmpegSource:
         url = self.spec.url
         if (
             not self.spec.download
-            or self.spec.kind == "live"
+            or self.spec.kind == SourceKind.LIVE
             or self._downloader is None
             or self._media_dir is None
             or not url.startswith(("http://", "https://"))
@@ -217,7 +215,7 @@ class FFmpegSource:
         dest = self._media_dir / name
         self._emit(
             "input.download",
-            status="started",
+            status=DownloadState.STARTED,
             source=self.spec.title,
             session_id=self._session_id,
             video_id=video_id,
@@ -227,7 +225,7 @@ class FFmpegSource:
         def _progress(received: int, total: int) -> None:
             self._emit(
                 "input.download",
-                status="progress",
+                status=DownloadState.PROGRESS,
                 source=self.spec.title,
                 session_id=self._session_id,
                 video_id=video_id,
@@ -288,7 +286,7 @@ class FFmpegSource:
                         )
             self._emit(
                 "input.download",
-                status="done",
+                status=DownloadState.DONE,
                 session_id=self._session_id,
                 video_id=str(self.spec.course.get("video_id") or ""),
                 source=self.spec.title,
@@ -304,7 +302,9 @@ class FFmpegSource:
         self._input_url = self._prepare_input()
         try:
             self._duration = (
-                probe_duration(self._input_url) if self.spec.kind != "live" else 0.0
+                probe_duration(self._input_url)
+                if self.spec.kind != SourceKind.LIVE
+                else 0.0
             )
         except Exception:
             if self._download_handle is not None:
@@ -347,7 +347,7 @@ class FFmpegSource:
             self._video_done = False
             self._ended_emitted = False
 
-        is_live = self.spec.kind == "live"
+        is_live = self.spec.kind == SourceKind.LIVE
         with self._lock:
             self._session_id = self._hub.current.session_id
         session = self._hub.get_session(self._session_id) or self._hub.current
@@ -394,7 +394,6 @@ class FFmpegSource:
                     }
                 )
         if self._audio_stop.is_set() or not self.running:
-            # Stopped while the download was still running.
             return
         is_http = self._input_url.startswith(("http://", "https://"))
         headers = (
@@ -409,7 +408,6 @@ class FFmpegSource:
             headers=headers,
         )
         if not is_live and self._realtime:
-            # VOD in realtime mode: pace decoding to 1x.
             audio_cmd.insert(1, "-re")
         if self._reconnect and is_http:
             pos = 1
@@ -495,7 +493,7 @@ class FFmpegSource:
 
         self._emit(
             "input.status",
-            status="playing",
+            status=SourceState.PLAYING,
             source=self.spec.title,
             kind=self.spec.kind,
             meta=dict(self.spec.meta),
@@ -545,7 +543,7 @@ class FFmpegSource:
         self._video_proc = None
         self._emit(
             "input.status",
-            status="stopped",
+            status=SourceState.STOPPED,
             source=self.spec.title,
         )
 
@@ -555,7 +553,7 @@ class FFmpegSource:
                 return
             self._paused = True
             self._pause_event.clear()
-        self._emit("input.status", status="paused", source=self.spec.title)
+        self._emit("input.status", status=SourceState.PAUSED, source=self.spec.title)
 
     def resume(self) -> None:
         with self._lock:
@@ -563,7 +561,7 @@ class FFmpegSource:
                 return
             self._paused = False
             self._pause_event.set()
-        self._emit("input.status", status="playing", source=self.spec.title)
+        self._emit("input.status", status=SourceState.PLAYING, source=self.spec.title)
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -575,7 +573,7 @@ class FFmpegSource:
                 "url": self.spec.url,
             }
 
-    def _mark_reader_done(self, stream: str) -> None:
+    def _mark_reader_done(self, stream: MediaKind) -> None:
         """Called by each reader at EOF; emits ``input.ended`` once for both.
 
         A recording's audio and video are decoded by independent ffmpeg
@@ -585,13 +583,13 @@ class FFmpegSource:
         """
 
         with self._lock:
-            if stream == "audio":
+            if stream == MediaKind.AUDIO:
                 self._audio_done = True
             else:
                 self._video_done = True
             session = self._hub.get_session(self._session_id)
             if session is not None and self.spec.final_part:
-                if stream == "audio":
+                if stream == MediaKind.AUDIO:
                     session.audio_input_done = True
                 else:
                     session.video_input_done = True
@@ -629,10 +627,6 @@ class FFmpegSource:
                 or current.video.duration - self._video_offset
             ),
         )
-
-    # ------------------------------------------------------------------
-    # Reader threads
-    # ------------------------------------------------------------------
 
     def _read_audio(self) -> None:
         """Read PCM from stdout → append to audio stream.  Reconnect on EOF."""
@@ -686,12 +680,11 @@ class FFmpegSource:
                         return
                     current.audio.append(payload)
             else:
-                # EOF: process exited
                 rc = proc.poll()
                 if rc is not None:
                     _log.info("Audio ffmpeg exited with code %s", rc)
-                    if self.spec.kind in ("recording", "file"):
-                        self._mark_reader_done("audio")
+                    if self.spec.kind in (SourceKind.RECORDING, SourceKind.FILE):
+                        self._mark_reader_done(MediaKind.AUDIO)
                         break
                     if not self._reconnect or self._audio_stop.is_set():
                         break
@@ -716,19 +709,17 @@ class FFmpegSource:
                         break
                     self._restart_audio_process()
                 else:
-                    # process still alive but no data yet? small sleep
                     time.sleep(0.1)
 
         _log.info("Audio reader thread exiting")
 
     def _restart_audio_process(self) -> None:
-        """Restart the audio ffmpeg subprocess."""
         if self._audio_proc is not None:
             try:
                 self._audio_proc.terminate()
             except Exception:
                 pass
-        is_live = self.spec.kind == "live"
+        is_live = self.spec.kind == SourceKind.LIVE
         is_http = self._input_url.startswith(("http://", "https://"))
         headers = (
             dict(self.spec.headers) if is_http and self._download_handle is None else {}
@@ -774,15 +765,12 @@ class FFmpegSource:
             if chunk:
                 retries = 0
                 buffer += chunk
-                # Extract complete JPEG frames
                 frames = split_jpeg_frames(buffer)
                 if frames:
-                    # Keep any trailing data (incomplete frame)
                     last_soi = buffer.rfind(b"\xff\xd8")
                     if last_soi >= 0:
                         last_eoi = buffer.rfind(b"\xff\xd9", last_soi)
                         if last_eoi < 0:
-                            # Trailing incomplete: keep from last SOI
                             buffer = buffer[last_soi:]
                         else:
                             buffer = b""
@@ -813,8 +801,8 @@ class FFmpegSource:
                 rc = proc.poll()
                 if rc is not None:
                     _log.info("Video ffmpeg exited with code %s", rc)
-                    if self.spec.kind in ("recording", "file"):
-                        self._mark_reader_done("video")
+                    if self.spec.kind in (SourceKind.RECORDING, SourceKind.FILE):
+                        self._mark_reader_done(MediaKind.VIDEO)
                         break
                     if not self._reconnect or self._video_stop.is_set():
                         break
@@ -846,7 +834,7 @@ class FFmpegSource:
                 self._video_proc.terminate()
             except Exception:
                 pass
-        is_live = self.spec.kind == "live"
+        is_live = self.spec.kind == SourceKind.LIVE
         is_http = self._input_url.startswith(("http://", "https://"))
         headers = (
             dict(self.spec.headers) if is_http and self._download_handle is None else {}
@@ -873,11 +861,6 @@ class FFmpegSource:
         except Exception:
             _log.exception("Failed to restart video process")
             self._video_proc = None
-
-
-# ---------------------------------------------------------------------------
-# SourceManager
-# ---------------------------------------------------------------------------
 
 
 class SourceManager:
@@ -907,15 +890,11 @@ class SourceManager:
         self._audio_enabled = audio_enabled
         self._lock = threading.RLock()
         self._current: FFmpegSource | None = None
-        self._state: Literal["idle", "playing", "paused", "stopped"] = "idle"
+        self._state: SourceState = SourceState.IDLE
         self._prefetched: FFmpegSource | None = None
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     @property
-    def state(self) -> str:
+    def state(self) -> SourceState:
         with self._lock:
             return self._state
 
@@ -954,11 +933,10 @@ class SourceManager:
             meta.setdefault("title", spec.title)
             meta.setdefault("kind", spec.kind)
             meta["mode"] = (
-                "live"
-                if spec.kind == "live"
-                else ("realtime" if spec.realtime else "fast")
+                ProcessingMode.LIVE
+                if spec.kind == SourceKind.LIVE
+                else (ProcessingMode.REALTIME if spec.realtime else ProcessingMode.FAST)
             )
-            # Keep the stream timeline metadata in sync with the source.
             try:
                 self._hub.video_fps = self._video_fps
                 self._hub.video_width = self._video_width or 1920
@@ -996,7 +974,7 @@ class SourceManager:
             source = prepared or self._make_source(spec, media_dir)
             source.spec = spec
             self._current = source
-            self._state = "playing"
+            self._state = SourceState.PLAYING
         if spec.next_source is not None:
             self.prefetch(spec.next_source)
         source.start()
@@ -1007,7 +985,7 @@ class SourceManager:
             with self._lock:
                 if self._current is source:
                     self._current = None
-                    self._state = "idle"
+                    self._state = SourceState.IDLE
             current = self._hub.current
             if current.session_id != "boot" and current.ended_at is None:
                 current.meta["input_failed"] = True
@@ -1077,7 +1055,7 @@ class SourceManager:
         with self._lock:
             source = self._current
             self._current = None
-            self._state = "idle"
+            self._state = SourceState.IDLE
             prefetched = self._prefetched
             self._prefetched = None
         if prefetched is not None:
@@ -1101,7 +1079,7 @@ class SourceManager:
         if source is not None:
             source.pause()
             with self._lock:
-                self._state = "paused"
+                self._state = SourceState.PAUSED
 
     def resume(self) -> None:
         with self._lock:
@@ -1109,7 +1087,7 @@ class SourceManager:
         if source is not None:
             source.resume()
             with self._lock:
-                self._state = "playing"
+                self._state = SourceState.PLAYING
 
     def status(self) -> dict[str, Any]:
         with self._lock:

@@ -1,10 +1,15 @@
-"""Tests for the unified course tree (recordings + live, merged periods)."""
-
 from __future__ import annotations
 
 from datetime import datetime
 
-from plugins.input.tree import build_tree, live_state, merge_periods, parse_time
+from core.media import SourceKind
+from plugins.input.tree import (
+    LiveState,
+    build_tree,
+    live_state,
+    merge_periods,
+    parse_time,
+)
 
 COURSES = [
     {
@@ -30,11 +35,6 @@ def _rec(video_id: str, begin: str, end: str, classroom: str = "东中院 101") 
         "end": end,
         "classroom": classroom,
     }
-
-
-# ---------------------------------------------------------------------------
-# Period merging
-# ---------------------------------------------------------------------------
 
 
 def test_parse_time_formats() -> None:
@@ -75,11 +75,6 @@ def test_merge_does_not_cross_days() -> None:
     assert len(merge_periods(recordings, max_gap_minutes=60)) == 2
 
 
-# ---------------------------------------------------------------------------
-# Tree building
-# ---------------------------------------------------------------------------
-
-
 def test_build_tree_course_and_class_nodes() -> None:
     recordings = {
         "1": [
@@ -94,7 +89,7 @@ def test_build_tree_course_and_class_nodes() -> None:
     assert len(maths["children"]) == 1
     child = maths["children"][0]
     value = child["action"]["value"]
-    assert value["kind"] == "recording"
+    assert value["kind"] is SourceKind.RECORDING
     assert value["videos"] == ["a", "b"]
     assert nodes[1]["children"] == []
 
@@ -118,7 +113,7 @@ def test_build_tree_live_session_is_marked() -> None:
     maths = nodes[0]
     assert maths["live"] is True
     live_child = next(child for child in maths["children"] if child.get("live"))
-    assert live_child["action"]["value"]["kind"] == "live"
+    assert live_child["action"]["value"]["kind"] is SourceKind.LIVE
     assert live_child["action"]["value"]["live_id"] == "L1"
 
 
@@ -136,9 +131,8 @@ def test_build_tree_does_not_duplicate_recorded_live() -> None:
         }
     ]
     nodes = build_tree(COURSES, recordings, lives, now=datetime(2026, 11, 5, 10, 0))
-    # A near-identical recording already exists, so the live entry is skipped.
     assert len(nodes[0]["children"]) == 1
-    assert nodes[0]["children"][0]["action"]["value"]["kind"] == "recording"
+    assert nodes[0]["children"][0]["action"]["value"]["kind"] is SourceKind.RECORDING
 
 
 def test_build_tree_unmatched_live_goes_to_other_node() -> None:
@@ -183,14 +177,9 @@ def test_live_state_tracks_time() -> None:
         live_state("2026-11-05 10:00:00", "2026-11-05 11:00:00", now=now),
         live_state("2026-11-05 06:00:00", "2026-11-05 07:00:00", now=now),
     }
-    assert len(states) == 3
-    assert all(states)
-    assert not live_state("", "")
-
-
-# ---------------------------------------------------------------------------
-# Live periods must merge like recordings
-# ---------------------------------------------------------------------------
+    assert states == {LiveState.LIVE, LiveState.UPCOMING, LiveState.ENDED}
+    assert all(isinstance(state, LiveState) for state in states)
+    assert live_state("", "") is LiveState.UNKNOWN
 
 
 def _live(live_id: str, begin: str, end: str, name: str = "高等数学（A）") -> dict:
@@ -214,7 +203,6 @@ def test_two_upcoming_live_periods_merge_into_one_class() -> None:
     children = nodes[0]["children"]
     assert len(children) == 1
     child = children[0]
-    # Opening it targets the first upcoming period.
     assert child["action"]["value"]["live_id"] == "L9"
     assert child["action"]["value"]["parts"] == 2
 
@@ -245,7 +233,9 @@ def test_a_recorded_part_does_not_hide_the_remaining_live_part() -> None:
     ]
     nodes = build_tree(COURSES, recordings, lives, now=datetime(2026, 11, 5, 17, 0))
     children = nodes[0]["children"]
-    live_children = [c for c in children if c["action"]["value"]["kind"] == "live"]
+    live_children = [
+        c for c in children if c["action"]["value"]["kind"] is SourceKind.LIVE
+    ]
     assert len(live_children) == 1
     assert live_children[0]["action"]["value"]["live_id"] == "L10"
     assert live_children[0]["action"]["value"]["parts"] == 1

@@ -1,5 +1,3 @@
-"""Consumer contracts for the incremental note controls."""
-
 from types import SimpleNamespace
 from plugins.instant_summarize.plugin import (
     InstantSummarizeService,

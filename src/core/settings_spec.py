@@ -1,32 +1,27 @@
-"""Shared settings specification contract (framework level).
-
-The settings plugin implements persistence and UI; every other plugin only
-needs this dataclass to declare a setting.  The contract lives in ``core`` so a
-plugin never has to import another plugin's implementation.
-"""
+"""Plugins declare settings without importing the persistence plugin."""
 
 from __future__ import annotations
 
 import json
 import math
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
-SETTING_TYPES = {
-    "string",
-    "text",
-    "int",
-    "float",
-    "bool",
-    "select",
-    "secret",
-    "json",
-    "action",
-}
+
+class SettingType(StrEnum):
+    STRING = "string"
+    TEXT = "text"
+    INT = "int"
+    FLOAT = "float"
+    BOOL = "bool"
+    SELECT = "select"
+    SECRET = "secret"
+    JSON = "json"
+    ACTION = "action"
 
 
 SECRET_MASK = "******"
-"""Placeholder shown in public (UI/HTTP) output for a configured secret."""
 
 _TRUTHY = {"1", "true", "yes", "on", "y", "t"}
 _FALSY = {"0", "false", "no", "off", "n", "f", ""}
@@ -114,7 +109,7 @@ def _coerce_json(value: Any) -> Any:
 class SettingsSpec:
     key: str
     label: str
-    type: str = "string"
+    type: SettingType = SettingType.STRING
     default: Any = None
     nullable: bool = False
     group: str = "General"
@@ -123,14 +118,11 @@ class SettingsSpec:
     order: float = 0
     secret: bool = False
     placeholder: str = ""
-    # Environment variables used to seed this setting on first registration.
-    # Seeding writes the value into settings.json so the UI shows the effective
-    # value instead of silently reading a hidden fallback at use time.
+    # Persist environment defaults on first registration so the UI shows them.
     env: tuple[str, ...] = ()
     # Only show this field when another setting has one of the given values.
     # Example: ("input.mode", ("advanced",)).
     visible_when: tuple[str, tuple[Any, ...]] | None = None
-    # Optional explanatory text shown above the group's form.
     group_note: str = ""
     # Internal fields can be persisted/masked without appearing in the form.
     hidden: bool = False
@@ -141,17 +133,13 @@ class SettingsSpec:
     button_label: str = ""
 
     def __post_init__(self) -> None:
-        if self.type not in SETTING_TYPES:
+        if not isinstance(self.type, SettingType):
             raise ValueError(f"unsupported setting type {self.type!r}")
         if not self.key:
             raise ValueError("setting key is required")
-        if self.type == "secret" and not self.secret:
+        if self.type == SettingType.SECRET and not self.secret:
             object.__setattr__(self, "secret", True)
 
-    # ------------------------------------------------------------------
-    # Helpers (contract stays: key/label/type/default/group/description/
-    # options/order/secret/placeholder)
-    # ------------------------------------------------------------------
     def option_pairs(self) -> tuple[tuple[Any, str], ...]:
         """Return ``(value, label)`` pairs for ``select`` options.
 
@@ -180,23 +168,22 @@ class SettingsSpec:
             and value.strip().lower() in ("", "none", "null")
         ):
             return None
-        if self.type in ("string", "text", "secret"):
+        if self.type in (SettingType.STRING, SettingType.TEXT, SettingType.SECRET):
             if value is None:
                 return ""
             return value if isinstance(value, str) else str(value)
-        if self.type == "int":
+        if self.type == SettingType.INT:
             return _coerce_int(value)
-        if self.type == "float":
+        if self.type == SettingType.FLOAT:
             return _coerce_float(value)
-        if self.type == "bool":
+        if self.type == SettingType.BOOL:
             return _coerce_bool(value)
-        if self.type == "json":
+        if self.type == SettingType.JSON:
             return _coerce_json(value)
-        if self.type == "select":
+        if self.type == SettingType.SELECT:
             return self._coerce_select(value)
-        if self.type == "action":
+        if self.type == SettingType.ACTION:
             return value
-        # Unreachable: __post_init__ validates the type.
         raise ValueError(f"unsupported setting type {self.type!r}")
 
     def _coerce_select(self, value: Any) -> Any:
@@ -229,4 +216,4 @@ class SettingsSpec:
         return self.secret and (value is None or value == "" or value == SECRET_MASK)
 
 
-__all__ = ["SECRET_MASK", "SETTING_TYPES", "SettingsSpec"]
+__all__ = ["SECRET_MASK", "SettingType", "SettingsSpec"]

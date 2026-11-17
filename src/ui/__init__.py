@@ -1,5 +1,3 @@
-"""Web UI package."""
-
 from __future__ import annotations
 
 from .server import create_app

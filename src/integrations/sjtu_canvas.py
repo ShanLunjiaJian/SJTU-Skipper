@@ -38,11 +38,6 @@ class InputError(RuntimeError):
     """User-facing input/catalog error (token-safe message)."""
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def load_token_from_env() -> str:
     """Read the Canvas token from the project .env file."""
 
@@ -57,11 +52,6 @@ def load_token_from_env() -> str:
 def _load_base_url(default: str = "https://oc.sjtu.edu.cn") -> str:
     raw = (os.getenv("CANVAS_BASE_URL") or default).strip()
     return _clean_base_url(raw)
-
-
-# ---------------------------------------------------------------------------
-# SJTUCatalog
-# ---------------------------------------------------------------------------
 
 
 class SJTUCatalog:
@@ -86,16 +76,11 @@ class SJTUCatalog:
         self._base_url = base_url or _load_base_url()
         self._timeout = float(timeout_seconds)
         self._canvas: CanvasClient | None = None
-        # course_id (str) -> SJTUVideoClient
         self._video_clients: dict[str, SJTUVideoClient] = {}
         self._closed = False
         # The course tree fetches every course concurrently, so client
         # creation/iteration must be serialised (never held across I/O).
         self._lock = threading.RLock()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _require_token(self) -> str:
         token = self._token
@@ -143,10 +128,6 @@ class SJTUCatalog:
                 pass
         return self._video_client_for(cid)
 
-    # ------------------------------------------------------------------
-    # Canvas courses
-    # ------------------------------------------------------------------
-
     def list_courses(self) -> list[dict[str, Any]]:
         """Return Canvas courses: id, name, term, teacher, course_code.
 
@@ -179,10 +160,6 @@ class SJTUCatalog:
                 }
             )
         return result
-
-    # ------------------------------------------------------------------
-    # Recordings (VOD)
-    # ------------------------------------------------------------------
 
     def list_recordings(
         self,
@@ -235,7 +212,6 @@ class SJTUCatalog:
 
         url = info.get_stream_url() or ""
         if not url:
-            # Try to re-auth and retry once
             _log.info("No stream URL in first attempt, retrying auth for %s", video_id)
             self._reset_video_client(course_id)
             vc2 = self._video_client_for(course_id)
@@ -292,10 +268,6 @@ class SJTUCatalog:
                 views[0] = url
         return {str(key): value for key, value in views.items()}
 
-    # ------------------------------------------------------------------
-    # Live token (shared by list_lives and get_live_devices)
-    # ------------------------------------------------------------------
-
     def _ensure_live_token(self) -> tuple[str, dict[str, str]]:
         """Acquire a video token for the live/device API.
 
@@ -313,7 +285,6 @@ class SJTUCatalog:
                 headers = self._live_headers(token)
                 return token, headers
 
-        # No cached token. Iterate active courses.
         client = self._canvas_client()
         try:
             courses = client.list_courses(active_only=True)
@@ -356,10 +327,6 @@ class SJTUCatalog:
         else:
             headers["token"] = token
         return headers
-
-    # ------------------------------------------------------------------
-    # Live streams (新版 SJTU 门户)
-    # ------------------------------------------------------------------
 
     def list_lives(
         self,
@@ -473,10 +440,6 @@ class SJTUCatalog:
                 }
             )
         return result
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     def close(self) -> None:
         with self._lock:

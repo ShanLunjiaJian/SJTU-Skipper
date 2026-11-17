@@ -1,7 +1,5 @@
 """Append-only media and text streams.
 
-Design notes
-------------
 * Every stream is append-only.  Existing chunks/items are immutable.
 * Time is measured in seconds from the start of the current session.
 * Audio is stored as raw PCM (s16le by default) and can be sliced exactly.
@@ -21,11 +19,26 @@ import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Callable
 
+from .media import MediaKind
+
 Notify = Callable[..., None]
 _log = logging.getLogger("lecture_agent.streams")
+
+
+class StreamKind(StrEnum):
+    AUDIO = "audio"
+    VIDEO = "video"
+    TRANSCRIPT = "transcript"
+    VISUAL = "visual"
+
+
+class TextSource(StrEnum):
+    STT = "stt"
+    VLM = "vlm"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +62,7 @@ class TextItem:
     text: str
     start: float | None = None
     end: float | None = None
-    source: str = ""
+    source: str | TextSource = ""
     meta: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -59,6 +72,8 @@ class TextItem:
 
 class _TimeIndexedStream:
     """Shared timeline/index machinery for audio and video streams."""
+
+    stream_name: StreamKind
 
     def __init__(
         self,
@@ -215,7 +230,7 @@ class _TimeIndexedStream:
 class AudioStream(_TimeIndexedStream):
     """Append-only PCM audio stream."""
 
-    stream_name = "audio"
+    stream_name = StreamKind.AUDIO
 
     def __init__(
         self,
@@ -331,7 +346,7 @@ class AudioStream(_TimeIndexedStream):
 class VideoStream(_TimeIndexedStream):
     """Append-only encoded-frame video stream (JPEG by default)."""
 
-    stream_name = "video"
+    stream_name = StreamKind.VIDEO
 
     def __init__(
         self,
@@ -377,7 +392,11 @@ class TextStream(Sequence[TextItem]):
     """Append-only text stream; ``len()`` is the number of items."""
 
     def __init__(
-        self, session_id: str, name: str = "text", *, notify: Notify | None = None
+        self,
+        session_id: str,
+        name: str | StreamKind = "text",
+        *,
+        notify: Notify | None = None,
     ) -> None:
         self.session_id = session_id
         self.name = name
@@ -414,7 +433,7 @@ class TextStream(Sequence[TextItem]):
         *,
         start: float | None = None,
         end: float | None = None,
-        source: str = "",
+        source: str | TextSource = "",
         meta: Mapping[str, Any] | None = None,
     ) -> TextItem | None:
         if not isinstance(text, str):
@@ -580,8 +599,12 @@ class StreamSet:
     visual: TextStream
     ended_at: float | None = None
     end_reason: str = ""
-    audio_gate: BacklogGate = field(default_factory=lambda: BacklogGate("audio"))
-    video_gate: BacklogGate = field(default_factory=lambda: BacklogGate("video"))
+    audio_gate: BacklogGate = field(
+        default_factory=lambda: BacklogGate(MediaKind.AUDIO)
+    )
+    video_gate: BacklogGate = field(
+        default_factory=lambda: BacklogGate(MediaKind.VIDEO)
+    )
     # Set by the input plugin once all ffmpeg readers reached EOF; consumers
     # use it to drain their queues before the session is ended.
     input_done: bool = False
@@ -591,17 +614,16 @@ class StreamSet:
     transcript_progress: SourceProgress = field(default_factory=SourceProgress)
     visual_progress: SourceProgress = field(default_factory=SourceProgress)
 
-    def stream(self, name: str) -> AudioStream | VideoStream | TextStream:
-        streams: dict[str, AudioStream | VideoStream | TextStream] = {
-            "audio": self.audio,
-            "video": self.video,
-            "transcript": self.transcript,
-            "visual": self.visual,
+    def stream(self, name: StreamKind) -> AudioStream | VideoStream | TextStream:
+        if not isinstance(name, StreamKind):
+            raise TypeError("name must be a StreamKind")
+        streams: dict[StreamKind, AudioStream | VideoStream | TextStream] = {
+            StreamKind.AUDIO: self.audio,
+            StreamKind.VIDEO: self.video,
+            StreamKind.TRANSCRIPT: self.transcript,
+            StreamKind.VISUAL: self.visual,
         }
-        value = streams.get(name)
-        if value is None:
-            raise KeyError(f"unknown stream {name!r}")
-        return value
+        return streams[name]
 
     @property
     def duration(self) -> float:
@@ -662,7 +684,7 @@ class StreamHub:
         self.video_height = int(video_height)
         self._lock = threading.RLock()
         self._sessions: list[StreamSet] = []
-        self._last_emit: dict[tuple[str, str], float] = {}
+        self._last_emit: dict[tuple[str, StreamKind], float] = {}
         # Session whose notes the UI should show.  Normally the live session;
         # after a restart it points at the most recent session on disk.
         self._notes_session_id: str = ""
@@ -670,7 +692,7 @@ class StreamHub:
         # (plugin_id, kind) -> callbacks describing one media consumer.
         # Producers ask the hub about cursors/backpressure instead of reaching
         # into the consumer plugins directly (no ``input -> stt/vlm`` imports).
-        self._consumers: dict[tuple[str, str], dict[str, Any]] = {}
+        self._consumers: dict[tuple[str, MediaKind], dict[str, Any]] = {}
         self._current = self._create("boot", {})
         self._sessions.append(self._current)
         if self._emit is not None:
@@ -682,9 +704,6 @@ class StreamHub:
                 started_at=self._current.started_at,
             )
 
-    # ------------------------------------------------------------------
-    # Creation / lifecycle
-    # ------------------------------------------------------------------
     def _create(self, session_id: str, meta: Mapping[str, Any]) -> StreamSet:
         sid = session_id
         notify = self._on_append
@@ -704,8 +723,8 @@ class StreamHub:
                 height=self.video_height,
                 notify=notify,
             ),
-            transcript=TextStream(sid, "transcript", notify=notify),
-            visual=TextStream(sid, "visual", notify=notify),
+            transcript=TextStream(sid, StreamKind.TRANSCRIPT, notify=notify),
+            visual=TextStream(sid, StreamKind.VISUAL, notify=notify),
         )
 
     @property
@@ -791,11 +810,9 @@ class StreamHub:
     def _end_locked(self, session: StreamSet, reason: str) -> None:
         session.ended_at = time.time()
         session.end_reason = reason
-        # Unblock producers still waiting for backlog space.
         session.audio_gate.close()
         session.video_gate.close()
-        # Flush coalesced audio/video notifications.
-        for stream_name in ("audio", "video"):
+        for stream_name in (StreamKind.AUDIO, StreamKind.VIDEO):
             stream = session.stream(stream_name)
             key = (session.session_id, stream_name)
             last = self._last_emit.get(key, 0.0)
@@ -814,19 +831,16 @@ class StreamHub:
                     first_index=0,
                 )
                 self._last_emit[key] = new_len
-        self._last_emit.pop((session.session_id, "audio"), None)
-        self._last_emit.pop((session.session_id, "video"), None)
+        self._last_emit.pop((session.session_id, StreamKind.AUDIO), None)
+        self._last_emit.pop((session.session_id, StreamKind.VIDEO), None)
 
     def _new_session_id(self) -> str:
         return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
 
-    # ------------------------------------------------------------------
-    # Notifications
-    # ------------------------------------------------------------------
     def _on_append(
         self,
         *,
-        stream: str,
+        stream: StreamKind,
         session_id: str,
         old_len: float | int,
         new_len: float | int,
@@ -837,12 +851,14 @@ class StreamHub:
         start: float | None = None,
         end: float | None = None,
     ) -> None:
+        if not isinstance(stream, StreamKind):
+            raise TypeError("stream must be a StreamKind")
         if self._emit is None:
             return
-        if stream in ("audio", "video"):
+        if stream in (StreamKind.AUDIO, StreamKind.VIDEO):
             interval = (
                 self.audio_emit_interval
-                if stream == "audio"
+                if stream is StreamKind.AUDIO
                 else self.video_emit_interval
             )
             key = (session_id, stream)
@@ -864,7 +880,6 @@ class StreamHub:
                 first_index=0,
             )
             return
-        # Text streams notify immediately.
         self._emit(
             "stream.appended",
             stream=stream,
@@ -880,9 +895,6 @@ class StreamHub:
             item_end=end,
         )
 
-    # ------------------------------------------------------------------
-    # Inspection
-    # ------------------------------------------------------------------
     def list_sessions(self) -> list[SessionInfo]:
         with self._lock:
             sessions = list(self._sessions)
@@ -910,15 +922,19 @@ class StreamHub:
                     return s
         return None
 
-    def _text_progress_locked(self, session_id: str, stream: str) -> SourceProgress:
-        if stream not in ("transcript", "visual"):
+    def _text_progress_locked(
+        self, session_id: str, stream: StreamKind
+    ) -> SourceProgress:
+        if not isinstance(stream, StreamKind):
+            raise TypeError("stream must be a StreamKind")
+        if stream not in (StreamKind.TRANSCRIPT, StreamKind.VISUAL):
             raise ValueError(f"Invalid text stream: {stream}")
         session = self.get_session(session_id)
         if session is None:
             raise KeyError(session_id)
         return getattr(session, f"{stream}_progress")
 
-    def text_progress(self, session_id: str, stream: str) -> SourceProgress:
+    def text_progress(self, session_id: str, stream: StreamKind) -> SourceProgress:
         with self._lock:
             state = self._text_progress_locked(session_id, stream)
             return SourceProgress(
@@ -931,7 +947,7 @@ class StreamHub:
     def seal_text(
         self,
         session_id: str,
-        stream: str,
+        stream: StreamKind,
         before: float,
         *,
         final: bool = False,
@@ -954,7 +970,9 @@ class StreamHub:
         if self._emit is not None:
             self._emit("stream.sealed", **payload)
 
-    def set_text_enabled(self, session_id: str, stream: str, enabled: bool) -> None:
+    def set_text_enabled(
+        self, session_id: str, stream: StreamKind, enabled: bool
+    ) -> None:
         with self._lock:
             state = self._text_progress_locked(session_id, stream)
             state.enabled = bool(enabled)
@@ -975,27 +993,24 @@ class StreamHub:
     def shutdown(self) -> None:
         self.end_session("runtime shutdown")
 
-    # ------------------------------------------------------------------
-    # Media consumers (backpressure without cross-plugin imports)
-    # ------------------------------------------------------------------
     def register_consumer(
         self,
         plugin_id: str,
-        kind: str,
+        kind: MediaKind,
         *,
         cursor_fn: Callable[[], float] | None = None,
         busy_fn: Callable[[], bool] | None = None,
         gate_limit_fn: Callable[[], float] | None = None,
     ) -> None:
-        """Announce that *plugin_id* consumes ``kind`` (``"audio"``/``"video"``).
+        """Register a media consumer for the specified media kind.
 
-        Producers (the input plugin) use :meth:`consumer_cursor`,
-        :meth:`consumer_gate_limit` and :meth:`consumers_busy` to decide how far
-        the stream may run ahead, so they never need a handle on the consumer
-        plugin itself.
+        Producers use the consumer callbacks to control media backlog.
+        The input plugin does not need access to the consumer plugin.
         """
 
-        key = (str(plugin_id), str(kind))
+        if not isinstance(kind, MediaKind):
+            raise TypeError("kind must be a MediaKind")
+        key = (str(plugin_id), kind)
         with self._lock:
             self._consumers[key] = {
                 "cursor_fn": cursor_fn,
@@ -1003,12 +1018,16 @@ class StreamHub:
                 "gate_limit_fn": gate_limit_fn,
             }
 
-    def unregister_consumer(self, plugin_id: str, kind: str | None = None) -> None:
+    def unregister_consumer(
+        self, plugin_id: str, kind: MediaKind | None = None
+    ) -> None:
+        if kind is not None and not isinstance(kind, MediaKind):
+            raise TypeError("kind must be a MediaKind")
         with self._lock:
             for key in list(self._consumers):
                 if key[0] != plugin_id:
                     continue
-                if kind is not None and key[1] != str(kind):
+                if kind is not None and key[1] is not kind:
                     continue
                 self._consumers.pop(key, None)
 
@@ -1017,23 +1036,25 @@ class StreamHub:
 
         self.unregister_consumer(plugin_id)
 
-    def consumers(self) -> list[dict[str, str]]:
+    def consumers(self) -> list[dict[str, str | MediaKind]]:
         """Introspection: registered consumers as ``{plugin_id, kind}``."""
 
         with self._lock:
             keys = list(self._consumers)
         return [{"plugin_id": pid, "kind": kind} for pid, kind in keys]
 
-    def _consumer_fns(self, kind: str, name: str) -> list[Callable[..., Any]]:
+    def _consumer_fns(self, kind: MediaKind, name: str) -> list[Callable[..., Any]]:
+        if not isinstance(kind, MediaKind):
+            raise TypeError("kind must be a MediaKind")
         with self._lock:
             consumers = [
                 dict(entry)
                 for (pid, entry_kind), entry in self._consumers.items()
-                if entry_kind == str(kind)
+                if entry_kind is kind
             ]
         return [c[name] for c in consumers if callable(c.get(name))]
 
-    def consumer_cursor(self, kind: str) -> float:
+    def consumer_cursor(self, kind: MediaKind) -> float:
         """Furthest-back position consumed by the ``kind`` consumers.
 
         Returns ``0.0`` when nothing has been consumed yet (or when there are no
@@ -1048,7 +1069,7 @@ class StreamHub:
                 _log.exception("consumer cursor failed for kind=%s", kind)
         return min(values) if values else 0.0
 
-    def consumer_gate_limit(self, kind: str) -> float:
+    def consumer_gate_limit(self, kind: MediaKind) -> float:
         """Return the strictest positive consumer backlog limit, or zero."""
 
         limits: list[float] = []

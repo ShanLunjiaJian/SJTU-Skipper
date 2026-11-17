@@ -1,5 +1,3 @@
-"""Schedule session-bound note drafts and whole-lecture publication."""
-
 from __future__ import annotations
 
 import json
@@ -10,15 +8,39 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
+from core.agent_types import (
+    AgentEventType,
+    AgentRole,
+    AgentToolName,
+    ExecutionRole,
+    ExecutionStatus,
+    ExecutionBlockKind,
+    ExecutionBlockStatus,
+    ReviewerEventType,
+    ReviewStatus,
+)
 from core.file_access import publication_lock
+from core.events import Event
 from core.plugin import Plugin
-from core.settings_spec import SettingsSpec
+from core.streams import StreamKind
+from core.ui import TaskState
+from core.settings_spec import SettingsSpec, SettingType
 from core.workspace import FileWorkspace
 from core.note_document import parse_blocks, strip_blocks
 
-from .material import chunk_material, collect_material, digest, render
+from .material import chunk_material, collect_material, digest, read_log, render
+from .types import (
+    ChunkState,
+    ContinuationStage,
+    GenerationState,
+    NotePhase,
+    NotePublication,
+    NoteSessionRole,
+    NoteTaskKind,
+)
 from .prompts import (
     CHUNK,
     REVIEW,
@@ -83,7 +105,7 @@ class NotesPipelinePlugin(Plugin):
                 SettingsSpec(
                     key=f"notes.{key}",
                     default=default,
-                    type="int",
+                    type=SettingType.INT,
                     label=label,
                     group="Notes",
                     description="修改后重启服务生效" if key == "concurrency" else "",
@@ -91,27 +113,45 @@ class NotesPipelinePlugin(Plugin):
                 plugin_id=self.id,
             )
         for key, default, kind, label, group in (
-            ("summarize.system_prompt", SYSTEM, "string", "system_prompt", "Summarize"),
+            (
+                "summarize.system_prompt",
+                SYSTEM,
+                SettingType.STRING,
+                "system_prompt",
+                "Summarize",
+            ),
             (
                 "summarize.reviewer_prompt",
                 REVIEW_SYSTEM,
-                "string",
+                SettingType.STRING,
                 "reviewer_prompt",
                 "Summarize",
             ),
-            ("summarize.review_enabled", True, "bool", "review_enabled", "Summarize"),
-            ("summarize.review_max_rounds", 0, "int", "review_max_rounds", "Summarize"),
+            (
+                "summarize.review_enabled",
+                True,
+                SettingType.BOOL,
+                "review_enabled",
+                "Summarize",
+            ),
+            (
+                "summarize.review_max_rounds",
+                0,
+                SettingType.INT,
+                "review_max_rounds",
+                "Summarize",
+            ),
             (
                 "instant-summarize.system_prompt",
                 SYSTEM,
-                "string",
+                SettingType.STRING,
                 "系统提示词",
                 "Instant Summarize",
             ),
             (
                 "instant-summarize.enabled",
                 True,
-                "bool",
+                SettingType.BOOL,
                 "分段笔记",
                 "Instant Summarize",
             ),
@@ -131,6 +171,8 @@ class NotesPipelinePlugin(Plugin):
         self.queue = deque()
         self.active = {}
         self.agent_tasks = {}
+        self.writer_messages = {}
+        self.continuations = {}
         self.closed = False
         self.limit = max(1, int(self.setting("notes.concurrency", 8)))
         self.pool = ThreadPoolExecutor(
@@ -149,6 +191,9 @@ class NotesPipelinePlugin(Plugin):
             },
             plugin_id=self.id,
         )
+        ctx.ui.register_action(
+            "notes-pipeline.message", self.message, plugin_id=self.id
+        )
         for event in (
             "session.started",
             "stream.sealed",
@@ -156,11 +201,7 @@ class NotesPipelinePlugin(Plugin):
             "session.stopped",
         ):
             ctx.events.on(event, self._event, plugin_id=self.id)
-        for event in (
-            "agent.execution",
-            "agent.file",
-            "agent.reviewer",
-        ):
+        for event in (AgentEventType.RUN_READY,):
             ctx.events.on(event, self._agent_event, plugin_id=self.id)
         self.coordinator = threading.Thread(
             target=self._coordinate, name="notes-coordinator", daemon=True
@@ -192,29 +233,56 @@ class NotesPipelinePlugin(Plugin):
                     "chunks": [],
                     "published_end": 0.0,
                     "finalize_requested": False,
-                    "phase": "collecting",
+                    "phase": NotePhase.COLLECTING,
                     "error": "",
                 }
             )
             restored = path.exists()
+            state["phase"] = NotePhase(state["phase"])
+            state["review_status"] = ReviewStatus(
+                state.get("review_status", ReviewStatus.NOT_REVIEWED)
+            )
+            if state.get("writer"):
+                state["writer"]["role"] = AgentRole(state["writer"]["role"])
+                state["writer"]["tools"] = [
+                    AgentToolName(name) for name in state["writer"]["tools"]
+                ]
             for chunk in state["chunks"]:
-                if chunk["state"] in ("running", "pending") and restored:
-                    chunk["state"] = "cancelled"
-                if chunk["state"] == "done":
+                chunk["state"] = ChunkState(chunk["state"])
+                if (
+                    chunk["state"] in (ChunkState.RUNNING, ChunkState.PENDING)
+                    and restored
+                ):
+                    chunk["state"] = ChunkState.CANCELLED
+                if chunk["state"] == ChunkState.DONE:
                     root = self._directory(sid) / "chunks" / str(chunk["index"])
                     if not all((root / name).exists() for name in NOTE_HEADERS):
-                        chunk["state"] = "pending"
-            state.setdefault("review_status", "pending")
+                        chunk["state"] = ChunkState.PENDING
+            state.setdefault("writer", None)
             state.setdefault("deleted", False)
             state["errors"] = [
                 {"chunk": chunk["index"], "error": chunk["error"]}
                 for chunk in state["chunks"]
-                if chunk["state"] == "failed"
+                if chunk["state"] == ChunkState.FAILED
             ]
+            for record in read_log(
+                self.ctx.data_dir / "sessions" / sid / "visual.jsonl"
+            ):
+                if detail := record.get("error"):
+                    state["errors"].append(
+                        {
+                            "source": StreamKind.VISUAL,
+                            "start": record["start"],
+                            "end": record["end"],
+                            "error": detail["message"],
+                            "code": detail["code"],
+                            "attempts": detail["attempts"],
+                        }
+                    )
             if restored:
                 state["finalize_requested"] = False
-                if state["phase"] not in ("published", "deleted"):
-                    state["phase"] = "cancelled"
+                if state["phase"] not in (NotePhase.PUBLISHED, NotePhase.DELETED):
+                    state["phase"] = NotePhase.CANCELLED
                 state["restart_cancelled"] = True
             self.sessions[sid] = state
         return self.sessions[sid]
@@ -225,9 +293,9 @@ class NotesPipelinePlugin(Plugin):
             task["session_id"] == sid
             for task in (*self.active.values(), *self.agent_tasks.values())
         ):
-            return "generating"
+            return GenerationState.GENERATING
         if state.get("deleted"):
-            return "not_started"
+            return GenerationState.NOT_STARTED
         session = self.ctx.streams.get_session(sid)
         cancelled = session is not None and (
             session.meta.get("input_failed") or session.meta.get("processing_cancelled")
@@ -235,19 +303,25 @@ class NotesPipelinePlugin(Plugin):
         if (
             state.get("restart_cancelled")
             or cancelled
-            or state["phase"] in ("published", "failed", "cancelled")
+            or state["phase"]
+            in (NotePhase.PUBLISHED, NotePhase.FAILED, NotePhase.CANCELLED)
         ):
-            return "finished"
-        if any(chunk["state"] in ("pending", "running") for chunk in state["chunks"]):
-            return "generating"
+            return GenerationState.FINISHED
+        if any(
+            chunk["state"] in (ChunkState.PENDING, ChunkState.RUNNING)
+            for chunk in state["chunks"]
+        ):
+            return GenerationState.GENERATING
         _, final = self._readiness(sid, [])
         if state["finalize_requested"] or (
             not final
             and self.setting("instant-summarize.enabled", True)
             and session is not None
         ):
-            return "generating"
-        return "finished" if state["chunks"] else "not_started"
+            return GenerationState.GENERATING
+        return (
+            GenerationState.FINISHED if state["chunks"] else GenerationState.NOT_STARTED
+        )
 
     def _save(self, state):
         directory = self._directory(state["session_id"])
@@ -262,6 +336,7 @@ class NotesPipelinePlugin(Plugin):
             "error",
             "review_status",
             "deleted",
+            "writer",
         )
         path = directory / "state.json"
         temporary = path.with_suffix(".tmp")
@@ -280,9 +355,14 @@ class NotesPipelinePlugin(Plugin):
             if getattr(event, "type", "") == "session.started":
                 state.pop("restart_cancelled", None)
             if event.get("error"):
-                state["errors"].append(
-                    {"source": event.get("stream"), **event.get("error")}
+                failure = {"source": event.get("stream"), **event.get("error")}
+                key = lambda row: tuple(
+                    row.get(name) for name in ("source", "start", "end", "code")
                 )
+                if failure.get("code") != "thinking_loop" or not any(
+                    key(row) == key(failure) for row in state["errors"]
+                ):
+                    state["errors"].append(failure)
             self.condition.notify_all()
 
     def start(self, session_id="") -> bool:
@@ -298,11 +378,11 @@ class NotesPipelinePlugin(Plugin):
             if self.closed:
                 return False
             state = self._state(sid)
-            if self._generation_state(sid) != "not_started":
+            if self._generation_state(sid) != GenerationState.NOT_STARTED:
                 return False
             state["deleted"] = False
             state.pop("restart_cancelled", None)
-            state["phase"] = "collecting"
+            state["phase"] = NotePhase.COLLECTING
             state["finalize_requested"] = True
             self._save(state)
             self.condition.notify_all()
@@ -314,7 +394,8 @@ class NotesPipelinePlugin(Plugin):
             state = self._state(sid)
             if (
                 state.get("restart_cancelled")
-                or state["phase"] in ("published", "failed", "cancelled")
+                or state["phase"]
+                in (NotePhase.PUBLISHED, NotePhase.FAILED, NotePhase.CANCELLED)
                 or state.get("deleted")
             ):
                 return False
@@ -322,18 +403,105 @@ class NotesPipelinePlugin(Plugin):
             self.condition.notify_all()
         return True
 
+    def _writer_inputs(self, sid, writer):
+        root = self._directory(sid)
+        files = {name: root / relative for name, relative in writer["files"].items()}
+        pointer = (
+            self.ctx.data_dir / "llm_runtime" / f"session-{writer['session_id']}.path"
+        )
+        transcript = pointer.read_text(encoding="utf-8").strip()
+        if not transcript:
+            raise RuntimeError("主写作会话记录不可用")
+        Path(transcript).read_text(encoding="utf-8")
+        for path in files.values():
+            path.read_text(encoding="utf-8")
+        notes = self.ctx.data_dir / "sessions" / sid / "notes"
+        for name in NOTE_HEADERS:
+            (notes / name).read_text(encoding="utf-8")
+        return files
+
+    def message(self, payload):
+        sid = str(payload.get("session_id") or "")
+        target = str(payload.get("agent_session_id") or "")
+        text = str(payload.get("message") or "")
+
+        def reject(reason):
+            return {"ok": False, "message": reason, "refresh": False}
+
+        if not sid or not target or not text.strip():
+            return reject("消息或会话记录不可用")
+        with self.condition:
+            state = self._state(sid)
+            if self.closed or state.get("deleted"):
+                return reject("笔记任务已关闭")
+            writer = state.get("writer")
+            is_writer = writer is not None and target == writer["session_id"]
+            stage = self.continuations.get(sid) if is_writer else None
+            if stage == ContinuationStage.QUEUED:
+                self.writer_messages[sid].append(text)
+                return {"ok": True, "refresh": True}
+            if stage == ContinuationStage.STARTING:
+                return reject("主写作正在恢复，请稍后发送")
+            if stage == ContinuationStage.FINISHING:
+                return reject("主写作正在发布，请稍后发送")
+            live = any(
+                task["session_id"] == sid
+                and any(
+                    agent.get("session_id") == target
+                    for agent in task["agents"].values()
+                )
+                for task in self.agent_tasks.values()
+            )
+            if not live:
+                if not writer:
+                    return reject("主写作会话记录不可用")
+                if not is_writer or state["phase"] != NotePhase.PUBLISHED:
+                    return reject("会话已完成，不能发送消息")
+                if any(task[0] == sid for task in self.queue) or any(
+                    task["session_id"] == sid
+                    for task in (*self.active.values(), *self.agent_tasks.values())
+                ):
+                    return reject("笔记任务尚未结束，请稍后发送")
+                try:
+                    self._writer_inputs(sid, writer)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    return reject(f"主写作会话记录不可用：{exc}")
+                self.writer_messages[sid] = [text]
+                self.continuations[sid] = ContinuationStage.QUEUED
+                state.update(
+                    phase=NotePhase.WRITING,
+                    review_status=ReviewStatus.NOT_REVIEWED,
+                    error="",
+                    finalize_requested=True,
+                )
+                state.pop("restart_cancelled", None)
+                self.queue.append((sid, NoteTaskKind.FINAL, -1))
+                self._save(state)
+                self.condition.notify_all()
+                return {"ok": True, "refresh": True}
+            if state.get("restart_cancelled"):
+                return reject("笔记任务正在停止")
+        result = self.agent.message(target, text)
+        return {
+            "ok": result["accepted"],
+            "message": result.get("reason", ""),
+            "refresh": False,
+        }
+
     def stop(self, session_id=""):
         sid = self._sid(session_id)
         with self.condition:
             state = self._state(sid)
-            if self._generation_state(sid) != "generating":
+            if self._generation_state(sid) != GenerationState.GENERATING:
                 return False
             state["restart_cancelled"] = True
             state["finalize_requested"] = False
             self.queue = deque(task for task in self.queue if task[0] != sid)
+            self.writer_messages.pop(sid, None)
+            self.continuations.pop(sid, None)
             for chunk in state["chunks"]:
-                if chunk["state"] in ("pending", "running"):
-                    chunk["state"] = "cancelled"
+                if chunk["state"] in (ChunkState.PENDING, ChunkState.RUNNING):
+                    chunk["state"] = ChunkState.CANCELLED
             running = [
                 key
                 for key, task in self.agent_tasks.items()
@@ -351,7 +519,7 @@ class NotesPipelinePlugin(Plugin):
                     )
                 )
             )
-            state["phase"] = "cancelled"
+            state["phase"] = NotePhase.CANCELLED
             self._save(state)
         self.ctx.ui.refresh("notes.stopped")
         return True
@@ -360,11 +528,11 @@ class NotesPipelinePlugin(Plugin):
         sid = self._sid(session_id)
         with self.condition:
             state = self._state(sid)
-            if self._generation_state(sid) != "finished":
+            if self._generation_state(sid) != GenerationState.FINISHED:
                 return False
             notes = self.ctx.data_dir / "sessions" / sid / "notes"
             with publication_lock(notes):
-                for kind in ("instant", "final"):
+                for kind in NotePublication:
                     for name, _ in self.note_files(kind).values():
                         (notes / name).unlink(missing_ok=True)
                 (notes.parent / SOURCE_FILENAME).unlink(missing_ok=True)
@@ -372,14 +540,17 @@ class NotesPipelinePlugin(Plugin):
                 chunks=[],
                 source_digest="",
                 published_end=0.0,
-                phase="deleted",
+                phase=NotePhase.DELETED,
                 error="",
                 errors=[],
-                review_status="pending",
+                review_status=ReviewStatus.NOT_REVIEWED,
                 deleted=True,
                 finalize_requested=False,
                 last_agent_tasks=[],
+                writer=None,
             )
+            self.writer_messages.pop(sid, None)
+            self.continuations.pop(sid, None)
             self._save(state)
         self.ctx.ui.refresh("notes.deleted")
         return True
@@ -400,23 +571,54 @@ class NotesPipelinePlugin(Plugin):
                 if duration > 0 and chunk_enabled
                 else (0 if not chunk_enabled else None)
             )
+            history = list(state.get("last_agent_tasks", []))
+            writer = state.get("writer")
+            if (
+                writer
+                and state["phase"] == NotePhase.PUBLISHED
+                and not any(
+                    agent.get("session_id") == writer["session_id"]
+                    for task in (*history, *self.agent_tasks.values())
+                    for agent in task["agents"].values()
+                )
+            ):
+                main = self._execution_agent(
+                    "main",
+                    ExecutionRole.WRITER,
+                    writer["name"],
+                    session_id=writer["session_id"],
+                )
+                main["status"] = ExecutionStatus.COMPLETED
+                history.append(
+                    {
+                        "id": f"notes-agent:{writer['session_id']}",
+                        "session_id": sid,
+                        "started": 0,
+                        "agents": {"main": main},
+                    }
+                )
             return {
                 "session_id": sid,
                 "generation_state": self._generation_state(sid),
                 "phase": state["phase"],
-                "pending_chunks": sum(c["state"] == "pending" for c in state["chunks"]),
-                "running_chunks": sum(c["state"] == "running" for c in state["chunks"]),
+                "pending_chunks": sum(
+                    c["state"] == ChunkState.PENDING for c in state["chunks"]
+                ),
+                "running_chunks": sum(
+                    c["state"] == ChunkState.RUNNING for c in state["chunks"]
+                ),
                 "published_end": state["published_end"],
                 "review_status": state["review_status"],
                 "completed_chunks": sum(
-                    c["state"] in ("done", "empty") for c in state["chunks"]
+                    c["state"] in (ChunkState.DONE, ChunkState.EMPTY)
+                    for c in state["chunks"]
                 ),
                 "total_chunks": len(state["chunks"]),
                 "expected_chunks": expected_chunks,
                 "chunk_enabled": chunk_enabled,
                 "tasks": sorted(
                     [
-                        *state.get("last_agent_tasks", []),
+                        *history,
                         *(
                             dict(task)
                             for task in self.agent_tasks.values()
@@ -429,17 +631,16 @@ class NotesPipelinePlugin(Plugin):
                 "errors": list(state["errors"]),
             }
 
-    def note_files(self, kind):
-        if kind not in ("instant", "final"):
-            raise ValueError(kind)
-        prefix = "instant_note" if kind == "instant" else "note"
+    def note_files(self, kind: NotePublication):
+        kind = NotePublication(kind)
+        prefix = "instant_note" if kind == NotePublication.INSTANT else "note"
         return {key: (f"{prefix}_{key}.md", LABELS[key]) for key in KINDS}
 
     def draft_paths(self, session_id=""):
         directory = self.ctx.data_dir / "sessions" / self._sid(session_id) / "notes"
         return {
             key: directory / name
-            for key, (name, _) in self.note_files("instant").items()
+            for key, (name, _) in self.note_files(NotePublication.INSTANT).items()
             if (directory / name).exists()
         }
 
@@ -453,8 +654,8 @@ class NotesPipelinePlugin(Plugin):
             for task in self.active.values():
                 sid = task["session_id"]
                 phase = (
-                    "chunking"
-                    if task["phase"] == "chunking"
+                    NotePhase.CHUNKING
+                    if task["phase"] == NotePhase.CHUNKING
                     else self._state(sid)["phase"]
                 )
                 elapsed = max(0, int(time.monotonic() - task["started"]))
@@ -462,7 +663,7 @@ class NotesPipelinePlugin(Plugin):
                     {
                         **task,
                         "phase": phase,
-                        "state": "running",
+                        "state": TaskState.RUNNING,
                         "cancel": {
                             "action": "notes-pipeline.stop",
                             "payload": {"session_id": sid},
@@ -470,8 +671,8 @@ class NotesPipelinePlugin(Plugin):
                         "label": f"笔记 {sid}",
                         "detail": (
                             f"分段整理；片段 {task['chunk']}；{elapsed} 秒"
-                            if phase == "chunking"
-                            else f"整课写作；{elapsed} 秒"
+                            if phase == NotePhase.CHUNKING
+                            else f"笔记写作；{elapsed} 秒"
                         ),
                     }
                 )
@@ -482,7 +683,7 @@ class NotesPipelinePlugin(Plugin):
                     "label": f"笔记 {sid}",
                     "detail": f"排队；{kind}；片段 {index}",
                     "phase": kind,
-                    "state": "pending",
+                    "state": TaskState.PENDING,
                     "cancel": {
                         "action": "notes-pipeline.stop",
                         "payload": {"session_id": sid},
@@ -498,7 +699,10 @@ class NotesPipelinePlugin(Plugin):
         if session is None:
             return math.inf, True
         states = []
-        for service, stream in (("stt", "transcript"), ("vlm", "visual")):
+        for service, stream in (
+            ("stt", StreamKind.TRANSCRIPT),
+            ("vlm", StreamKind.VISUAL),
+        ):
             if self.ctx.service(service) is not None:
                 progress = self.ctx.streams.text_progress(sid, stream)
                 if progress.enabled:
@@ -517,10 +721,13 @@ class NotesPipelinePlugin(Plugin):
 
     def _schedule(self, sid):
         state = self._state(sid)
+        if sid in self.continuations:
+            return
         if (
             state.get("deleted")
             or state.get("restart_cancelled")
-            or state["phase"] in ("published", "failed", "cancelled")
+            or state["phase"]
+            in (NotePhase.PUBLISHED, NotePhase.FAILED, NotePhase.CANCELLED)
         ):
             return
         session = self.ctx.streams.get_session(sid)
@@ -581,10 +788,13 @@ class NotesPipelinePlugin(Plugin):
                 if (
                     existing
                     and existing["input_digest"] != input_digest
-                    and existing["state"] != "running"
+                    and existing["state"] != ChunkState.RUNNING
                 ):
                     existing.update(
-                        state="pending", input_digest=input_digest, error="", end=finish
+                        state=ChunkState.PENDING,
+                        input_digest=input_digest,
+                        error="",
+                        end=finish,
                     )
                 if existing is None:
                     existing = {
@@ -592,28 +802,31 @@ class NotesPipelinePlugin(Plugin):
                         "start": start,
                         "end": finish,
                         "input_digest": input_digest,
-                        "state": "pending",
+                        "state": ChunkState.PENDING,
                         "error": "",
                         "manual_start": manual_start,
                         "manual_end": manual_end,
                     }
                     state["chunks"].append(existing)
                     manual_before = manual_end
-                task = (sid, "chunk", index)
-                if existing["state"] == "pending" and task not in self.queue:
+                task = (sid, NoteTaskKind.CHUNK, index)
+                if existing["state"] == ChunkState.PENDING and task not in self.queue:
                     self.queue.append(task)
         state["source_digest"] = digest(records)
         if (
             final
             and state["finalize_requested"]
-            and all(c["state"] in ("done", "empty", "failed") for c in state["chunks"])
+            and all(
+                c["state"] in (ChunkState.DONE, ChunkState.EMPTY, ChunkState.FAILED)
+                for c in state["chunks"]
+            )
         ):
-            task = (sid, "final", -1)
+            task = (sid, NoteTaskKind.FINAL, -1)
             if (
                 records
                 and task not in self.queue
                 and not any(t["session_id"] == sid for t in self.active.values())
-                and state["phase"] not in ("published", "failed")
+                and state["phase"] not in (NotePhase.PUBLISHED, NotePhase.FAILED)
             ):
                 self.queue.appendleft(task)
         self._save(state)
@@ -638,29 +851,37 @@ class NotesPipelinePlugin(Plugin):
                     state = self._state(sid)
                     if state.get("deleted") or state.get("restart_cancelled"):
                         continue
-                    if kind == "chunk":
-                        state["chunks"][index]["state"] = "running"
-                        state["phase"] = "chunking"
+                    messages = None
+                    if self.continuations.get(sid) == ContinuationStage.QUEUED:
+                        messages = self.writer_messages.pop(sid)
+                        self.continuations[sid] = ContinuationStage.STARTING
+                    if kind == NoteTaskKind.CHUNK:
+                        state["chunks"][index]["state"] = ChunkState.RUNNING
+                        state["phase"] = NotePhase.CHUNKING
                     else:
-                        state["phase"] = "writing"
+                        state["phase"] = NotePhase.WRITING
                     self.active[token] = {
                         "id": token,
                         "session_id": sid,
-                        "phase": "chunking" if kind == "chunk" else "writing",
+                        "phase": NotePhase.CHUNKING
+                        if kind == NoteTaskKind.CHUNK
+                        else NotePhase.WRITING,
                         "chunk": index,
                         "started": time.monotonic(),
                         "agent_step": 0,
                     }
                     records = collect_material(self.ctx, sid)
-                    self.pool.submit(self._execute, token, sid, kind, index, records)
+                    self.pool.submit(
+                        self._execute, token, sid, kind, index, records, messages
+                    )
                 self.condition.wait(0.1)
 
-    def _execute(self, token, sid, kind, index, records):
+    def _execute(self, token, sid, kind, index, records, messages=None):
         try:
-            if kind == "chunk":
+            if kind == NoteTaskKind.CHUNK:
                 self._chunk(sid, index, records)
             else:
-                self._final(sid, records)
+                self._final(sid, records, messages)
         except Exception as exc:
             with self.condition:
                 if self._state(sid).get("deleted") or self._state(sid).get(
@@ -668,30 +889,37 @@ class NotesPipelinePlugin(Plugin):
                 ):
                     return
                 if self.closed:
-                    if kind == "chunk":
-                        self._state(sid)["chunks"][index]["state"] = "pending"
+                    if kind == NoteTaskKind.CHUNK:
+                        self._state(sid)["chunks"][index]["state"] = ChunkState.PENDING
                     self._save(self._state(sid))
                     return
                 state = self._state(sid)
                 state["errors"].append({"chunk": index, "error": str(exc)})
-                if kind == "chunk":
-                    state["chunks"][index].update(state="failed", error=str(exc))
+                if kind == NoteTaskKind.CHUNK:
+                    state["chunks"][index].update(
+                        state=ChunkState.FAILED, error=str(exc)
+                    )
                 else:
                     state["error"] = str(exc)
-                    state["phase"] = "failed"
+                    state["phase"] = NotePhase.FAILED
                 self._save(state)
         finally:
             with self.condition:
                 self.active.pop(token, None)
+                if kind == NoteTaskKind.FINAL:
+                    self.writer_messages.pop(sid, None)
+                    self.continuations.pop(sid, None)
                 self.condition.notify_all()
 
     @staticmethod
-    def _execution_agent(key, role, label, model=""):
+    def _execution_agent(key, role: ExecutionRole, label, model="", *, session_id=""):
         return {
             "id": key,
-            "role": role,
+            "session_id": session_id,
+            "role": ExecutionRole(role),
             "label": label,
-            "status": "running",
+            "status": ExecutionStatus.RUNNING,
+            "review_status": ReviewStatus.NOT_REVIEWED,
             "model": model,
             "thinking": "",
             "context_tokens": 0,
@@ -705,16 +933,49 @@ class NotesPipelinePlugin(Plugin):
 
     @staticmethod
     def _merge_execution_block(agent, block):
+        block = {
+            **block,
+            "kind": ExecutionBlockKind(block["kind"]),
+            "status": ExecutionBlockStatus(block["status"]),
+        }
         for index, existing in enumerate(agent["blocks"]):
             if existing["id"] == block["id"]:
                 agent["blocks"][index] = dict(block)
                 return
         agent["blocks"].append(dict(block))
 
+    def _review_execution_block(self, agent, event, **fields):
+        block = {
+            "id": f"{agent['id']}:review:{event.get('round')}",
+            "kind": ExecutionBlockKind.REVIEW,
+            "round": event.get("round"),
+            **fields,
+        }
+        source_ids = set(event.get("block_ids") or ())
+        blocks = []
+        inserted = False
+        for existing in agent["blocks"]:
+            if existing["id"] in source_ids:
+                if not inserted:
+                    blocks.append(block)
+                    inserted = True
+            else:
+                blocks.append(existing)
+        agent["blocks"] = blocks
+        self._merge_execution_block(agent, block)
+
     def _agent_event(self, event):
         with self.condition:
             task = self.agent_tasks.get(str(event.get("session_id", "")))
             if task is None:
+                return
+            if event.type == AgentEventType.RUN_READY:
+                if (
+                    task.get("ready")
+                    and self.continuations.get(task["session_id"])
+                    == ContinuationStage.STARTING
+                ):
+                    self.continuations[task["session_id"]] = ContinuationStage.LIVE
                 return
             task["agent_step"] = int(event.get("step", task.get("agent_step", 0)))
             agents = task["agents"]
@@ -724,54 +985,69 @@ class NotesPipelinePlugin(Plugin):
             if key not in agents:
                 agents[key] = self._execution_agent(
                     key,
-                    event.get("role") if reviewer else "main",
+                    ExecutionRole.REVIEWER if reviewer else ExecutionRole.WRITER,
                     {
-                        "note_review": "笔记审阅",
+                        AgentRole.NOTE_REVIEW: "笔记审阅",
                     }.get(event.get("role"), task.get("label", "主写作")),
+                    session_id=str(reviewer or event.get("session_id", "")),
                 )
             agent = agents[key]
             now = time.monotonic()
-            if name == "agent.execution":
+            if name == AgentEventType.EXECUTION:
                 agent.update(event.get("metrics") or {})
                 if event.get("block") is not None:
                     self._merge_execution_block(agent, event.get("block"))
-            elif name == "agent.file":
+            elif name == AgentEventType.FILE:
                 for child in agents.values():
-                    if child["status"] in ("passed", "needs_revision"):
-                        child["status"] = "stale"
-            elif name == "finished":
-                report = json.loads(event.get("content"))
-                agent["status"] = (
-                    "passed"
-                    if report["overall_correctness"] == "correct"
-                    else "needs_revision"
-                )
-                self._merge_execution_block(
+                    child["review_status"] = ReviewStatus.NOT_REVIEWED
+            elif name == ReviewerEventType.STARTED:
+                agent["status"] = ExecutionStatus.RUNNING
+            elif name == ReviewerEventType.FINISHED:
+                try:
+                    report = json.loads(event.get("content"))
+                    if not isinstance(report["correct"], bool):
+                        raise ValueError("Review correctness must be a boolean")
+                except (KeyError, ValueError, TypeError) as exc:
+                    agent["status"] = ExecutionStatus.FAILED
+                    agent["review_status"] = ReviewStatus.FAILED
+                    self._review_execution_block(
+                        agent,
+                        event,
+                        text=event.get("content"),
+                        error=f"Invalid review report: {exc}",
+                        status=ExecutionBlockStatus.FAILED,
+                    )
+                else:
+                    agent["status"] = ExecutionStatus.COMPLETED
+                    agent["review_status"] = (
+                        ReviewStatus.NOT_REVIEWED
+                        if event.get("stale")
+                        else ReviewStatus.PASSED
+                        if report["correct"]
+                        else ReviewStatus.FAILED
+                    )
+                    self._review_execution_block(
+                        agent,
+                        event,
+                        text=event.get("content"),
+                        report=report,
+                        status=ExecutionBlockStatus.COMPLETED,
+                    )
+            elif name == ReviewerEventType.FAILED:
+                agent["status"] = ExecutionStatus.FAILED
+                agent["review_status"] = ReviewStatus.FAILED
+                self._review_execution_block(
                     agent,
-                    {
-                        "id": f"{key}:review",
-                        "kind": "review",
-                        "text": event.get("content"),
-                        "report": report,
-                        "status": "completed",
-                    },
-                )
-            elif name == "failed":
-                agent["status"] = "failed"
-                self._merge_execution_block(
-                    agent,
-                    {
-                        "id": f"{key}:review",
-                        "kind": "review",
-                        "text": str(event.get("error", "审阅失败")),
-                        "status": "failed",
-                    },
+                    event,
+                    text=event.get("content", ""),
+                    error=str(event.get("error", "审阅失败")),
+                    status=ExecutionBlockStatus.FAILED,
                 )
             refresh = now - task.get("last_refresh", 0) >= 1 or name in (
-                "started",
-                "finished",
-                "failed",
-                "agent.file",
+                ReviewerEventType.STARTED,
+                ReviewerEventType.FINISHED,
+                ReviewerEventType.FAILED,
+                AgentEventType.FILE,
             )
             if refresh:
                 task["last_refresh"] = now
@@ -823,11 +1099,24 @@ class NotesPipelinePlugin(Plugin):
             + "\n"
         )
 
-    def _agent_run(self, sid, session_id, instruction):
+    def _agent_run(
+        self, sid, session_id, instruction, *, follow_ups=(), contextualize=True
+    ):
         with self._agent_slot(sid):
             session = self.agent.get_session(session_id)
             with self.condition:
                 self._check_running(sid)
+                history = self._state(sid).setdefault("last_agent_tasks", [])
+                previous = next(
+                    (
+                        task
+                        for task in history
+                        if task["id"] == f"notes-agent:{session_id}"
+                    ),
+                    None,
+                )
+                if previous is not None:
+                    history.remove(previous)
                 self.agent_tasks[session_id] = {
                     "id": f"notes-agent:{session_id}",
                     "session_id": sid,
@@ -838,45 +1127,87 @@ class NotesPipelinePlugin(Plugin):
                     "agents": {
                         "main": self._execution_agent(
                             "main",
-                            "main"
-                            if session.meta.get("role") == "writer"
-                            else f"chunk:{session_id}",
+                            ExecutionRole.WRITER
+                            if session.meta.get("role") == NoteSessionRole.WRITER
+                            else ExecutionRole.CHUNK_WRITER,
                             session.name,
                             session.model,
+                            session_id=session_id,
                         )
                     },
                 }
+                if previous is not None:
+                    self.agent_tasks[session_id]["agents"]["main"]["blocks"] = list(
+                        previous["agents"]["main"]["blocks"]
+                    )
+                    self.agent_tasks[session_id]["agents"].update(
+                        {
+                            key: value
+                            for key, value in previous["agents"].items()
+                            if key != "main"
+                        }
+                    )
 
             def on_event(event):
-                if event.type == "agent.file":
+                if event.type == AgentEventType.RUN_READY:
+                    with self.condition:
+                        self.agent_tasks[session_id]["ready"] = True
+                if event.type in (
+                    AgentEventType.EXECUTION,
+                    AgentEventType.FILE,
+                    AgentEventType.REVIEWER,
+                    AgentEventType.RUN_READY,
+                ):
+                    self._agent_event(
+                        Event(
+                            event.type,
+                            {
+                                "session_id": session_id,
+                                "step": event.step,
+                                **event.data,
+                            },
+                            0,
+                            0,
+                        )
+                    )
+                if event.type == AgentEventType.FILE:
                     with self.condition:
                         self._check_running(sid)
-                        if session.meta.get("role") == "writer":
+                        if session.meta.get("role") == NoteSessionRole.WRITER:
                             self._publish_lecture(sid, session.workspace, draft=True)
                             self.ctx.ui.refresh("notes.preview")
 
             try:
                 result = self.agent.run(
                     session_id,
-                    self._lecture_context(sid) + "\n" + instruction,
+                    self._lecture_context(sid) + "\n" + instruction
+                    if contextualize
+                    else instruction,
+                    follow_ups=follow_ups,
                     on_event=on_event,
                     write_guard=lambda path: publication_lock(
                         self.ctx.data_dir / "sessions" / sid / "notes"
                     ),
                 )
                 with self.condition:
+                    if session.meta.get("role") == NoteSessionRole.WRITER:
+                        self.continuations[sid] = ContinuationStage.FINISHING
                     self._check_running(sid)
                     task = self.agent_tasks[session_id]
                     task["agents"]["main"]["status"] = (
-                        "failed" if result.error else "completed"
+                        ExecutionStatus.FAILED
+                        if result.error
+                        else ExecutionStatus.COMPLETED
                     )
                 return result
             finally:
                 with self.condition:
+                    if session.meta.get("role") == NoteSessionRole.WRITER:
+                        self.continuations[sid] = ContinuationStage.FINISHING
                     task = self.agent_tasks.pop(session_id, None)
                     if task is not None:
-                        if task["agents"]["main"]["status"] == "running":
-                            task["agents"]["main"]["status"] = "failed"
+                        if task["agents"]["main"]["status"] == ExecutionStatus.RUNNING:
+                            task["agents"]["main"]["status"] = ExecutionStatus.FAILED
                         self._state(sid).setdefault("last_agent_tasks", []).append(task)
                     self.condition.notify_all()
 
@@ -885,9 +1216,15 @@ class NotesPipelinePlugin(Plugin):
             name,
             workspace=workspace,
             system_prompt=self.setting("instant-summarize.system_prompt", "") or SYSTEM,
-            role="note_chunk",
-            tools=["read", "grep", "glob", "edit", "write"],
-            meta={"role": "notes", "lecture_session": sid},
+            role=AgentRole.NOTE_CHUNK,
+            tools=[
+                AgentToolName.READ,
+                AgentToolName.GREP,
+                AgentToolName.GLOB,
+                AgentToolName.EDIT,
+                AgentToolName.WRITE,
+            ],
+            meta={"role": NoteSessionRole.NOTES, "lecture_session": sid},
         )
         try:
             result = self._agent_run(sid, session.id, instruction)
@@ -911,7 +1248,7 @@ class NotesPipelinePlugin(Plugin):
         core += manual[chunk.get("manual_start", 0) : chunk.get("manual_end", 0)]
         if not core:
             with self.condition:
-                self._state(sid)["chunks"][index]["state"] = "empty"
+                self._state(sid)["chunks"][index]["state"] = ChunkState.EMPTY
                 self._publish_preview(sid)
                 self._save(self._state(sid))
             return
@@ -925,8 +1262,9 @@ class NotesPipelinePlugin(Plugin):
                 [
                     r
                     for r in records
-                    if r["stream"] == "visual"
+                    if r["stream"] == StreamKind.VISUAL
                     and float(r.get("start") or 0) < chunk["start"]
+                    and not r.get("error")
                 ]
             ),
             encoding="utf-8",
@@ -951,7 +1289,7 @@ class NotesPipelinePlugin(Plugin):
         self._validate_outputs(root)
         with self.condition:
             self._check_running(sid)
-            self._state(sid)["chunks"][index]["state"] = "done"
+            self._state(sid)["chunks"][index]["state"] = ChunkState.DONE
             self._publish_preview(sid)
             self._save(self._state(sid))
 
@@ -978,7 +1316,7 @@ class NotesPipelinePlugin(Plugin):
         state = self._state(sid)
         chunks = []
         for chunk in sorted(state["chunks"], key=lambda c: c["index"]):
-            if chunk["state"] not in ("done", "empty"):
+            if chunk["state"] not in (ChunkState.DONE, ChunkState.EMPTY):
                 break
             chunks.append(chunk)
         notes = self.ctx.data_dir / "sessions" / sid / "notes"
@@ -1052,7 +1390,7 @@ class NotesPipelinePlugin(Plugin):
             temporary.write_bytes(workspace.path(SOURCE_FILENAME).read_bytes())
             os.replace(temporary, source)
 
-    def _final(self, sid, records):
+    def _prepare_writer(self, sid, records):
         with self.condition:
             self._check_running(sid)
         generation = digest(records)
@@ -1069,7 +1407,7 @@ class NotesPipelinePlugin(Plugin):
         files = {SOURCE_FILENAME: source}
         index_lines = []
         for chunk in self._state(sid)["chunks"]:
-            if chunk["state"] != "done":
+            if chunk["state"] != ChunkState.DONE:
                 index_lines.append(
                     f"Chunk {chunk['index']}: {chunk['state']} {chunk['error']}"
                 )
@@ -1104,23 +1442,102 @@ class NotesPipelinePlugin(Plugin):
             "maxRounds": int(self.setting("summarize.review_max_rounds", 0)),
         }
         writer = self.agent.create_session(
-            f"{sid} 整课写作",
+            f"{sid} 笔记写作",
             workspace=workspace,
             system_prompt=self.setting("summarize.system_prompt", "") or SYSTEM,
-            role="note_writer",
-            tools=["read", "grep", "glob", "edit", "write"],
+            role=AgentRole.NOTE_WRITER,
+            tools=[
+                AgentToolName.READ,
+                AgentToolName.GREP,
+                AgentToolName.GLOB,
+                AgentToolName.EDIT,
+                AgentToolName.WRITE,
+            ],
             meta={
-                "role": "writer",
+                "role": NoteSessionRole.WRITER,
                 "lecture_session": sid,
                 **({"review": review} if review_enabled else {}),
             },
         )
-        review_status = "passed" if review_enabled else "disabled"
-        try:
+        with self.condition:
+            state = self._state(sid)
+            state["writer"] = {
+                "session_id": writer.id,
+                "directory": str(directory.relative_to(self._directory(sid))),
+                "name": writer.name,
+                "system_prompt": self.setting("summarize.system_prompt", "") or SYSTEM,
+                "role": AgentRole.NOTE_WRITER,
+                "tools": [
+                    AgentToolName.READ,
+                    AgentToolName.GREP,
+                    AgentToolName.GLOB,
+                    AgentToolName.EDIT,
+                    AgentToolName.WRITE,
+                ],
+                "files": {
+                    name: str(path.relative_to(self._directory(sid)))
+                    for name, path in files.items()
+                },
+                "readonly": readonly,
+                "review": review if review_enabled else None,
+            }
+            self.continuations[sid] = ContinuationStage.STARTING
+            self._save(state)
+        return writer, workspace, directory, review_enabled
+
+    def _final(self, sid, records, messages=None):
+        if messages is None:
+            writer, workspace, directory, review_enabled = self._prepare_writer(
+                sid, records
+            )
             instruction = WRITER
-            if review_enabled:
+        else:
+            with self.condition:
+                self._check_running(sid)
+                saved = dict(self._state(sid)["writer"])
+                files = self._writer_inputs(sid, saved)
+                notes = self.ctx.data_dir / "sessions" / sid / "notes"
+                with publication_lock(notes):
+                    for name in NOTE_HEADERS:
+                        files[name].write_text(
+                            strip_blocks((notes / name).read_text(encoding="utf-8")),
+                            encoding="utf-8",
+                        )
+            workspace = FileWorkspace(files, readonly=saved["readonly"])
+            review = dict(saved["review"]) if saved["review"] else None
+            writer = self.agent.reopen(
+                saved["session_id"],
+                name=saved["name"],
+                workspace=workspace,
+                system_prompt=saved["system_prompt"],
+                role=saved["role"],
+                tools=saved["tools"],
+                meta={
+                    "role": NoteSessionRole.WRITER,
+                    "lecture_session": sid,
+                    **({"review": review} if review else {}),
+                },
+            )
+            directory = self._directory(sid) / saved["directory"]
+            review_enabled = review is not None
+            instruction = messages[0]
+        try:
+            if messages is None and review_enabled:
                 instruction += "\n保存文稿后调用 review_notes．核对审阅依据后修订，每次修改后必须再次调用，直到审阅通过．"
-            result = self._agent_run(sid, writer.id, instruction)
+            result = self._agent_run(
+                sid,
+                writer.id,
+                instruction,
+                follow_ups=messages[1:] if messages is not None else (),
+                contextualize=messages is None,
+            )
+            review_status = (
+                ReviewStatus(
+                    getattr(result, "review_status", ReviewStatus.NOT_REVIEWED)
+                )
+                if review_enabled
+                else ReviewStatus.PASSED
+            )
             if result.error:
                 raise RuntimeError(result.error)
             self._validate_outputs(directory)
@@ -1129,7 +1546,7 @@ class NotesPipelinePlugin(Plugin):
                 self._check_running(sid)
                 state = self._state(sid)
                 state.update(
-                    phase="published",
+                    phase=NotePhase.PUBLISHED,
                     review_status=review_status,
                     finalize_requested=False,
                 )
@@ -1142,8 +1559,12 @@ class NotesPipelinePlugin(Plugin):
         with self.condition:
             self.closed = True
             self.queue.clear()
-            for session_id in tuple(self.agent_tasks):
-                self.agent.cancel(session_id)
+            self.writer_messages.clear()
+            self.continuations.clear()
+            running = tuple(self.agent_tasks)
             self.condition.notify_all()
+        self.ctx.ui.unregister_action("notes-pipeline.message")
+        for session_id in running:
+            self.agent.cancel(session_id)
         self.coordinator.join()
         self.pool.shutdown(wait=True, cancel_futures=True)

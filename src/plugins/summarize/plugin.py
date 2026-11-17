@@ -1,22 +1,37 @@
-"""Control reviewed lecture notes and recording gap collection."""
-
 import json
 import threading
+from enum import StrEnum
 from core.plugin import Plugin
-from core.settings_spec import SettingsSpec
+from core.ui import BlockType, FormInputType, Side
+from core.settings_spec import SettingsSpec, SettingType
+from plugins.notes_pipeline.types import GenerationState, NoteKind, NotePublication
+
+
+class OnStopAction(StrEnum):
+    DIRECT = "direct"
+    FILL = "fill"
+    SKIP = "skip"
 
 
 def note_log_blocks(state):
     agents = [agent for task in state["tasks"] for agent in task["agents"].values()]
     blocks = (
-        [{"type": "agent_activity", "id": state["session_id"], "agents": agents}]
+        [
+            {
+                "type": BlockType.AGENT_ACTIVITY,
+                "id": state["session_id"],
+                "agents": agents,
+                "send_action": "notes-pipeline.message",
+                "send_values": {"session_id": state["session_id"]},
+            }
+        ]
         if agents
         else []
     )
     if state["error"]:
         blocks.append(
             {
-                "type": "text",
+                "type": BlockType.TEXT,
                 "text": f"笔记生成失败：{state['error']}．删除笔记后可重新生成．",
             }
         )
@@ -33,7 +48,7 @@ def note_log_blocks(state):
         entry = (location, message)
         if entry not in seen:
             seen.add(entry)
-            blocks.append({"type": "text", "text": f"{location}：{message}"})
+            blocks.append({"type": BlockType.TEXT, "text": f"{location}：{message}"})
     return blocks
 
 
@@ -44,7 +59,7 @@ class SummarizeService:
     @property
     def busy(self):
         state = self.plugin.pipeline.status()
-        return state["generation_state"] == "generating"
+        return state["generation_state"] == GenerationState.GENERATING
 
     def start(self, session_id=""):
         return self.plugin.pipeline.start(session_id)
@@ -53,12 +68,12 @@ class SummarizeService:
         return self.plugin.pipeline.source_path(session_id)
 
     def note_files(self):
-        return self.plugin.pipeline.note_files("final")
+        return self.plugin.pipeline.note_files(NotePublication.FINAL)
 
     def running_tasks(self):
         return self.plugin.pipeline.running_tasks()
 
-    def open_notes(self, session_id, doc="knowledge"):
+    def open_notes(self, session_id, doc: NoteKind = NoteKind.KNOWLEDGE):
         return self.plugin._read({"session_id": session_id, "doc": doc})
 
     def open_logs(self, session_id):
@@ -71,9 +86,9 @@ class SummarizePlugin(Plugin):
     optional_requires = ("input",)
     provides = ("summarize",)
     ON_STOP_LABELS = (
-        ("direct", "直接生成笔记"),
-        ("fill", "先补全再生成"),
-        ("skip", "不自动生成笔记"),
+        (OnStopAction.DIRECT, "直接生成笔记"),
+        (OnStopAction.FILL, "先补全再生成"),
+        (OnStopAction.SKIP, "不自动生成笔记"),
     )
 
     def setup(self, ctx):
@@ -85,8 +100,8 @@ class SummarizePlugin(Plugin):
         self.fill_threads = []
         self.log_pages = set()
         for key, default, kind in (
-            ("fill_wait_minutes", 20, "int"),
-            ("fill_max_attempts", 6, "int"),
+            ("fill_wait_minutes", 20, SettingType.INT),
+            ("fill_max_attempts", 6, SettingType.INT),
         ):
             self.settings.register(
                 SettingsSpec(
@@ -101,8 +116,8 @@ class SummarizePlugin(Plugin):
         self.settings.register(
             SettingsSpec(
                 key="summarize.on_stop",
-                default="direct",
-                type="select",
+                default=OnStopAction.DIRECT,
+                type=SettingType.SELECT,
                 label="课后处理",
                 options=list(self.ON_STOP_LABELS),
                 group="Summarize",
@@ -111,7 +126,7 @@ class SummarizePlugin(Plugin):
         )
         ctx.register_service(self.id, SummarizeService(self))
         if not ctx.ui.has_tab("note"):
-            ctx.ui.add_tab("right", "note", "笔记", order=20, plugin_id=self.id)
+            ctx.ui.add_tab(Side.RIGHT, "note", "笔记", order=20, plugin_id=self.id)
         ctx.ui.add_toolbox_item(
             "note",
             "summarize.notes",
@@ -136,15 +151,15 @@ class SummarizePlugin(Plugin):
         sid = self.ctx.streams.notes_session_id
         state = self.pipeline.status(sid)["generation_state"]
         state_label = {
-            "not_started": "未开始",
-            "generating": "正在生成",
-            "finished": "生成结束",
+            GenerationState.NOT_STARTED: "未开始",
+            GenerationState.GENERATING: "正在生成",
+            GenerationState.FINISHED: "生成结束",
         }[state]
         blocks = []
         blocks.extend(
             [
                 {
-                    "type": "buttons",
+                    "type": BlockType.BUTTONS,
                     "buttons": [
                         {
                             "label": "打开笔记",
@@ -156,39 +171,43 @@ class SummarizePlugin(Plugin):
                         },
                     ],
                 },
-                {"type": "keyvalue", "items": [["笔记状态", state_label]]},
+                {"type": BlockType.KEYVALUE, "items": [["笔记状态", state_label]]},
                 {
-                    "type": "buttons",
+                    "type": BlockType.BUTTONS,
                     "buttons": [
                         {
                             "label": "生成笔记",
                             "action": "summarize.generate",
-                            "disabled": state != "not_started",
+                            "disabled": state != GenerationState.NOT_STARTED,
                         },
                         {
                             "label": "停止生成",
                             "action": "summarize.stop",
-                            "disabled": state != "generating",
+                            "disabled": state != GenerationState.GENERATING,
                         },
                         {
                             "label": "删除笔记",
                             "action": "summarize.delete",
-                            "disabled": state != "finished",
+                            "disabled": state != GenerationState.FINISHED,
                         },
                     ],
                 },
                 {
-                    "type": "form",
+                    "type": BlockType.FORM,
                     "fields": [
                         {
                             "name": "mode",
                             "label": "课后处理",
-                            "type": "select",
+                            "type": FormInputType.SELECT,
                             "options": [
                                 {"value": key, "label": label}
                                 for key, label in self.ON_STOP_LABELS
                             ],
-                            "value": self.settings.get("summarize.on_stop", "direct"),
+                            "value": OnStopAction(
+                                self.settings.get(
+                                    "summarize.on_stop", OnStopAction.DIRECT
+                                )
+                            ),
                         }
                     ],
                     "submit": {"label": "保存", "action": "summarize.set_mode"},
@@ -196,7 +215,7 @@ class SummarizePlugin(Plugin):
             ]
         )
         if sid in self.notices:
-            blocks.insert(1, {"type": "text", "text": self.notices[sid]})
+            blocks.insert(1, {"type": BlockType.TEXT, "text": self.notices[sid]})
         return blocks
 
     def _delete(self, payload):
@@ -235,12 +254,14 @@ class SummarizePlugin(Plugin):
                 "label": label,
                 "path": str(self.ctx.data_dir / "sessions" / sid / "notes" / name),
             }
-            for key, (name, label) in self.pipeline.note_files("final").items()
+            for key, (name, label) in self.pipeline.note_files(
+                NotePublication.FINAL
+            ).items()
         ]
         page = self.ctx.require("reader").show(
             title="笔记",
             docs=docs,
-            active=str(payload.get("doc", "knowledge")),
+            active=NoteKind(payload.get("doc", NoteKind.KNOWLEDGE)),
             page_key=f"{sid}:summarize",
             owner=self.id,
         )
@@ -265,14 +286,15 @@ class SummarizePlugin(Plugin):
         blocks = note_log_blocks(self.pipeline.status(sid))
         return blocks or [
             {
-                "type": "text",
+                "type": BlockType.TEXT,
                 "text": "还没有 Agent 日志．生成笔记后，日志会显示在这里．",
             }
         ]
 
     def _set_mode(self, payload):
-        mode = str(payload.get("mode", ""))
-        if mode not in dict(self.ON_STOP_LABELS):
+        try:
+            mode = OnStopAction(payload.get("mode"))
+        except ValueError:
             return {"ok": False, "message": "未知的课后处理方式"}
         self.settings.set("summarize.on_stop", mode)
         return {"ok": True, "refresh": True}
@@ -297,10 +319,10 @@ class SummarizePlugin(Plugin):
         if meta.get("fill_for"):
             self.pipeline.finalize(str(meta["fill_for"]))
             return
-        mode = self.settings.get("summarize.on_stop", "direct")
-        if mode == "direct":
+        mode = OnStopAction(self.settings.get("summarize.on_stop", OnStopAction.DIRECT))
+        if mode == OnStopAction.DIRECT:
             self.pipeline.finalize(sid)
-        elif mode == "fill":
+        elif mode == OnStopAction.FILL:
             self._request_fill(sid)
 
     def _fill_again(self, payload):

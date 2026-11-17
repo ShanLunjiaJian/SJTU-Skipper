@@ -1,6 +1,6 @@
-"""Display incremental notes from the shared pipeline."""
-
 from core.plugin import Plugin
+from core.ui import BlockType, Side
+from plugins.notes_pipeline.types import NoteKind, NotePublication
 
 
 class InstantSummarizeService:
@@ -11,7 +11,7 @@ class InstantSummarizeService:
         return self.pipeline.draft_paths(session_id)
 
     def note_files(self):
-        return self.pipeline.note_files("instant")
+        return self.pipeline.note_files(NotePublication.INSTANT)
 
     def running_tasks(self):
         return self.pipeline.running_tasks()
@@ -28,7 +28,7 @@ class InstantSummarizePlugin(Plugin):
         self.pipeline = ctx.require("notes-pipeline")
         ctx.register_service(self.id, InstantSummarizeService(self.pipeline))
         if not ctx.ui.has_tab("note"):
-            ctx.ui.add_tab("right", "note", "笔记", order=20, plugin_id=self.id)
+            ctx.ui.add_tab(Side.RIGHT, "note", "笔记", order=20, plugin_id=self.id)
         ctx.ui.add_toolbox_item(
             "note",
             "instant-summarize.notes",
@@ -46,17 +46,17 @@ class InstantSummarizePlugin(Plugin):
         status = self.pipeline.status()
         return [
             {
-                "type": "switch",
+                "type": BlockType.SWITCH,
                 "label": "分段笔记",
                 "checked": bool(self.settings.get("instant-summarize.enabled", True)),
                 "action": "instant-summarize.toggle",
             },
             {
-                "type": "text",
+                "type": BlockType.TEXT,
                 "text": f"已发布至 {status['published_end']:.0f} 秒；缺口 {len(status['errors'])} 项",
             },
             {
-                "type": "buttons",
+                "type": BlockType.BUTTONS,
                 "buttons": [
                     {
                         "label": "打开分段笔记",
@@ -82,12 +82,14 @@ class InstantSummarizePlugin(Plugin):
                 "label": label,
                 "path": str(self.ctx.data_dir / "sessions" / sid / "notes" / name),
             }
-            for key, (name, label) in self.pipeline.note_files("instant").items()
+            for key, (name, label) in self.pipeline.note_files(
+                NotePublication.INSTANT
+            ).items()
         ]
         page = self.ctx.require("reader").show(
             title="分段笔记",
             docs=docs,
-            active=str(payload.get("doc", "knowledge")),
+            active=NoteKind(payload.get("doc", NoteKind.KNOWLEDGE)),
             page_key=f"{sid}:instant-summarize",
             owner=self.id,
         )

@@ -16,7 +16,7 @@ from .events import EventBus
 from .meta import MetaRegistry
 from .services import ServiceRegistry
 from .streams import StreamHub
-from .ui import UIManager
+from .ui import Side, UIManager
 
 
 class PluginError(RuntimeError):
@@ -45,16 +45,7 @@ class Plugin:
         pass
 
 
-# ---------------------------------------------------------------------------
-# Scoped proxies
-#
-# A plugin context hands out *scoped* views of the shared UI / event / meta
-# registries.  They share the manager's state (same ``__dict__``) and only add
-# one thing: a default ``plugin_id``.  A plugin that forgets to pass its id can
-# no longer contribute UI or subscribe to events anonymously, so unloading it
-# leaves nothing behind.  Public methods/attributes are inherited unchanged;
-# nothing private is forwarded through a generic ``__getattr__``.
-# ---------------------------------------------------------------------------
+# Scoped registries share manager state and attach plugin ownership for teardown.
 
 
 class _ScopedUI(UIManager):
@@ -66,7 +57,7 @@ class _ScopedUI(UIManager):
 
     def add_tab(
         self,
-        side: Any,
+        side: Side,
         id: str,
         title: str,
         *,
@@ -264,8 +255,6 @@ def _scoped_meta(meta: Any, plugin_id: str) -> Any:
 
 @dataclass(slots=True)
 class PluginContext:
-    """The only capability surface exposed to a plugin."""
-
     plugin_id: str
     data_dir: Path
     events: EventBus
@@ -278,7 +267,6 @@ class PluginContext:
     # Filled in by the manager from the plugin declaration.  ``None`` disables
     # the DAG boundary check (used by unit tests that build a context by hand).
     allowed_dependencies: set[str] | None = None
-    # Services the plugin promised to register (``Plugin.provides``).
     declared_provides: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -292,8 +280,6 @@ class PluginContext:
             and not isinstance(self.services, _ScopedServices)
         ):
             self.services = _ScopedServices(self.services, self)
-
-    # -- capability access ---------------------------------------------
 
     def _check_access(self, name: str) -> None:
         allowed = self.allowed_dependencies
@@ -342,11 +328,6 @@ class PluginContext:
 
 
 ContextFactory = Callable[[str], PluginContext]
-
-
-# ---------------------------------------------------------------------------
-# Dynamic plugin specs
-# ---------------------------------------------------------------------------
 
 
 def _plugin_classes(module: Any) -> list[type[Plugin]]:
@@ -462,11 +443,6 @@ def resolve_plugin_spec(
     return _instantiate(classes[0], module_name), text
 
 
-# ---------------------------------------------------------------------------
-# Manager
-# ---------------------------------------------------------------------------
-
-
 class PluginManager:
     """Topologically loads plugins declared with ``requires``."""
 
@@ -492,7 +468,6 @@ class PluginManager:
         self._loaded: list[str] = []
         self._lock = threading.RLock()
 
-    # -- registration ---------------------------------------------------
     def register(
         self,
         plugin: Plugin | type[Plugin],
@@ -516,7 +491,6 @@ class PluginManager:
         for plugin in plugins:
             self.register(plugin)
 
-    # -- context --------------------------------------------------------
     def _make_context(self, plugin: Plugin) -> PluginContext:
         ctx = self._context_factory(plugin.id)
         if getattr(ctx, "allowed_dependencies", None) is None:
@@ -529,7 +503,6 @@ class PluginManager:
             ctx.declared_provides = tuple(plugin.provides)
         return ctx
 
-    # -- ordering -------------------------------------------------------
     @staticmethod
     def _predecessors(plugin: Plugin, plugins: dict[str, Plugin]) -> list[str]:
         """Hard dependencies plus *registered* optional ones."""
@@ -616,7 +589,6 @@ class PluginManager:
     def origin(self, plugin_id: str) -> str | None:
         return self._origins.get(plugin_id)
 
-    # -- loading --------------------------------------------------------
     def load(self) -> list[str]:
         order = self._sort()
         with self._lock:

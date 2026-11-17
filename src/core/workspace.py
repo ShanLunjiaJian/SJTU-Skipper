@@ -11,8 +11,6 @@ from core.file_access import path_lock
 
 
 class FileWorkspace:
-    """Map authorized names to files without implementing model tools."""
-
     def __init__(
         self,
         files: Mapping[str, str | Path] | None = None,

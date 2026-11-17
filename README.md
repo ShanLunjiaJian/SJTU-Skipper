@@ -56,7 +56,7 @@ devShell 提供 Python、Bun、uv、ffmpeg 和动态库路径．非 Nix 系统�
 LLM 配置保存在 `data/agent/llm_runtime/models.yml` 和 `roles.yml`．设置页检查两份 YAML 后保存．配置变更只影响随后创建的模型会话．
 
 - `models.yml` 使用 OMP `providers` 结构．提供方配置 `baseUrl`、`api`、鉴权和 headers，模型配置输入能力、上下文限制与思考能力．`api` 接受已安装 OMP SDK 支持的协议，包括 `openai-completions` 和 `openai-responses`．
-- `roles.yml` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、整课写作、审阅、修订、问答与上下文压缩．未填写的角色继承 `default`．
+- `roles.yml` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、笔记写作、审阅、修订、问答与上下文压缩．未填写的角色继承 `default`．
 - 板书角色 `board_recognition` 必须选择支持图像输入的模型．无效选择器、角色循环或不支持的思考级别会阻止保存．
 - 默认模型为 `deepseek-flash`．省略 `maxTokens` 时继承 OMP 模型能力信息；显式填写时使用配置值．
 - 提供方凭据由项目 OMP `AuthStorage` 管理，保存在 `data/agent/llm_runtime/credentials.db`．API key 与 OpenCode OAuth 凭据分别保存，设置页只显示配置状态．无鉴权服务设置 `auth: none`．
@@ -93,15 +93,19 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 | stt | `stt` | 兼容 HTTP/WebSocket STT 服务，支持流式临时文字、定稿及课程上下文 |
 | vlm | `vlm` | 视频流 -> 融合板书 -> 文字流 |
 | llm-agent | `llm-agent` | SDK 多会话助手，原生 read/grep/glob/edit/write，流式事件与文件授权 |
-| notes-pipeline | `notes-pipeline` | 按来源完成位置整理片段，整课统稿后审阅，通过后发布笔记 |
+| notes-pipeline | `notes-pipeline` | 按来源完成位置整理片段，汇总文稿后审阅，通过后发布笔记 |
 | summarize | `summarize` | 笔记页面与课后 direct/fill/skip 策略 |
 | ask | `ask` | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存 |
-| reader | `reader` | 通用 Markdown 阅读页（每门课一页），持有选中菜单与内联问答块 |
+| reader | `reader` | 通用 Markdown 阅读页（每门课程一页），持有选中菜单与内联问答块 |
 | instant-summarize | `instant-summarize` | 分段笔记页面与预览开关，直播和录播均可使用 |
 
 分段核心区间由 `notes.chunk_seconds` 设置，`notes.overlap_seconds` 提供左侧原文上下文．重叠原文不重复计入正文．`notes.concurrency` 限制笔记 agent 并发数．分段预览标为未审阅；`note_review` 统一检查完整笔记的来源覆盖与正确性．
 
 写作者每次 `edit` 或 `write` 成功后，应用在发布锁内更新预览．浏览器可在生成期间阅读已保存文稿．审阅者读取锁保护的固定快照．来源始终只读，完整来源在上下文压缩后仍可重新读取．
+
+日志页和问答执行区可向选中的 Agent 发送多行消息．Enter 换行，Shift+Enter 或 Ctrl+Enter 发送．消息中断目标的模型回合或工具等待，再在同一任务中继续．中断主写作不会取消独立审阅；旧输入的审阅结果不能批准修改后的笔记．
+
+完成的分段、审阅和问答不接受消息．完成的主写作可恢复原会话，读取已发布正文，再执行最终写作、审阅和发布．恢复启动和发布清理期间拒绝发送，并保留输入草稿．日志更新和页面切换保留草稿、选区及输入位置．
 
 ## 目录
 

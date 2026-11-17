@@ -1,6 +1,8 @@
-"""Consumer contracts for the replaceable STT service."""
-
 from __future__ import annotations
+
+from core.media import MediaKind, ProcessingMode
+from core.streams import StreamKind
+from plugins.stt.client import SttEventType
 
 import json
 import logging
@@ -76,7 +78,11 @@ class Stream:
         self.samples = 0
         self.frames: list[bytes] = []
         self.fail = fail
-        self.metadata = {"type": "ready", "model": "test-model", "language": "Chinese"}
+        self.metadata = {
+            "type": SttEventType.READY,
+            "model": "test-model",
+            "language": "Chinese",
+        }
         self.finished = False
 
     def reset(self, offset_ms: int) -> None:
@@ -86,10 +92,10 @@ class Stream:
         self.frames.append(pcm)
         self.samples += len(pcm) // 2
         end = self.offset + self.samples // 16
-        self.events.put({"type": "accepted", "received_ms": end})
+        self.events.put({"type": SttEventType.ACCEPTED, "received_ms": end})
         self.events.put(
             {
-                "type": "partial",
+                "type": SttEventType.PARTIAL,
                 "segment_id": 0,
                 "revision": len(self.frames),
                 "start_ms": self.offset,
@@ -115,7 +121,7 @@ class Stream:
         end = self.offset + self.samples // 16
         self.events.put(
             {
-                "type": "anomaly",
+                "type": SttEventType.ANOMALY,
                 "segment_id": 0,
                 "start_ms": self.offset,
                 "end_ms": end,
@@ -124,15 +130,15 @@ class Stream:
         )
         self.events.put(
             {
-                "type": "final",
+                "type": SttEventType.FINAL,
                 "segment_id": 0,
                 "start_ms": self.offset,
                 "end_ms": end,
                 "text": "定稿",
             }
         )
-        self.events.put({"type": "progress", "processed_ms": end})
-        self.events.put({"type": "done", "processed_ms": end})
+        self.events.put({"type": SttEventType.PROGRESS, "processed_ms": end})
+        self.events.put({"type": SttEventType.DONE, "processed_ms": end})
 
     def close(self) -> None:
         pass
@@ -233,10 +239,15 @@ def test_bounded_structured_retry(status: int, attempts: int) -> None:
 
 
 @pytest.mark.parametrize(
-    "mode,transport", [("live", "live"), ("realtime", "live"), ("fast", "offline")]
+    "mode,offline",
+    [
+        (ProcessingMode.LIVE, False),
+        (ProcessingMode.REALTIME, False),
+        (ProcessingMode.FAST, True),
+    ],
 )
 def test_continuous_stream_and_subsecond_tail(
-    app: Any, monkeypatch: pytest.MonkeyPatch, mode: str, transport: str
+    app: Any, monkeypatch: pytest.MonkeyPatch, mode: ProcessingMode, offline: bool
 ) -> None:
     plugin, ctx = app
     client = Client()
@@ -249,7 +260,7 @@ def test_continuous_stream_and_subsecond_tail(
         {"stt.context": "微积分", "stt.language": "Chinese", "stt.enabled": True}
     )
     wait_until(lambda: len(session.transcript) == 1 and not plugin.busy())
-    assert client.calls[0]["mode"] == transport
+    assert client.calls[0]["offline"] is offline
     assert client.calls[0]["context"] == "微积分"
     assert len(client.streams) == 1
     assert all(len(frame) <= 6400 for frame in client.streams[0].frames)
@@ -276,12 +287,12 @@ def test_accepted_and_partial_do_not_commit_or_trim(
     )
     connection = {"sent": 4.0, "received": 0.0, "processed": 0.0}
     plugin._live_event(
-        session, {"type": "accepted", "received_ms": 4000}, 0, connection
+        session, {"type": SttEventType.ACCEPTED, "received_ms": 4000}, 0, connection
     )
     plugin._live_event(
         session,
         {
-            "type": "partial",
+            "type": SttEventType.PARTIAL,
             "segment_id": 1,
             "revision": 1,
             "text": "临时",
@@ -291,7 +302,7 @@ def test_accepted_and_partial_do_not_commit_or_trim(
         0,
         connection,
     )
-    assert plugin._coverage(session).covered_seconds("audio") == 0
+    assert plugin._coverage(session).covered_seconds(MediaKind.AUDIO) == 0
     assert session.audio.earliest_time == 0
     assert session.audio_gate.released == 0
     assert len(session.transcript) == 0
@@ -307,17 +318,17 @@ def test_exact_coverage_gaps_and_discarded_audio(
     client = Client()
     monkeypatch.setattr(plugin, "_new_client", lambda: client)
     session = ctx.streams.current
-    session.meta["mode"] = "fast"
+    session.meta["mode"] = ProcessingMode.FAST
     session.audio.append(b"\x01\x00" * 16000)
     session.audio.discard(1)
     session.audio.append(b"\x02\x00" * 16000)
-    plugin._coverage(session).mark("audio", 0, 0.25)
+    plugin._coverage(session).mark(MediaKind.AUDIO, 0, 0.25)
     session.meta["skip_ranges"] = {"audio": [[0.5, 0.75]]}
     session.input_done = True
     ctx.service("settings").set("stt.enabled", True)
     wait_until(lambda: not plugin.busy())
     assert [s.offset for s in client.streams] == [250, 750, 2000]
-    assert plugin._coverage(session).coverage("audio").intervals == [
+    assert plugin._coverage(session).coverage(MediaKind.AUDIO).intervals == [
         (0.0, 0.5),
         (0.75, 1.0),
         (2.0, 3.0),
@@ -353,7 +364,13 @@ def test_old_session_event_does_not_write_new_session(app: Any) -> None:
     plugin._cancel.clear()
     plugin._live_event(
         old,
-        {"type": "final", "segment_id": 0, "start_ms": 0, "end_ms": 1000, "text": "旧"},
+        {
+            "type": SttEventType.FINAL,
+            "segment_id": 0,
+            "start_ms": 0,
+            "end_ms": 1000,
+            "text": "旧",
+        },
         0,
         {"sent": 1.0, "received": 1.0, "processed": 0.0},
     )
@@ -369,7 +386,7 @@ def test_failed_range_is_not_successful_coverage(app: Any) -> None:
         {"start": 1, "end": 2, "error": "Rejected."}
     ]
     assert plugin.status()["cursor"] == 0
-    assert plugin._coverage(session).covered_seconds("audio") == 0
+    assert plugin._coverage(session).covered_seconds(MediaKind.AUDIO) == 0
 
 
 def test_manual_http_preserves_log_and_metadata(
@@ -432,9 +449,9 @@ def test_service_reports_tail_as_busy_and_flushing(
     ctx.service("settings").set("stt.enabled", False)
 
 
-@pytest.mark.parametrize("mode", ["live", "offline"])
+@pytest.mark.parametrize("offline", [False, True])
 def test_stream_mode_is_explicit_in_query_and_start(
-    monkeypatch: pytest.MonkeyPatch, mode: str
+    monkeypatch: pytest.MonkeyPatch, offline: bool
 ) -> None:
     sent = []
     urls = []
@@ -444,7 +461,7 @@ def test_stream_mode_is_explicit_in_query_and_start(
             sent.append(json.loads(message))
 
         def recv(self, timeout: float | None = None) -> str:
-            return json.dumps({"type": "ready"})
+            return json.dumps({"type": SttEventType.READY})
 
         def close(self) -> None:
             pass
@@ -456,9 +473,11 @@ def test_stream_mode_is_explicit_in_query_and_start(
     monkeypatch.setattr("plugins.stt.client.connect", connect)
     client = STTClient("http://test")
     try:
-        client.stream(language="Chinese", context="", concurrency=2, mode=mode)
-        assert urls == ["ws://test/v1/stream?mode=" + mode]
-        assert sent[0]["mode"] == mode
+        client.stream(language="Chinese", context="", concurrency=2, offline=offline)
+        assert urls == [
+            "ws://test/v1/stream?mode=" + ("offline" if offline else "live")
+        ]
+        assert sent[0]["mode"] == ("offline" if offline else "live")
     finally:
         client.close()
 
@@ -470,7 +489,7 @@ def test_live_eof_rounding_does_not_reopen_stream(
     client = Client()
     monkeypatch.setattr(plugin, "_new_client", lambda: client)
     session = ctx.streams.current
-    session.meta["mode"] = "realtime"
+    session.meta["mode"] = ProcessingMode.REALTIME
     for _ in range(80):
         session.audio.append(b"\x01\x00" * 3200)
     session.input_done = True
@@ -488,14 +507,21 @@ def test_only_processed_audio_seals(app, monkeypatch):
     monkeypatch.setattr(plugin, "_cancelled", lambda session: False)
     connection = {"sent": 10.0, "received": 0.0, "processed": 0.0}
     plugin._live_event(
-        session, {"type": "accepted", "received_ms": 10000}, 0, connection
+        session, {"type": SttEventType.ACCEPTED, "received_ms": 10000}, 0, connection
     )
-    plugin._live_event(session, {"type": "partial", "text": "draft"}, 0, connection)
-    assert ctx.streams.text_progress(session.session_id, "transcript").before == 0
     plugin._live_event(
-        session, {"type": "progress", "processed_ms": 10000}, 0, connection
+        session, {"type": SttEventType.PARTIAL, "text": "draft"}, 0, connection
     )
-    assert ctx.streams.text_progress(session.session_id, "transcript").before == 10
+    assert (
+        ctx.streams.text_progress(session.session_id, StreamKind.TRANSCRIPT).before == 0
+    )
+    plugin._live_event(
+        session, {"type": SttEventType.PROGRESS, "processed_ms": 10000}, 0, connection
+    )
+    assert (
+        ctx.streams.text_progress(session.session_id, StreamKind.TRANSCRIPT).before
+        == 10
+    )
 
 
 def test_stop_callback_does_not_wait_for_tail(app):

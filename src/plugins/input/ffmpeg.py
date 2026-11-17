@@ -1,5 +1,3 @@
-"""FFmpeg helpers: JPEG frame boundary parser and command builders."""
-
 from __future__ import annotations
 
 import logging
@@ -7,7 +5,6 @@ from typing import Any
 
 _log = logging.getLogger("lecture_agent.plugins.input.ffmpeg")
 
-# JPEG markers
 _SOI = bytes([0xFF, 0xD8])
 _EOI = bytes([0xFF, 0xD9])
 # Any 0xFF marker that is not a restart marker (D0-D7)
@@ -36,16 +33,12 @@ def split_jpeg_frames(data: bytes) -> list[bytes]:
     n = len(data)
 
     while offset < n:
-        # Find next SOI
         soi_pos = data.find(_SOI, offset)
         if soi_pos < 0:
             break
-        # Look for EOI after this SOI
         eoi_pos = data.find(_EOI, soi_pos + 2)
         if eoi_pos < 0:
-            # No EOI found: stop at the incomplete tail.
             break
-        # Valid frame: SOI .. EOI inclusive
         frames.append(data[soi_pos : eoi_pos + 2])
         offset = eoi_pos + 2
 
@@ -112,7 +105,7 @@ def build_audio_cmd(
             "error",
             "-i",
             url,
-            "-vn",  # no video
+            "-vn",
             "-acodec",
             "pcm_s16le",
             "-ar",
@@ -159,7 +152,6 @@ def build_video_cmd(
     _append_http_headers(cmd, headers)
     cmd.extend(["-hide_banner", "-loglevel", "error", "-i", url])
     if live:
-        # Low-latency flags for live FLV streams
         cmd.extend(
             [
                 "-fflags",
@@ -179,7 +171,7 @@ def build_video_cmd(
         video_filter += f",scale={width}:-1"
     cmd.extend(
         [
-            "-an",  # no audio in video sub-process
+            "-an",
             "-vf",
             video_filter,
             "-c:v",

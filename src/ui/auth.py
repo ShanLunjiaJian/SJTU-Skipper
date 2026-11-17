@@ -46,11 +46,6 @@ _MAX_FAILURES = 5
 _LOCKOUT_SECONDS = 300.0
 
 
-# ---------------------------------------------------------------------------
-# Password hashing
-# ---------------------------------------------------------------------------
-
-
 def hash_password(password: str, *, salt: bytes | None = None) -> str:
     """Return ``scrypt$<salt>$<hash>`` for *password*."""
 
@@ -89,14 +84,7 @@ def verify_password(password: str, encoded: str) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
-# ---------------------------------------------------------------------------
-# Store
-# ---------------------------------------------------------------------------
-
-
 class AuthStore:
-    """Users, session signing and login throttling."""
-
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.users: dict[str, str] = {}
@@ -106,7 +94,6 @@ class AuthStore:
         self._failures: dict[str, tuple[int, float]] = {}
         self._load()
 
-    # -- io ------------------------------------------------------------
     def _load(self) -> None:
         raw: dict[str, Any] = {}
         created = False
@@ -167,7 +154,6 @@ class AuthStore:
         except OSError:
             logger.exception("failed to write %s", self.path)
 
-    # -- auth ----------------------------------------------------------
     def verify(self, username: str, password: str, *, key: str = "") -> bool:
         username = (username or "").strip()
         throttle_key = key or username
@@ -192,7 +178,6 @@ class AuthStore:
             _failures, until = self._failures.get(key, (0, 0.0))
             return bool(until) and time.monotonic() < until
 
-    # -- sessions ------------------------------------------------------
     def _sign(self, payload: str) -> str:
         digest = hmac.new(
             self.secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
@@ -224,11 +209,6 @@ class AuthStore:
             return None
         username = str(payload.get("u") or "")
         return username if username in self.users else None
-
-
-# ---------------------------------------------------------------------------
-# HTTP wiring
-# ---------------------------------------------------------------------------
 
 
 _LOGIN_HTML = """<!doctype html>
@@ -302,7 +282,6 @@ def _cookie_secure(request: Request) -> bool:
 
 
 def install(app: Any, data_dir: Path) -> AuthStore:
-    """Gate *app* behind a login form + signed cookie."""
 
     store = AuthStore(Path(data_dir) / "auth.json")
 

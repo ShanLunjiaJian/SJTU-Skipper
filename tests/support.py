@@ -1,8 +1,7 @@
-"""Shared test doubles for runtime and settings services."""
-
 from __future__ import annotations
 
 from typing import Any, Callable, Iterable
+from core.agent_types import IpcMethod, RuntimeFrameType
 
 from core.settings_spec import SettingsSpec
 
@@ -11,11 +10,9 @@ ScriptItem = dict[str, Any] | str | Callable[[dict[str, Any]], dict[str, Any]]
 
 
 class FakeLLM:
-    """Return scripted native generation results."""
-
     def __init__(self, script: Iterable[ScriptItem] | None = None) -> None:
         self.script: list[ScriptItem] = list(script or [])
-        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.calls: list[tuple[IpcMethod, dict[str, Any]]] = []
         self.closed = False
 
     def _next(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -26,39 +23,37 @@ class FakeLLM:
             return {"content": item, "finish_reason": "stop", "model": "fake"}
         return item
 
-    def stream(self, method: str, *, on_sent=None, **params: Any):
+    def stream(self, method: IpcMethod, *, on_sent=None, **params: Any):
         self.calls.append((method, params))
         if on_sent is not None:
             on_sent()
-        if method == "generate":
+        if method == IpcMethod.GENERATE:
             result = self._next(params)
             yield {
-                "type": "event",
+                "type": RuntimeFrameType.EVENT,
                 "name": "llm.delta",
                 "data": {"text": result.get("content", "")},
             }
-        elif method == "info":
+        elif method == IpcMethod.INFO:
             result = {"provider": "fake", "calls": len(self.calls)}
         else:
             result = {}
-        yield {"type": "result", "result": result}
+        yield {"type": RuntimeFrameType.RESULT, "result": result}
 
-    def call(self, method: str, **params: Any) -> dict[str, Any]:
+    def call(self, method: IpcMethod, **params: Any) -> dict[str, Any]:
         for message in self.stream(method, **params):
-            if message["type"] == "result":
+            if message["type"] == RuntimeFrameType.RESULT:
                 return message["result"]
         raise RuntimeError("Fake runtime returned no result")
 
     def cancel(self, session_id: str) -> dict[str, Any]:
-        return self.call("cancel", session_id=session_id)
+        return self.call(IpcMethod.CANCEL, session_id=session_id)
 
     def close(self) -> None:
         self.closed = True
 
 
 class FakeSettings:
-    """Minimal settings service used by plugin tests."""
-
     def __init__(self, values: dict[str, Any] | None = None) -> None:
         self.values = dict(values or {})
         self.specs_map: dict[str, SettingsSpec] = {}

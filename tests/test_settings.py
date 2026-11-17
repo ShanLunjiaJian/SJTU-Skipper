@@ -1,5 +1,3 @@
-"""Tests for the P2 settings plugin (store, service, UI)."""
-
 from __future__ import annotations
 
 import json
@@ -9,8 +7,11 @@ from pathlib import Path
 import pytest
 
 from config import load_config
+from core.agent_types import IpcMethod
+from core.ui import FormInputType
+from plugins.llm_core.plugin import CredentialType, ProviderAuth, ProviderSource
 from core.runtime import build_runtime
-from core.settings_spec import SECRET_MASK, SettingsSpec
+from core.settings_spec import SECRET_MASK, SettingType, SettingsSpec
 from plugins.settings import (
     SettingsPlugin,
     SettingsService,
@@ -21,7 +22,7 @@ GROUPED = [
     SettingsSpec(
         key="llm.model",
         label="模型",
-        type="string",
+        type=SettingType.STRING,
         default="deepseek-flash",
         group="LLM",
         order=1,
@@ -29,7 +30,7 @@ GROUPED = [
     SettingsSpec(
         key="llm.api_key",
         label="API Key",
-        type="secret",
+        type=SettingType.SECRET,
         default="",
         group="LLM",
         order=2,
@@ -38,7 +39,7 @@ GROUPED = [
     SettingsSpec(
         key="input.keep_recordings",
         label="本地保留录像",
-        type="float",
+        type=SettingType.FLOAT,
         default=1.0,
         group="输入",
         order=1,
@@ -61,9 +62,15 @@ def make_runtime(tmp_path: Path):
     return runtime
 
 
-# ----------------------------------------------------------------------
-# Spec / service
-# ----------------------------------------------------------------------
+def test_setting_type_serialization() -> None:
+    spec = SettingsSpec(key="k", label="K", type=SettingType.SECRET)
+    assert spec.type is SettingType.SECRET
+    assert spec.secret
+    assert json.loads(json.dumps({"type": spec.type})) == {"type": "secret"}
+    with pytest.raises(ValueError, match="unsupported setting type"):
+        SettingsSpec(key="k", label="K", type="secret")
+
+
 def test_register_returns_spec_and_get_falls_back_to_default(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     spec = SettingsSpec(key="llm.model", label="模型", default="deepseek-flash")
@@ -73,19 +80,17 @@ def test_register_returns_spec_and_get_falls_back_to_default(tmp_path: Path) -> 
     assert service.get("unknown.key", "fallback") == "fallback"
     assert [s.key for s in service.specs()] == ["llm.model"]
     assert service.get_spec("llm.model") is spec
-    # Defaults must not be persisted before an explicit set().
     assert not (tmp_path / "settings.json").exists()
 
 
 def test_set_persists_atomically_and_reloads(tmp_path: Path) -> None:
     service = make_service(
-        tmp_path, [SettingsSpec(key="a.b", label="B", type="int", default=1)]
+        tmp_path, [SettingsSpec(key="a.b", label="B", type=SettingType.INT, default=1)]
     )
     service.set("a.b", 7)
     path = tmp_path / "settings.json"
     assert json.loads(path.read_text(encoding="utf-8")) == {"a.b": 7}
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    # No temp files left behind (atomic tmp + os.replace).
     assert list(tmp_path.glob(".settings.json.*")) == []
 
     reloaded = SettingsService(SettingsStore(path))
@@ -98,8 +103,8 @@ def test_set_many_is_atomic_on_validation_error(tmp_path: Path) -> None:
     service = make_service(
         tmp_path,
         [
-            SettingsSpec(key="x.n", label="N", type="int", default=0),
-            SettingsSpec(key="x.m", label="M", type="int", default=0),
+            SettingsSpec(key="x.n", label="N", type=SettingType.INT, default=0),
+            SettingsSpec(key="x.m", label="M", type=SettingType.INT, default=0),
         ],
     )
     with pytest.raises(ValueError):
@@ -114,20 +119,20 @@ def test_set_many_is_atomic_on_validation_error(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("spec_type", "default", "raw", "expected"),
     [
-        ("string", "", 12, "12"),
-        ("text", "", None, ""),
-        ("int", 0, "42", 42),
-        ("int", 0, 7.0, 7),
-        ("int", 0, 7.9, ValueError),
-        ("int", 0, "abc", ValueError),
-        ("float", 0.0, "1.5", 1.5),
-        ("float", 0.0, 2, 2.0),
-        ("float", 0.0, "nan", ValueError),
-        ("bool", False, "true", True),
-        ("bool", False, 0, False),
-        ("json", None, '{"a": [1, 2]}', {"a": [1, 2]}),
-        ("json", None, "", None),
-        ("json", None, "{bad", ValueError),
+        (SettingType.STRING, "", 12, "12"),
+        (SettingType.TEXT, "", None, ""),
+        (SettingType.INT, 0, "42", 42),
+        (SettingType.INT, 0, 7.0, 7),
+        (SettingType.INT, 0, 7.9, ValueError),
+        (SettingType.INT, 0, "abc", ValueError),
+        (SettingType.FLOAT, 0.0, "1.5", 1.5),
+        (SettingType.FLOAT, 0.0, 2, 2.0),
+        (SettingType.FLOAT, 0.0, "nan", ValueError),
+        (SettingType.BOOL, False, "true", True),
+        (SettingType.BOOL, False, 0, False),
+        (SettingType.JSON, None, '{"a": [1, 2]}', {"a": [1, 2]}),
+        (SettingType.JSON, None, "", None),
+        (SettingType.JSON, None, "{bad", ValueError),
     ],
 )
 def test_type_conversion(tmp_path: Path, spec_type, default, raw, expected) -> None:
@@ -163,7 +168,8 @@ def test_type_conversion(tmp_path: Path, spec_type, default, raw, expected) -> N
 )
 def test_bool_strings(tmp_path: Path, raw, expected) -> None:
     service = make_service(
-        tmp_path, [SettingsSpec(key="b", label="B", type="bool", default=False)]
+        tmp_path,
+        [SettingsSpec(key="b", label="B", type=SettingType.BOOL, default=False)],
     )
     assert service.set("b", raw) is expected
 
@@ -175,14 +181,14 @@ def test_select_options_and_invalid_value(tmp_path: Path) -> None:
             SettingsSpec(
                 key="s",
                 label="S",
-                type="select",
+                type=SettingType.SELECT,
                 default="a",
                 options=("a", "b"),
             ),
             SettingsSpec(
                 key="n",
                 label="N",
-                type="select",
+                type=SettingType.SELECT,
                 default=1,
                 options=(1, 2),
             ),
@@ -201,7 +207,9 @@ def test_secret_masking_and_internal_value(tmp_path: Path) -> None:
     service = make_service(
         tmp_path,
         [
-            SettingsSpec(key="llm.api_key", label="API Key", type="secret", default=""),
+            SettingsSpec(
+                key="llm.api_key", label="API Key", type=SettingType.SECRET, default=""
+            ),
             SettingsSpec(key="llm.model", label="模型", default="m"),
         ],
     )
@@ -219,13 +227,16 @@ def test_secret_masking_and_internal_value(tmp_path: Path) -> None:
 def test_set_many_keeps_secret_when_empty_or_masked(tmp_path: Path) -> None:
     service = make_service(
         tmp_path,
-        [SettingsSpec(key="llm.api_key", label="API Key", type="secret", default="")],
+        [
+            SettingsSpec(
+                key="llm.api_key", label="API Key", type=SettingType.SECRET, default=""
+            )
+        ],
     )
     service.set("llm.api_key", "secret-value")
     assert service.set_many({"llm.api_key": ""}) == {}
     assert service.set_many({"llm.api_key": SECRET_MASK}) == {}
     assert service.get("llm.api_key") == "secret-value"
-    # An explicit (non-empty) value replaces it, and "" via set() clears it.
     service.set_many({"llm.api_key": "new-secret"})
     assert service.get("llm.api_key") == "new-secret"
     service.set("llm.api_key", "")
@@ -249,9 +260,6 @@ def test_corrupt_json_falls_back_and_backs_up(tmp_path: Path) -> None:
     assert json.loads(path.read_text(encoding="utf-8")) == {"k": "written"}
 
 
-# ----------------------------------------------------------------------
-# Plugin wiring / UI
-# ----------------------------------------------------------------------
 def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
     runtime = make_runtime(tmp_path)
     try:
@@ -261,7 +269,6 @@ def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
         service.set("llm.api_key", "secret-value")
 
         state = runtime.ui.state()
-        # No settings tab / toolbox item: only the page (opened via palette).
         assert all(t["id"] != "settings" for t in state["right_tabs"])
         assert all(
             i["id"] != "settings.open"
@@ -350,7 +357,9 @@ def test_settings_changed_event_payload(tmp_path: Path) -> None:
     runtime = make_runtime(tmp_path)
     try:
         service = runtime.services.require("settings")
-        service.register(SettingsSpec(key="x.n", label="N", type="int", default=1))
+        service.register(
+            SettingsSpec(key="x.n", label="N", type=SettingType.INT, default=1)
+        )
         events: list[dict] = []
         runtime.bus.on(
             "settings.changed", lambda event: events.append(dict(event.payload))
@@ -360,7 +369,6 @@ def test_settings_changed_event_payload(tmp_path: Path) -> None:
         assert runtime.bus.flush(2.0)
         assert events == [{"key": "x.n", "old": 1, "new": 5}]
 
-        # Unchanged values do not emit; resetting back to the default does.
         service.set("x.n", 5)
         assert runtime.bus.flush(2.0)
         assert len(events) == 1
@@ -376,7 +384,9 @@ def test_ui_refresh_after_settings_change(tmp_path: Path) -> None:
     try:
         service = runtime.services.require("settings")
         before = runtime.ui.state()["version"]
-        service.register(SettingsSpec(key="x.n", label="N", type="int", default=0))
+        service.register(
+            SettingsSpec(key="x.n", label="N", type=SettingType.INT, default=0)
+        )
         after_register = runtime.ui.state()["version"]
         assert after_register > before
         service.set("x.n", 3)
@@ -416,7 +426,7 @@ def test_action_and_readonly_settings_fields(tmp_path: Path) -> None:
             SettingsSpec(
                 key="demo.status",
                 label="状态",
-                type="string",
+                type=SettingType.STRING,
                 default="原始",
                 readonly=True,
                 group="Demo",
@@ -426,7 +436,7 @@ def test_action_and_readonly_settings_fields(tmp_path: Path) -> None:
             SettingsSpec(
                 key="demo.login",
                 label="登录",
-                type="action",
+                type=SettingType.ACTION,
                 action="demo.login",
                 button_label="去登录",
                 group="Demo",
@@ -459,7 +469,7 @@ def test_action_and_readonly_settings_fields(tmp_path: Path) -> None:
 class ConfigurationRuntime:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
-        self.calls: list[tuple[str, dict]] = []
+        self.calls: list[tuple[IpcMethod, dict]] = []
         self.fail_configure = False
         self.closed = False
         self.configuration = {
@@ -468,15 +478,15 @@ class ConfigurationRuntime:
             "providers": [
                 {
                     "id": "lecture",
-                    "auth": "apiKey",
+                    "auth": ProviderAuth.API_KEY,
                     "configured": True,
-                    "source": "auth",
+                    "source": ProviderSource.PROJECT,
                 },
                 {
                     "id": "opencode",
-                    "auth": "oauth",
+                    "auth": ProviderAuth.OAUTH,
                     "configured": False,
-                    "source": "none",
+                    "source": ProviderSource.PROJECT,
                 },
             ],
             "roles": {
@@ -488,9 +498,9 @@ class ConfigurationRuntime:
             },
         }
 
-    def call(self, method: str, **params):
+    def call(self, method: IpcMethod, **params):
         self.calls.append((method, params))
-        if method == "configure":
+        if method == IpcMethod.CONFIGURE:
             if self.fail_configure:
                 raise ValueError("Invalid role selector")
             self.configuration.update(
@@ -530,7 +540,9 @@ def test_external_yaml_editors_save_without_settings_copies(tmp_path, monkeypatc
             "models_yaml",
             "roles_yaml",
         }
-        assert all(field["input"] == "textarea" for field in editors["fields"])
+        assert all(
+            field["input"] == FormInputType.TEXTAREA for field in editors["fields"]
+        )
         assert "lecture/example:high" in json.dumps(blocks)
 
         result = runtime.ui.dispatch_action(
@@ -544,7 +556,7 @@ def test_external_yaml_editors_save_without_settings_copies(tmp_path, monkeypatc
         )
         assert result.ok
         assert backend.calls[-1] == (
-            "configure",
+            IpcMethod.CONFIGURE,
             {
                 "models": "providers: {lecture: {}}\n",
                 "roles": "default: lecture/example\n",
@@ -592,7 +604,7 @@ def test_provider_credentials_are_write_only_runtime_actions(tmp_path, monkeypat
         )
         assert result.ok
         assert backend.calls[-1] == (
-            "credentials",
+            IpcMethod.CREDENTIALS,
             {"provider": "lecture", "key": "secret-key"},
         )
         runtime.ui.open_page("settings:main")
@@ -602,7 +614,7 @@ def test_provider_credentials_are_write_only_runtime_actions(tmp_path, monkeypat
             "llm.logout", {"values": {"provider": "lecture"}}
         )
         assert result.ok
-        assert backend.calls[-1] == ("logout", {"provider": "lecture"})
+        assert backend.calls[-1] == (IpcMethod.LOGOUT, {"provider": "lecture"})
     finally:
         runtime.stop()
 
@@ -628,11 +640,11 @@ def test_device_login_imports_oauth_into_runtime(tmp_path, monkeypatch):
         plugin._login_thread.join(timeout=2)
         assert not plugin._login_thread.is_alive()
         assert (
-            "import_credentials",
+            IpcMethod.IMPORT_CREDENTIALS,
             {
                 "provider": "opencode",
                 "credential": {
-                    "type": "oauth",
+                    "type": CredentialType.OAUTH,
                     "access": "access",
                     "refresh": "refresh",
                     "expires": 9999,
@@ -645,7 +657,7 @@ def test_device_login_imports_oauth_into_runtime(tmp_path, monkeypatch):
             "llm.logout", {"values": {"provider": "opencode"}}
         )
         assert result.ok
-        assert backend.calls[-1] == ("logout", {"provider": "opencode"})
+        assert backend.calls[-1] == (IpcMethod.LOGOUT, {"provider": "opencode"})
     finally:
         runtime.stop()
 
@@ -654,13 +666,19 @@ def test_unload_preserves_settings_owned_by_pipeline(tmp_path):
     service = SettingsService(SettingsStore(tmp_path / "settings.json"))
     service.register(
         SettingsSpec(
-            key="summarize.review_enabled", label="Review", type="bool", default=True
+            key="summarize.review_enabled",
+            label="Review",
+            type=SettingType.BOOL,
+            default=True,
         ),
         plugin_id="notes-pipeline",
     )
     service.register(
         SettingsSpec(
-            key="summarize.on_stop", label="Stop", type="string", default="skip"
+            key="summarize.on_stop",
+            label="Stop",
+            type=SettingType.STRING,
+            default="skip",
         ),
         plugin_id="summarize",
     )

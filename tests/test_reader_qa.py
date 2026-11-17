@@ -1,5 +1,3 @@
-"""Tests for the reader selection menu and inline Q&A blocks."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,7 +5,9 @@ from typing import Any
 
 from config import load_config
 from core.runtime import build_runtime
+from core.ui import BlockType
 from plugins.reader import ReaderPlugin
+from plugins.reader.plugin import SelectionKind
 from core import note_document as qa
 
 
@@ -43,12 +43,9 @@ def _open(
 
 def _tabs(runtime: Any, page_id: str) -> list[dict[str, Any]]:
     blocks = runtime.ui.state()["page_content"][page_id]
-    return next(block for block in blocks if block["type"] == "tabs")["tabs"]
+    return next(block for block in blocks if block["type"] == BlockType.TABS)["tabs"]
 
 
-# ---------------------------------------------------------------------------
-# Selection menu registration is per reader page
-# ---------------------------------------------------------------------------
 def test_selection_actions_are_scoped_to_page_and_owner(tmp_path: Path) -> None:
     runtime = _make_runtime(tmp_path)
     try:
@@ -60,7 +57,7 @@ def test_selection_actions_are_scoped_to_page_and_owner(tmp_path: Path) -> None:
             {
                 "id": "demo.ask",
                 "label": "提问",
-                "kind": "prompt",
+                "kind": SelectionKind.PROMPT,
                 "action": "demo.ask",
             },
             owner="summarize",
@@ -70,9 +67,8 @@ def test_selection_actions_are_scoped_to_page_and_owner(tmp_path: Path) -> None:
         assert meta["doc_key"] == "knowledge"
         assert meta["path"] == str(path)
         assert [item["id"] for item in meta["selection_actions"]] == ["demo.ask"]
-        assert meta["selection_actions"][0]["kind"] == "prompt"
+        assert meta["selection_actions"][0]["kind"] == SelectionKind.PROMPT
 
-        # The same page re-used by another plugin shows no summarize menu.
         _open(runtime, path, owner="instant-summarize")
         meta = _tabs(runtime, page_id)[0]["meta"]
         assert meta["owner"] == "instant-summarize"
@@ -100,9 +96,6 @@ def test_selection_actions_are_not_global(tmp_path: Path) -> None:
         runtime.stop()
 
 
-# ---------------------------------------------------------------------------
-# Inline Q&A blocks
-# ---------------------------------------------------------------------------
 def test_qa_begin_and_finish_render_blocks(tmp_path: Path) -> None:
     runtime = _make_runtime(tmp_path)
     try:
@@ -118,23 +111,23 @@ def test_qa_begin_and_finish_render_blocks(tmp_path: Path) -> None:
         text = path.read_text("utf-8")
         assert "为什么这一步成立？" in text
         assert qa_id in text
-        # The block sits below the selected paragraph, not at the end.
         assert text.index(qa_id) < text.index("第三段内容")
 
         blocks = _tabs(runtime, page_id)[0]["blocks"]
-        qa_block = next(b for b in blocks if b["type"] == "qa")
-        assert qa_block["status"] == "pending"
+        qa_block = next(b for b in blocks if b["type"] == BlockType.QA)
+        assert qa_block["status"] == qa.QaStatus.PENDING
         assert qa_block["question"] == "为什么这一步成立？"
         assert qa_block["delete_action"] == "reader.qa_delete"
         assert "为什么这一步成立" in qa_block["question_html"]
 
         reader.qa_finish(str(path), qa_id, answer="因为 $a+b>c$。")
         blocks = _tabs(runtime, page_id)[0]["blocks"]
-        qa_block = next(b for b in blocks if b["type"] == "qa")
-        assert qa_block["status"] == "done"
+        qa_block = next(b for b in blocks if b["type"] == BlockType.QA)
+        assert qa_block["status"] == qa.QaStatus.DONE
         assert "$a+b" in qa_block["answer_html"]
-        # Markers never leak into the markdown blocks.
-        markdown = "".join(b.get("text", "") for b in blocks if b["type"] == "markdown")
+        markdown = "".join(
+            b.get("text", "") for b in blocks if b["type"] == BlockType.MARKDOWN
+        )
         assert "qa:begin" not in markdown
         assert "第三段内容" in markdown
     finally:
@@ -158,7 +151,6 @@ def test_qa_delete_action_removes_the_pair(tmp_path: Path) -> None:
         assert "Q?" not in text and "A!" not in text
         assert "第一段内容" in text and "第三段内容" in text
 
-        # Unknown ids and unknown paths are rejected.
         assert not runtime.ui.dispatch_action(
             "reader.qa_delete", {"path": str(path), "id": "qa-deadbeef"}
         ).ok
@@ -189,7 +181,6 @@ def test_qa_context_budgets_are_independent(tmp_path: Path) -> None:
         )
         assert context["question"] == "第二个问题"
         assert "第一段内容" in context["before"]
-        # Prior Q&A pairs are a separate bucket, not part of the note prose.
         assert "qa:begin" not in context["before"]
         assert context["history"] == [
             {"question": "第一个问题", "answer": "第一个回答"}
@@ -230,9 +221,6 @@ def test_qa_begin_rejects_unknown_path(tmp_path: Path) -> None:
         runtime.stop()
 
 
-# ---------------------------------------------------------------------------
-# Format helpers
-# ---------------------------------------------------------------------------
 def test_qa_block_persists_intensity_and_fold(tmp_path: Path) -> None:
     runtime = _make_runtime(tmp_path)
     try:
@@ -244,13 +232,13 @@ def test_qa_block_persists_intensity_and_fold(tmp_path: Path) -> None:
             str(path),
             question="为什么？",
             selection="第一段内容",
-            intensity="research",
+            intensity=qa.AskIntensity.RESEARCH,
         )
         reader.qa_finish(str(path), created["id"], answer="因为定义。")
         block = next(
-            b for b in _tabs(runtime, page_id)[0]["blocks"] if b["type"] == "qa"
+            b for b in _tabs(runtime, page_id)[0]["blocks"] if b["type"] == BlockType.QA
         )
-        assert block["intensity"] == "research"
+        assert block["intensity"] == qa.AskIntensity.RESEARCH
         assert block["collapsed"] is True
         assert '"intensity": "research"' in path.read_text("utf-8")
         assert '"collapsed": true' in path.read_text("utf-8")
@@ -263,7 +251,7 @@ def test_qa_block_persists_intensity_and_fold(tmp_path: Path) -> None:
         assert result.refresh is False
         assert '"collapsed": false' in path.read_text("utf-8")
         block = next(
-            b for b in _tabs(runtime, page_id)[0]["blocks"] if b["type"] == "qa"
+            b for b in _tabs(runtime, page_id)[0]["blocks"] if b["type"] == BlockType.QA
         )
         assert block["collapsed"] is False
     finally:

@@ -1,5 +1,3 @@
-"""Application sessions backed by the isolated SDK runtime."""
-
 from __future__ import annotations
 
 from .plugin import (

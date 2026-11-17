@@ -1,24 +1,32 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from core.ui import ActionResult, UIManager
+from core.ui import ActionResult, BlockType, FormInputType, Side, TaskState, UIManager
 
 
 def test_tabs_items_pages_and_state() -> None:
     changes: list[str] = []
     ui = UIManager(on_change=changes.append)
-    ui.add_tab("left", "courses", "课程", order=1)
+    ui.add_tab(Side.LEFT, "courses", "课程", order=1)
     ui.add_toolbox_item(
-        "courses", "list", "课程列表", render=lambda: [{"type": "text", "text": "hi"}]
+        "courses",
+        "list",
+        "课程列表",
+        render=lambda: [{"type": BlockType.TEXT, "text": "hi"}],
     )
     ui.add_page("home", "首页", render=lambda: "# Hello\n\n$E=mc^2$", order=1)
     ui.open_page("home")
     state = ui.state()
     assert [t["id"] for t in state["left_tabs"]] == ["courses"]
     assert state["left_tabs"][0]["toolbox"][0]["id"] == "list"
+    assert state["left_tabs"][0]["side"] is Side.LEFT
+    assert state["left_tabs"][0]["toolbox"][0]["blocks"][0]["type"] is BlockType.TEXT
     assert state["active_page"] == "home"
     assert "home" in state["page_content"]
+    assert state["page_content"]["home"][0]["type"] is BlockType.MARKDOWN
     html = state["page_content"]["home"][0]["html"]
     assert "<h1>" in html
     assert "$E=mc^2$" in html
@@ -70,6 +78,7 @@ def test_render_error_is_contained() -> None:
     ui.open_page("broken")
     state = ui.state()
     block = state["page_content"]["broken"][0]
+    assert block["type"] is BlockType.HTML
     assert "&lt;broken-render&gt;" in block["html"]
     assert "<broken-render>" not in block["html"]
     ui.add_page("healthy", "Healthy", render=lambda: "unaffected content")
@@ -79,9 +88,9 @@ def test_render_error_is_contained() -> None:
 
 def test_duplicate_tab_page_item_rejected() -> None:
     ui = UIManager()
-    ui.add_tab("left", "a", "A")
+    ui.add_tab(Side.LEFT, "a", "A")
     with pytest.raises(ValueError):
-        ui.add_tab("left", "a", "A")
+        ui.add_tab(Side.LEFT, "a", "A")
     ui.add_page("p", "P")
     with pytest.raises(ValueError):
         ui.add_page("p", "P")
@@ -92,7 +101,7 @@ def test_duplicate_tab_page_item_rejected() -> None:
 
 def test_close_page_and_tab_removal() -> None:
     ui = UIManager()
-    ui.add_tab("left", "a", "A")
+    ui.add_tab(Side.LEFT, "a", "A")
     ui.add_toolbox_item("a", "i", "I")
     ui.add_page("p", "P")
     ui.open_page("p")
@@ -109,6 +118,60 @@ def test_status_provider() -> None:
     assert ui.state()["status"]["session"]["id"] == "x"
 
 
+def test_enum_wire_values() -> None:
+    assert json.dumps([Side.LEFT, Side.RIGHT]) == '["left", "right"]'
+    assert json.dumps(BlockType.TASK_QUEUE) == '"task_queue"'
+    assert json.dumps(FormInputType.SELECT) == '"select"'
+    assert json.dumps(TaskState.PENDING) == '"pending"'
+
+
+def test_active_task_states() -> None:
+    ui = UIManager()
+    tasks = [
+        {"id": "queued", "state": TaskState.PENDING},
+        {"id": "active", "state": TaskState.RUNNING},
+        {"id": "implicit"},
+    ]
+    ui.register_task_provider(lambda: tasks)
+    assert ui.get_tasks() == tasks
+    assert ui.state()["tasks"] == tasks
+
+
+def test_task_queue_block() -> None:
+    ui = UIManager()
+    ui.open_page("ui:tasks")
+    assert ui.state()["page_content"]["ui:tasks"] == [{"type": BlockType.TASK_QUEUE}]
+
+
+def test_nested_enum_blocks() -> None:
+    ui = UIManager()
+    ui.add_page(
+        "nested",
+        "Nested",
+        render=lambda: [
+            {
+                "type": BlockType.TABS,
+                "tabs": [
+                    {
+                        "id": "content",
+                        "blocks": [
+                            {"type": BlockType.MARKDOWN, "text": "**text**"},
+                            {"type": BlockType.FORM},
+                        ],
+                    }
+                ],
+            }
+        ],
+    )
+    ui.open_page("nested")
+    tabs = ui.state()["page_content"]["nested"][0]
+    assert tabs["type"] is BlockType.TABS
+    markdown, form = tabs["tabs"][0]["blocks"]
+    assert markdown["type"] is BlockType.MARKDOWN
+    assert "<strong>text</strong>" in markdown["html"]
+    assert form == {"type": BlockType.FORM, "fields": []}
+
+
 def test_tree_block_is_normalized_recursively() -> None:
     ui = UIManager()
     ui.add_page(
@@ -116,7 +179,7 @@ def test_tree_block_is_normalized_recursively() -> None:
         "P",
         render=lambda: [
             {
-                "type": "tree",
+                "type": BlockType.TREE,
                 "id": "courses",
                 "nodes": [
                     {
@@ -138,7 +201,7 @@ def test_tree_block_is_normalized_recursively() -> None:
     )
     ui.open_page("p")
     block = ui.state()["page_content"]["p"][0]
-    assert block["type"] == "tree"
+    assert block["type"] is BlockType.TREE
     node = block["nodes"][0]
     assert node["depth"] == 0
     assert node["children"][0]["depth"] == 1

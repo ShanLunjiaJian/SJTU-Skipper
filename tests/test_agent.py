@@ -1,5 +1,3 @@
-"""Application contracts for SDK sessions and file publication."""
-
 from __future__ import annotations
 
 import threading
@@ -7,7 +5,7 @@ import threading
 import pytest
 
 from config import load_config
-from core.agent_types import AgentProfile, AgentTool
+from core.agent_types import AgentProfile, AgentRole, AgentTool, IpcMethod, ReviewStatus
 from core.plugin import Plugin
 from core.runtime import build_runtime
 from core.workspace import FileWorkspace
@@ -24,21 +22,21 @@ class ScriptedRuntime:
         self.cancelled = {}
         self.closed = False
 
-    def call(self, method, **params):
+    def call(self, method: IpcMethod, **params):
         self.calls.append((method, params))
-        if method == "create_session":
+        if method == IpcMethod.CREATE_SESSION:
             self.sessions[params["id"]] = params
             self.cancelled[params["id"]] = threading.Event()
             return {"model": "lecture/test"}
-        elif method == "close_session":
+        elif method == IpcMethod.CLOSE_SESSION:
             self.sessions.pop(params["session_id"], None)
         return {}
 
     def cancel(self, session_id):
         self.cancelled[session_id].set()
 
-    def stream(self, method, **params):
-        assert method == "run"
+    def stream(self, method: IpcMethod, **params):
+        assert method == IpcMethod.RUN
         self.runs.append(params)
         if self.script:
             yield from self.script(self, params)
@@ -84,6 +82,27 @@ def _make_agent_runtime(tmp_path, script=None, settings=None):
     return runtime, runtime.services.require("agent"), llm, settings
 
 
+def test_ordered_followups_and_review_status(tmp_path):
+    def script(sdk, params):
+        yield {
+            "type": "result",
+            "result": {
+                "final_message": "Stopped",
+                "review_status": "passed",
+            },
+        }
+
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path, script)
+    try:
+        session = agent.create_session("writer")
+        result = agent.run(session.id, "Stop reviewing", follow_ups=["Keep the notes"])
+        assert sdk.runs[0]["instruction"] == "Stop reviewing"
+        assert sdk.runs[0]["follow_ups"] == ["Keep the notes"]
+        assert result.review_status is ReviewStatus.PASSED
+    finally:
+        runtime.stop()
+
+
 def test_sessions_use_roles_and_authorized_files(tmp_path):
     runtime, agent, sdk, _ = _make_agent_runtime(tmp_path)
     try:
@@ -91,7 +110,7 @@ def test_sessions_use_roles_and_authorized_files(tmp_path):
         source.write_text("complete source")
         profile = AgentProfile(
             name="review",
-            role="note_review",
+            role=AgentRole.NOTE_REVIEW,
             tools=[AgentTool("read"), AgentTool("grep"), AgentTool("glob")],
         )
         agent.register_agent(profile)
@@ -101,7 +120,7 @@ def test_sessions_use_roles_and_authorized_files(tmp_path):
             workspace=FileWorkspace({"source.md": source}, readonly=("source.md",)),
         )
         declaration = sdk.sessions[session.id]
-        assert declaration["role"] == "note_review"
+        assert declaration["role"] == AgentRole.NOTE_REVIEW
         assert declaration["files"] == {"source.md": str(source)}
         assert declaration["readonly"] == ["source.md"]
         assert declaration["tools"] == ["read", "grep", "glob"]
@@ -132,6 +151,37 @@ def test_runs_keep_sdk_history_and_forward_events(tmp_path):
         agent.close(session.id)
         assert agent.get_session(session.id) is None
         assert session.id not in sdk.sessions
+    finally:
+        runtime.stop()
+
+
+@pytest.mark.parametrize(
+    "event", ["started", "agent.run.ready", "agent.delta", "finished"]
+)
+def test_reviewer_events_preserve_run(tmp_path, event):
+    def script(sdk, params):
+        yield {
+            "type": "event",
+            "name": "agent.reviewer",
+            "data": {
+                "role": "note_review",
+                "event": event,
+                "reviewer_id": "writer-review",
+                "text": "Review text",
+            },
+        }
+        yield {"type": "result", "result": {"final_message": "Notes complete"}}
+
+    runtime, agent, _, _ = _make_agent_runtime(tmp_path, script)
+    try:
+        session = agent.create_session("writer")
+        observed = []
+        result = agent.run(session.id, "Write notes", on_event=observed.append)
+        assert result.error is None
+        assert result.final_message == "Notes complete"
+        forwarded = next(item for item in observed if item.type == "agent.reviewer")
+        assert forwarded.data["event"] == event
+        assert forwarded.data["reviewer_id"] == "writer-review"
     finally:
         runtime.stop()
 
@@ -299,6 +349,15 @@ def test_run_preserves_failure_when_cancel_fails(tmp_path):
         runtime.stop()
 
 
+def test_runtime_rejects_string_method(tmp_path):
+    from agent_runtime.client import RuntimeClient
+
+    client = RuntimeClient(tmp_path)
+    with pytest.raises(TypeError, match="IpcMethod"):
+        client.call("info")
+    assert client._process is None
+
+
 def test_cleanup_does_not_start_runtime(tmp_path, monkeypatch):
     from agent_runtime.client import RuntimeClient
 
@@ -309,7 +368,7 @@ def test_cleanup_does_not_start_runtime(tmp_path, monkeypatch):
 
     monkeypatch.setattr(client, "_start", start)
     client.cancel("completed")
-    client.call("close_session", session_id="completed")
+    client.call(IpcMethod.CLOSE_SESSION, session_id="completed")
     assert client._process is None
 
 
@@ -328,5 +387,118 @@ def test_execution_updates_session_model(tmp_path):
         result = agent.run(session.id, "Question")
         assert not result.error
         assert agent.list_sessions()[0]["model"] == "resolved-model"
+    finally:
+        runtime.stop()
+
+
+def test_message_does_not_wait_for_run_lock(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+
+    def script(sdk, params):
+        yield {
+            "type": "event",
+            "name": "agent.run.ready",
+            "data": {"session_id": params["session_id"]},
+        }
+        started.set()
+        assert release.wait(3)
+        yield {"type": "result", "result": {"final_message": "continued"}}
+
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path, script)
+    original = sdk.call
+    messages = []
+
+    def call(method, **params):
+        if method == IpcMethod.MESSAGE:
+            messages.append(params)
+            release.set()
+            return {"accepted": True}
+        return original(method, **params)
+
+    sdk.call = call
+    session = agent.create_session("writer")
+    observed = []
+    thread = threading.Thread(
+        target=lambda: agent.run(session.id, "start", on_event=observed.append)
+    )
+    thread.start()
+    try:
+        assert started.wait(3)
+        assert agent.message(session.id, "first\nsecond") == {"accepted": True}
+        thread.join(3)
+        assert not thread.is_alive()
+        assert messages == [{"session_id": session.id, "message": "first\nsecond"}]
+        assert any(
+            event.type == "agent.run.ready" and event.session_id == session.id
+            for event in observed
+        )
+        assert not session.cancelled.is_set()
+        assert agent.message("bun-owned-reviewer", "review detail")["accepted"]
+    finally:
+        release.set()
+        thread.join(3)
+        runtime.stop()
+
+
+def test_message_rejects_missing_admission_and_closed_runtime(tmp_path, monkeypatch):
+    from agent_runtime.client import RuntimeClient
+
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path)
+    try:
+        assert not agent.message("unknown", "hello")["accepted"]
+        assert not agent.message("unknown", " \n ")["accepted"]
+        client = RuntimeClient(tmp_path)
+        monkeypatch.setattr(
+            client, "_start", lambda: pytest.fail("Message started a process")
+        )
+        agent._runtime = client
+        result = agent.message("completed", "hello")
+        assert not result["accepted"]
+        assert "closed" in result["reason"]
+        assert client._process is None
+    finally:
+        runtime.stop()
+
+
+def test_reopen_uses_strict_native_operation(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path)
+    session = agent.create_session("writer", role=AgentRole.NOTE_WRITER, tools=[])
+    values = dict(
+        name="writer",
+        workspace=session.workspace,
+        system_prompt="system",
+        role=AgentRole.NOTE_WRITER,
+        tools=[],
+        meta={},
+    )
+    try:
+        with pytest.raises(RuntimeError, match="still live"):
+            agent.reopen(session.id, **values)
+        agent.close(session.id)
+        original = sdk.call
+
+        def missing(method, **params):
+            if method == IpcMethod.REOPEN_SESSION:
+                raise RuntimeError("Saved transcript is missing")
+            return original(method, **params)
+
+        sdk.call = missing
+        with pytest.raises(RuntimeError, match="transcript"):
+            agent.reopen(session.id, **values)
+        assert agent.get_session(session.id) is None
+
+        def reopen(method, **params):
+            if method == IpcMethod.REOPEN_SESSION:
+                sdk.sessions[params["id"]] = params
+                sdk.cancelled[params["id"]] = threading.Event()
+                return {"model": "restored-model"}
+            return original(method, **params)
+
+        sdk.call = reopen
+        restored = agent.reopen(session.id, **values)
+        assert restored.id == session.id
+        assert restored.model == "restored-model"
+        assert not restored.cancelled.is_set()
     finally:
         runtime.stop()

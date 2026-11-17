@@ -1,5 +1,3 @@
-"""Check cache descriptor lifetime during reads."""
-
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor

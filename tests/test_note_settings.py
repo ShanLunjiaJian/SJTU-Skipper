@@ -1,5 +1,3 @@
-"""Verify note settings without the display plugins."""
-
 from types import SimpleNamespace
 
 from plugins.notes_pipeline.plugin import NotesPipelinePlugin

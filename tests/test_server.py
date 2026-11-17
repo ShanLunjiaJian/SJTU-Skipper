@@ -11,9 +11,10 @@ from fastapi.testclient import TestClient
 from config import load_config
 from core.plugin import Plugin, PluginContext
 from core.runtime import build_runtime
+from core.ui import BlockType, Side
 from plugins.llm_core.plugin import LLMPlugin
 from plugins.settings.plugin import SettingsPlugin
-from ui.server import create_app
+from ui.server import WebSocketMessageType, create_app
 
 from support import FakeLLM
 
@@ -22,12 +23,12 @@ class DemoUI(Plugin):
     id = "test-ui"
 
     def setup(self, ctx: PluginContext) -> None:
-        ctx.ui.add_tab("left", "test", "测试", icon="◈")
+        ctx.ui.add_tab(Side.LEFT, "test", "测试", icon="◈")
         ctx.ui.add_toolbox_item(
             "test",
             "test.item",
             "工具项",
-            render=lambda: [{"type": "text", "text": "tool"}],
+            render=lambda: [{"type": BlockType.TEXT, "text": "tool"}],
         )
         ctx.ui.add_page("test.page", "测试页", render=lambda: "# 页面\n\nhello")
         ctx.ui.open_page("test.page")
@@ -166,6 +167,15 @@ def test_artifact_is_session_scoped(client) -> None:
     assert test_client.get("/api/artifacts/s1/missing.md").status_code == 404
 
 
+def test_socket_message_serialization() -> None:
+    assert json.loads(json.dumps({"type": WebSocketMessageType.REFRESH})) == {
+        "type": "refresh"
+    }
+    assert json.loads(json.dumps({"type": WebSocketMessageType.NOTIFY})) == {
+        "type": "notify"
+    }
+
+
 def test_websocket_sends_refresh(client) -> None:
     test_client, _cfg = client
     with test_client.websocket_connect("/ws") as ws:
@@ -204,7 +214,6 @@ def test_media_relay_rejects_foreign_hosts(client) -> None:
 
 
 def test_media_relay_forwards_range(tmp_path: Path) -> None:
-    """The relay streams the upstream 206 and passes the byte range through."""
 
     (tmp_path / "auth.json").write_text(
         json.dumps({"users": {"test": {"password": "test"}}}), "utf-8"

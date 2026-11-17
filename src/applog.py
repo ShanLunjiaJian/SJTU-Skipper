@@ -1,27 +1,32 @@
-"""Logging helpers."""
-
 from __future__ import annotations
 
 import faulthandler
 import logging
 import signal
 import sys
+from enum import StrEnum
+
+
+class LogLevel(StrEnum):
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
+
 
 _CONFIGURED = False
 
 
-def setup_logging(level: str = "INFO") -> None:
-    """Configure a compact, idempotent console logger."""
-
+def setup_logging(level: LogLevel = LogLevel.INFO) -> None:
     global _CONFIGURED
-    # ``kill -USR1 <pid>`` dumps every thread's stack: the quickest way to see
-    # what a hung STT/VLM worker is waiting on.
+    # SIGUSR1 dumps all thread stacks for blocked-worker diagnosis.
     try:
         faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
     except Exception:  # noqa: BLE001 - not supported on every platform
         pass
     root = logging.getLogger("lecture_agent")
-    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    root.setLevel(level.value)
     if _CONFIGURED:
         return
     handler = logging.StreamHandler(sys.stderr)

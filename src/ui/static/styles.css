@@ -138,8 +138,6 @@ body {
   grid-row: 1;
 }
 
-/* Sidebars are collapsible: the × lives in the panel header, and a slim
-   handle on the window edge brings the panel back. */
 #app.left-collapsed {
   --left-col: 0px;
   --left-resizer: 0px;
@@ -169,7 +167,6 @@ body {
   border-left: 1px solid var(--line);
 }
 
-/* Panel header: title + close (×), the modern replacement for top-bar toggles. */
 .sidebar-head {
   flex: 0 0 auto;
   display: flex;
@@ -208,7 +205,6 @@ body {
   color: var(--text);
 }
 
-/* Context strip: which course / lesson the right-hand panel is talking about. */
 .sidebar-context {
   flex: 0 0 auto;
   margin: 0 10px 8px;
@@ -250,7 +246,6 @@ body {
   height: 6px;
 }
 
-/* Drag-to-resize gutters between a sidebar and the centre column. */
 .resizer {
   position: relative;
   z-index: 5;
@@ -282,7 +277,6 @@ body.resizing {
   user-select: none;
 }
 
-/* Slim edge handles that bring a collapsed panel back. */
 .sidebar-restore {
   position: absolute;
   top: 50%;
@@ -553,6 +547,39 @@ code {
   overflow-anchor: none;
   padding: 10px max(16px, calc((100% - 1100px) / 2)) 30px;
   scrollbar-gutter: stable;
+}
+.execution-composer {
+  display: flex;
+  align-items: flex-end;
+  flex: 0 0 auto;
+  gap: 10px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+.execution-message {
+  flex: 1;
+  min-width: 0;
+  min-height: 72px;
+  max-height: 30vh;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--panel);
+  font: inherit;
+  line-height: 1.5;
+}
+.execution-message:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.tabs-body[hidden] {
+  display: none;
+}
+.qa-answer > .agent-workflow + .qa-text {
+  margin-top: 16px;
 }
 .execution-block {
   border-bottom: 1px solid var(--line);
@@ -1226,7 +1253,6 @@ video {
   }
 }
 
-/* --- interaction polish ------------------------------------------------ */
 .table-wrap {
   overflow-x: auto;
 }
@@ -1260,7 +1286,6 @@ video {
   margin: 0;
 }
 
-/* --- menubar / command palette ---------------------------------------- */
 .topbar {
   gap: 16px;
 }
@@ -1406,7 +1431,6 @@ kbd {
   text-align: center;
 }
 
-/* --- course tree ------------------------------------------------------- */
 .tree {
   display: flex;
   flex-direction: column;
@@ -1512,7 +1536,6 @@ kbd {
   padding: 0;
 }
 
-/* --- class player ------------------------------------------------------ */
 .player {
   display: flex;
   flex-direction: column;
@@ -1582,7 +1605,6 @@ kbd {
   }
 }
 
-/* --- switch (declarative block) ---------------------------------------- */
 .switch-block {
   display: flex;
   flex-direction: column;
@@ -1648,7 +1670,6 @@ kbd {
   padding-left: 45px;
 }
 
-/* --- Q&A blocks in notes ----------------------------------------------- */
 .qa {
   margin: 16px 0 18px;
   border: 1px solid var(--line);
@@ -1755,7 +1776,6 @@ kbd {
   color: var(--danger);
 }
 
-/* --- selection menu ---------------------------------------------------- */
 .selection-menu {
   position: fixed;
   z-index: 55;
@@ -1785,7 +1805,6 @@ kbd {
   color: var(--accent);
 }
 
-/* --- ask dialog -------------------------------------------------------- */
 .ask-modal {
   position: fixed;
   inset: 0;
@@ -1888,9 +1907,6 @@ kbd {
   min-width: 96px;
 }
 
-/* ------------------------------------------------------------------ */
-/* Google / Gmail visual system                                        */
-/* ------------------------------------------------------------------ */
 body {
   background: #f8f9fa;
   font-family:
@@ -2197,7 +2213,6 @@ code {
   color: var(--muted);
 }
 
-/* --- panel chrome & status bar (final pass) --------------------------- */
 .sidebar-head {
   padding: 0 8px 0 16px;
 }

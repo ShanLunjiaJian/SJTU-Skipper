@@ -1,9 +1,8 @@
-"""HTTP uploads and synchronous WebSocket transport for the STT protocol."""
-
 from __future__ import annotations
 
 import json
 import threading
+from enum import StrEnum
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -12,6 +11,21 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 from websockets.sync.client import connect
 
 from .errors import SttError
+
+
+class SttEventType(StrEnum):
+    START = "start"
+    FINISH = "finish"
+    RESET = "reset"
+    READY = "ready"
+    ACCEPTED = "accepted"
+    PARTIAL = "partial"
+    ANOMALY = "anomaly"
+    FINAL = "final"
+    PROGRESS = "progress"
+    DONE = "done"
+    ERROR = "error"
+
 
 RETRY_STATUSES = frozenset((429, 502, 503, 504))
 
@@ -50,7 +64,7 @@ class STTStream:
             raise SttError("The STT service returned an invalid event.") from exc
         if not isinstance(event, dict) or "type" not in event:
             raise SttError("The STT service returned an invalid event.")
-        if event["type"] == "error":
+        if event["type"] == SttEventType.ERROR:
             code = event.get("code")
             status = {
                 "overloaded": 429,
@@ -59,13 +73,17 @@ class STTStream:
                 "backend_failure": 502,
             }.get(code)
             raise SttError(str(event.get("message", code)), status_code=status)
+        try:
+            event["type"] = SttEventType(event["type"])
+        except ValueError as exc:
+            raise SttError("The STT service returned an invalid event type.") from exc
         return event
 
     def finish(self) -> None:
-        self._control({"type": "finish"})
+        self._control({"type": SttEventType.FINISH})
 
     def reset(self, offset_ms: int) -> None:
-        self._control({"type": "reset", "offset_ms": offset_ms})
+        self._control({"type": SttEventType.RESET, "offset_ms": offset_ms})
 
     def _control(self, event: dict[str, Any]) -> None:
         try:
@@ -143,7 +161,7 @@ class STTClient:
         raise AssertionError("Unreachable retry state.")
 
     def stream(
-        self, *, language: str, context: str, concurrency: int, mode: str
+        self, *, language: str, context: str, concurrency: int, offline: bool
     ) -> STTStream:
         parts = urlsplit(self.server_url)
         url = urlunsplit(
@@ -151,7 +169,7 @@ class STTClient:
                 "wss" if parts.scheme == "https" else "ws",
                 parts.netloc,
                 parts.path + "/v1/stream",
-                "mode=" + mode,
+                "mode=" + ("offline" if offline else "live"),
                 "",
             )
         )
@@ -176,15 +194,15 @@ class STTClient:
         try:
             stream._control(
                 {
-                    "type": "start",
+                    "type": SttEventType.START,
                     "language": language,
                     "context": context,
-                    "mode": mode,
+                    "mode": "offline" if offline else "live",
                     "concurrency": concurrency,
                 }
             )
             stream.metadata = stream.receive(self.timeout)
-            if stream.metadata.get("type") != "ready":
+            if stream.metadata.get("type") != SttEventType.READY:
                 raise SttError("The STT service did not accept the stream.")
         except BaseException:
             self.close_stream(stream)

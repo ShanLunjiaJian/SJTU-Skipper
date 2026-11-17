@@ -1,16 +1,9 @@
-"""Tests for stream backlog gating."""
-
 from __future__ import annotations
 
 import threading
 import time
 
 from core.streams import BacklogGate
-
-
-# ---------------------------------------------------------------------------
-# BacklogGate
-# ---------------------------------------------------------------------------
 
 
 class TestBacklogGate:

@@ -1,5 +1,3 @@
-"""Core framework: streams, events, plugins, services and UI."""
-
 from __future__ import annotations
 
 from .agent_types import (
@@ -30,7 +28,7 @@ from .plugin import (
 )
 from .runtime import LLMProxy, Runtime, build_runtime
 from .services import ServiceError, ServiceNotFound, ServiceRegistry
-from .settings_spec import SECRET_MASK, SETTING_TYPES, SettingsSpec
+from .settings_spec import SECRET_MASK, SettingType, SettingsSpec
 from .streams import (
     AudioChunk,
     AudioStream,
@@ -70,7 +68,7 @@ __all__ = [
     "SECRET_MASK",
     "SESSION_STARTED",
     "SESSION_STOPPED",
-    "SETTING_TYPES",
+    "SettingType",
     "STREAM_APPENDED",
     "ServiceError",
     "ServiceNotFound",
