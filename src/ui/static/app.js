@@ -1143,6 +1143,37 @@
   const agentSelections = new Map();
   const agentViews = new Map();
 
+  function cleanupAgentViews() {
+    const active = state.ui.active_page;
+    const openPages = new Set(state.ui.open_pages || []);
+    if (active) openPages.add(active);
+    const pages = new Set((state.ui.pages || []).map((page) => page.id));
+    const activeKeys = new Set();
+    const collect = (blocks) => {
+      for (const block of blocks || []) {
+        if (block.type === "agent_activity")
+          activeKeys.add(JSON.stringify([active, block.id]));
+        if (block.type === "tabs")
+          for (const tab of block.tabs || []) collect(tab.blocks);
+        if (block.type === "cards")
+          for (const item of block.items || []) collect(item.blocks);
+      }
+    };
+    collect(state.ui.page_content?.[active]);
+    for (const [key, view] of agentViews) {
+      const [page] = JSON.parse(key);
+      if (
+        !pages.has(page) ||
+        !openPages.has(page) ||
+        (page === active && !activeKeys.has(key))
+      ) {
+        view.dispose();
+        agentViews.delete(key);
+        agentSelections.delete(key);
+      } else if (page !== active) view.close();
+    }
+  }
+
   function executionText(value) {
     if (value === undefined || value === null) return "";
     return typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -1213,7 +1244,7 @@
             : `Text${text ? `: ${text.trim().split("\n")[0]}` : ""}`;
     row.className = `execution-block execution-${block.kind || "text"}`;
     row.dataset.status = block.status || "completed";
-    const header = el("summary", { class: "execution-header" }, [
+    const header = el(isRead ? "div" : "summary", { class: "execution-header" }, [
       el("span", { class: "execution-title", text: title }),
       el("span", {
         class: "execution-status",
@@ -1226,8 +1257,12 @@
           : "",
       }),
     ]);
+    if (isRead) {
+      row.replaceChildren(header);
+      return;
+    }
     const body = el("div", { class: "execution-body" });
-    if (!isRead && block.kind === "tool") {
+    if (block.kind === "tool") {
       body.append(
         el("h4", { text: "Arguments" }),
         el("pre", { text: executionText(block.arguments) || "Unavailable" }),
@@ -1265,9 +1300,9 @@
       }
       if (!Object.keys(report).length && block.report)
         body.appendChild(el("pre", { text: executionText(block.report) }));
-    } else if (!isRead) body.appendChild(el("pre", { text }));
+    } else body.appendChild(el("pre", { text }));
     const preview = el("pre", { class: "execution-preview", text: "" });
-    if (!isRead && block.kind === "tool") {
+    if (block.kind === "tool") {
       if (["grep", "glob"].includes(name) && block.result !== undefined) {
         const result = block.result;
         const output =
@@ -1362,6 +1397,7 @@
         menu.hidden = true;
         select.setAttribute("aria-expanded", "false");
       };
+      view.close = close;
       select.addEventListener("click", () => {
         if (!menu.hidden) {
           close();
@@ -1406,14 +1442,22 @@
           options[next]?.focus();
         }
       });
-      document.addEventListener("pointerdown", (event) => {
+      const onPointerDown = (event) => {
         if (
           !menu.hidden &&
           !menu.contains(event.target) &&
           !select.contains(event.target)
         )
           close();
-      });
+      };
+      document.addEventListener("pointerdown", onPointerDown);
+      view.dispose = () => {
+        close();
+        document.removeEventListener("pointerdown", onPointerDown);
+        menu.remove();
+        root.remove();
+        view.revision = (view.revision || 0) + 1;
+      };
       log.addEventListener("scroll", () => {
         if (!view.updating)
           view.positions.set(view.role, executionPosition(view));
@@ -1495,9 +1539,15 @@
     for (const agent of agents) {
       for (const block of agent.blocks || []) {
         const id = JSON.stringify([agent.id, block.id]);
+        const tag =
+          block.kind === "tool" &&
+          (block.name || "").split(/[.:/]/).at(-1) === "read"
+            ? "div"
+            : "details";
         let cached = view.rows.get(id);
-        if (!cached) {
-          cached = { node: el("details"), signature: null };
+        if (!cached || cached.node.localName !== tag) {
+          if (cached) cached.node.remove();
+          cached = { node: el(tag), signature: null };
           view.rows.set(id, cached);
         }
         const signature = JSON.stringify(block);
@@ -1734,6 +1784,7 @@
   // ------------------------------------------------------------------
   function renderAll() {
     if (!state.ui) return;
+    cleanupAgentViews();
     renderMenubar();
     renderSidebar("left");
     renderSidebar("right");

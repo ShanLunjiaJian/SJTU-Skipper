@@ -26,7 +26,7 @@ devShell 提供 Python、Bun、uv、ffmpeg 和动态库路径．非 Nix 系统�
 ### 2. 真实运行
 
 ```bash
-./start.sh check   # 检查插件拓扑加载（直接运行最新源码，不需要重新安装）
+./start.sh check   # 检查插件拓扑加载
 ./start.sh         # 启动 Web UI（等价于 serve）
 ./start.sh --port 9000
 ```
@@ -35,7 +35,7 @@ devShell 提供 Python、Bun、uv、ffmpeg 和动态库路径．非 Nix 系统�
 
 服务必须在前台运行才能接收 Ctrl+C：直接在终端执行上面的命令，不要加 `&`、`nohup` 或 `setsid`．后台 shell 启动的进程可能无法接收终端的 Ctrl+C 信号．前台运行时，Ctrl+C 会在 5 秒内退出（`SHUTDOWN_TIMEOUT`，见 `src/config.py`）；再次按 Ctrl+C 可强制退出，也可使用 `pkill -f "sjtu-skipper serve"`．
 
-也可以继续使用安装后的命令行：
+安装后的命令行入口：
 
 ```bash
 .venv/bin/sjtu-skipper check
@@ -44,27 +44,26 @@ devShell 提供 Python、Bun、uv、ffmpeg 和动态库路径．非 Nix 系统�
 
 打开页面后：
 
-1. 首次启动会生成 `data/agent/auth.json`（用户名 `admin`，随机密码只打印一次在启动日志里），浏览器会先跳转到登录页；改成自己的密码后重启即可。登录态是签名 cookie，有效期由 `session_ttl_hours` 控制（默认 7 天）。
+1. 首次启动生成 `data/agent/auth.json`，用户名为 `admin`，随机密码打印在启动日志中．修改密码后重启服务．浏览器使用签名 cookie 登录，登录有效期由 `session_ttl_hours` 控制．
 2. 在「设置」填写 Canvas Token．在「STT」分组填写兼容服务地址、语言和课程上下文．
 3. 在「LLM」编辑并保存 `models.yml` 和 `roles.yml`．为提供方保存 API key，或点击「关联 OpenCode 套餐」完成设备授权．
-4. 左侧课程树中展开课程（可点「刷新」重新拉取）。
-5. 选择录播或直播，开始一节课。
-6. 左侧「课堂」查看转写、板书、笔记。
+4. 展开左侧课程树，选择录播或直播并开始处理．
+5. 在课堂页查看进度和识别内容，在「笔记」面板打开笔记或 Agent 日志．
 
-左右两侧面板都带标题栏（右上角 × 收起，拖动或双击内侧分隔条调整宽度）；右侧顶部会标明当前面板对应哪门课、哪一节课。没有选中课程且没有历史时会显示占位提示。
+左右面板可通过标题栏的 × 收起，通过拖动或双击分隔条调整宽度．右侧顶部显示选中的课堂．
 
-一节课开始处理后可以继续在左侧选别的课：处理在后台继续，切换选中不会中断它。再点「开始处理」会进入「处理队列」，按先后顺序自动开始；直播课优先排队。队列是串行的：当前媒体管线一次只处理一节课。
+处理课程时可以选择其他课程．点击「开始处理」将课程加入队列，直播优先．媒体输入按课程排队，语音、板书和笔记任务可同时执行．
 
-直播与录播都连续发送最多 200 ms 的音频帧．直播显示 partial，只有 final 写入转写记录；录播使用 offline 模式全速传输，默认并发 1 路．STT 服务负责声学切分、上下文重叠及文本合并．`stt.context` 提供课程主题或术语，默认留空．板书识别按顺序提交，`vlm.prepare_ahead` 控制是否提前准备下一个窗口的图像．录播页显示下载和处理进度及「打开录像」链接，本地录像只保留最近 `input.keep_recordings`（默认 4）节．
+直播与录播连续发送最多 200 ms 的音频帧．直播显示 partial，只有 final 写入转写记录；录播使用 offline 模式全速传输．STT 服务负责声学切分、上下文重叠及文本合并．`stt.context` 提供课程主题或术语．板书识别按顺序提交，`vlm.prepare_ahead` 控制下个窗口的图像准备．课堂页显示总进度、下载、STT、VLM 和分段笔记进度．`input.keep_recordings` 控制本地录像保留数量．
 
 多节录播共用连续时间轴，进度按各节时长之和计算．处理本节时预下载下一节，节间不等待语音或板书分析清空．全部节次结束后才完成输入尾段．
 
 录播下载与音视频解码共用本地字节缓存．支持 Range 的来源可在完整下载前开始处理．不支持 Range 且索引位于文件尾时，解码等待下载．完整录像下载成功后才显示本地播放链接．
 
-LLM 配置保存在 `data/agent/llm_runtime/models.yml` 和 `roles.yml`．设置页同时检查两份 YAML，检查通过后保存．已有会话保留创建时的配置，新会话使用新配置．
+LLM 配置保存在 `data/agent/llm_runtime/models.yml` 和 `roles.yml`．设置页检查两份 YAML 后保存．配置变更只影响随后创建的模型会话．
 
 - `models.yml` 使用 OMP `providers` 结构．提供方配置 `baseUrl`、`api`、鉴权和 headers，模型配置输入能力、上下文限制与思考能力．`api` 接受已安装 OMP SDK 支持的协议，包括 `openai-completions` 和 `openai-responses`．
-- `roles.yml` 将职责映射到 `provider/model:level` 或 `@role`．角色涵盖板书、分段、整课写作、两项审阅、修订、问答、交互助手与上下文压缩．未填写的角色继承 `default`．
+- `roles.yml` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、整课写作、审阅、修订、问答、交互助手与上下文压缩．未填写的角色继承 `default`．
 - 板书角色 `board_recognition` 必须选择支持图像输入的模型．无效选择器、角色循环或不支持的思考级别会阻止保存．
 - 默认模型为 `deepseek-flash`．省略 `maxTokens` 时继承 OMP 模型能力信息；显式填写时使用配置值．
 - 提供方凭据由项目 OMP `AuthStorage` 管理，保存在 `data/agent/llm_runtime/credentials.db`．API key 与 OpenCode OAuth 凭据分别保存，设置页只显示配置状态．无鉴权服务设置 `auth: none`．
@@ -114,7 +113,7 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 | reader | `reader` | 通用 Markdown 阅读页（每门课一页），持有选中菜单与内联问答块 |
 | instant-summarize | `instant-summarize` | 分段笔记页面与预览开关，直播和录播均可使用 |
 
-分段核心区间由 `notes.chunk_seconds` 设置，`notes.overlap_seconds` 提供左侧原文上下文．重叠原文不重复计入正文．`notes.concurrency` 限制所有课程同时运行的笔记 agent 数量．分段预览标为未审阅；完整笔记须经过整课写作和来源覆盖、正确性两项审阅．来源缺口与审阅结果分别显示．生成失败时保留已发布笔记和用户问答．
+分段核心区间由 `notes.chunk_seconds` 设置，`notes.overlap_seconds` 提供左侧原文上下文．重叠原文不重复计入正文．`notes.concurrency` 限制笔记 agent 并发数．分段预览标为未审阅；`note_review` 统一检查完整笔记的来源覆盖与正确性．生成失败时保留已发布笔记和用户问答．
 
 写作者每次 `edit` 或 `write` 成功后，应用在发布锁内更新预览．浏览器可在生成期间阅读已保存文稿．审阅者读取锁保护的固定快照．来源始终只读，完整来源在上下文压缩后仍可重新读取．
 

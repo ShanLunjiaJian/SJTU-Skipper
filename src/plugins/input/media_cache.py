@@ -262,7 +262,7 @@ class MediaCache:
                     size = min(size, self.sequential_end - offset)
                     break
                 self.condition.wait(0.1)
-        data = os.pread(self.fd, size, offset)
+            data = os.pread(self.fd, size, offset)
         if len(data) != size:
             raise OSError("Incomplete cached range")
         return data
@@ -359,9 +359,10 @@ class MediaCache:
                 if self.server_thread is not None:
                     self.server_thread.join()
                 self.server = None
-            if self.fd >= 0:
-                os.close(self.fd)
-                self.fd = -1
+            with self.condition:
+                if self.fd >= 0:
+                    os.close(self.fd)
+                    self.fd = -1
             if not self.path.exists():
                 self.part.unlink(missing_ok=True)
             self.done.set()

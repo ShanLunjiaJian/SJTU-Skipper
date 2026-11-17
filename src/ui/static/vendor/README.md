@@ -10,8 +10,8 @@
 
 `hls/` 与 `mpegts/` 中的文件是上游 `dist/` 构建产物，未做修改；上游许可证全文见 <https://github.com/video-dev/hls.js> 和 <https://github.com/xqq/mpegts.js>。
 
-新增或升级这些库时：
+库维护步骤：
 
 1. 只保留运行所需的 `.min.js` / `.min.css` / 字体，不提交 `src/` 与 sourcemap；
 2. 同步更新上表的版本号；
-3. 修改 `src/ui/static/index.html` 里对应资源的 `?v=` 查询参数，避免浏览器继续用旧缓存。
+3. 修改 `src/ui/static/index.html` 对应资源的 `?v=` 查询参数，使浏览器重新获取资源．

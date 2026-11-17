@@ -359,7 +359,10 @@ class VlmPlugin(Plugin):
         if session is not None:
             session.video_gate.close()
         for key in requests:
-            self._ctx.llm.runtime.cancel(key)
+            try:
+                self._ctx.llm.runtime.cancel(key)
+            except Exception:
+                logger.exception("Cannot cancel VLM request %s", key)
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -647,6 +650,7 @@ class VlmPlugin(Plugin):
     def _worker_loop(self) -> None:
         logger.info("VLM worker started")
         while not self._stop_event.is_set():
+            session = None
             try:
                 session = self._select_session()
                 if session is None:
@@ -670,7 +674,7 @@ class VlmPlugin(Plugin):
                 if ctx is not None:
                     ctx.events.emit(
                         "vlm.error",
-                        session_id=session.session_id,
+                        session_id=session.session_id if session is not None else "",
                         error=self._last_error,
                     )
                     ctx.ui.refresh("vlm.error")
@@ -681,6 +685,8 @@ class VlmPlugin(Plugin):
                         session_id=session.session_id,
                         message=f"VLM failed: {self._last_error}",
                     )
+                else:
+                    self._stop_event.wait(0.1)
             else:
                 self._consecutive_errors = 0
                 self._last_error = ""
@@ -873,7 +879,10 @@ class VlmPlugin(Plugin):
 
     def _prepare_next_window(self, session, start: float, end: float):
         while not self._stop_event.is_set():
-            if session is not self._processing_session:
+            if (
+                session is not self._processing_session
+                or session.session_id in self._cancelled_sessions
+            ):
                 return None
             self._trim_before(
                 session, min(start, session.video.duration - self._window_seconds())

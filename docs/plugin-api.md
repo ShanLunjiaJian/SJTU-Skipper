@@ -1,6 +1,6 @@
-# 插件开发 API（v1）
+# 插件开发 API
 
-本文是实现期的速查表；完整设计见 `docs/architecture.md`。
+插件通过 `PluginContext` 访问流、事件、服务和界面．
 
 ## 1. 最小插件
 
@@ -55,12 +55,12 @@ audio.read_as_wav(0, 10)
 audio.wait_for(10, timeout=2)
 
 video.duration
-video.read_frames(0, 30)  # list[VideoFrame(start,end,data)]
+video.read_frames(0, 30)  # list[VideoFrame(index,start,end,data)]
 video.read(0, 30)         # 拼接 JPEG
 
 len(transcript)           # 片段数
 transcript[0].text
-transcript.text_since(10) # 第 10 项之后的拼接文本
+transcript.text_since(10) # 从索引 10 开始的拼接文本
 transcript.char_count_since(10)
 transcript.snapshot_index()
 transcript.append("文字", start=1.0, end=2.0, source="stt")
@@ -68,9 +68,9 @@ transcript.append("文字", start=1.0, end=2.0, source="stt")
 
 规则：
 
-- 只能追加；已有片段不可变。
-- 输入插件启动会话时调用 `ctx.streams.start_session(meta=...)`；行为插件不要调用。
-- 音视频 `stream.appended` 是合并通知（默认 0.5s/1s）；文字流每次 append 都通知。
+- 追加片段后，片段内容不可变．音频流可丢弃 PCM 并推进时间轴．`audio.duration` 表示时间轴终点，保留区间由 `audio.buffered_ranges()` 返回．
+- 输入插件启动会话时调用 `ctx.streams.start_session(meta=...)`．
+- 音视频 `stream.appended` 按媒体时长合并通知，默认间隔分别为 0.5 秒和 1 秒．非空文字每次 append 都通知．
 
 ## 3. 事件
 
@@ -85,35 +85,36 @@ ctx.events.emit("my.event", value=1)
 
 - `clock.tick`
 - `session.started` / `session.stopped`
-- `stream.appended`
+- `stream.appended` / `stream.sealed`
 - `settings.changed`
 - `ui.changed`
-- `llm.request` / `llm.response` / `llm.error`
-- `agent.run.started` / `agent.message` / `agent.tool_call` / `agent.tool_result` / `agent.run.finished` / `agent.error`
+- `agent.run.started` / `agent.delta` / `agent.reasoning` / `agent.message` / `agent.tool_call` / `agent.tool_result` / `agent.file` / `agent.run.finished` / `agent.error`
 - `vlm.segment` / `vlm.error`
-- `stt.segment` / `stt.error`
-- `summarize.started` / `summarize.finished` / `summarize.error`
-- `instant-summarize.triggered` / `instant-summarize.updated` / `instant-summarize.error`
+- `stt.partial` / `stt.segment` / `stt.anomaly` / `stt.error`
 - `input.status` / `input.error`
 
 ## 4. 服务互调
 
 ```python
-service = ctx.require("settings")
-service.register(spec)
-service.get("my.enabled")
+settings = ctx.require("settings")
+settings.get("my.enabled")
 
+summary = ctx.require("summarize")
+summary.start(session_id)
+# 等价的注册表调用
+ctx.services.call("summarize", "start", session_id)
+
+# 提供服务的插件声明 provides = ("my.service",)
 ctx.register_service("my.service", my_object)
-other = ctx.require("summarize")
-ctx.services.call("summarize", "trigger_now", reason="manual")
 ```
 
 约定：
 
-- 服务名点号命名：`settings`, `llm`, `agent`, `input`, `stt`, `vlm`, `summarize`, `instant-summarize`。
-- `stt` 服务：`status()` 返回 state/error/backend/model/location/session/audio/cursor/segments/chars；`transcribe(start=None, end=None)` 立即转写当前音频流的一段（`start` 缺省为工作线程游标，`end` 缺省为游标 + 分块时长；不推进工作线程游标，仅供诊断/手动调用）。
-- 插件之间不 import 实现；通过服务方法调用。
-- `requires` 只保证 setup 顺序，调用时仍要处理服务缺失。
+- 服务名包括 `settings`、`llm`、`agent`、`input`、`stt`、`vlm`、`notes-pipeline`、`summarize`、`instant-summarize` 和 `reader`．
+- `stt.status()` 返回服务地址、模型、语言、会话 ID、音频时长、处理游标、覆盖时长、片段数、临时文字和失败区间等状态．
+- `stt.transcribe(start=None, end=None)` 同步处理保留 PCM 中尚未覆盖的区间．`start` 缺省为已调度游标，`end` 缺省为 `start + 120` 秒，并限制在音频终点内．调用会追加转写、记录覆盖并推进已调度游标，返回 `ok/start/end/segments/chars/items`．
+- 服务调用使用公开服务对象，不导入插件实现．共享类型从 `core` 导入．
+- `requires` 声明必需插件，控制加载顺序和服务访问权限．缺失必需插件时加载失败．`optional_requires` 声明可选插件；调用 `ctx.service(name)` 可取得服务或 `None`．
 
 ## 5. LLM
 
@@ -132,9 +133,9 @@ for event in ctx.llm.stream(role="board_recognition", messages=[...]):
 ```
 
 - 单次生成使用 `ctx.llm.chat/stream(role=...)`，文件任务使用 `agent` 服务．两者共用项目 Bun 运行时、角色解析和提供方鉴权．
-- Python 不注册 provider，不传输 API key，不实现模型工具循环．`ChatResponse/StreamEvent` 仅作为应用响应类型．
-- 模型和思考级别来自 `roles.yml`．提供方、模型能力与兼容参数来自 `models.yml`．`api` 的可选值由已安装 OMP SDK 决定．
-- 会话创建时固定配置，后续保存只影响新会话．`ctx.llm.info()` 返回有效角色与提供方状态，`usage_snapshot()` 按 `provider/model` 返回用量．
+- Bun 运行时管理提供方鉴权和模型工具循环．`ChatResponse/StreamEvent` 是 Python 响应类型．
+- 模型和思考级别来自 `roles.yml`．提供方、模型能力与兼容参数来自 `models.yml`．`api` 的可选值由安装的 OMP SDK 决定．
+- Agent 会话创建时固定配置，保存配置不改变已创建的会话．`ctx.llm.info()` 返回角色与提供方状态．`ctx.require("llm").usage_snapshot()` 按 `provider/model` 返回用量．
 - `stt` 使用独立 HTTP/WebSocket 服务协议．
 
 ## 6. UI
@@ -147,9 +148,8 @@ page = ctx.ui.add_page("input:course:123", "课程详情", render=render_page, c
 page.open()
 ctx.ui.register_command("input.manual", "手动播放", category="调试", page_id="input:manual")
 ctx.ui.refresh("reason")
-# 右侧面板顶部的上下文条：返回 {"title", "subtitle", "state", "selected"}；
-# 返回 None 时（且没有历史）右侧面板显示“还没有选择课程”的占位。
-ctx.ui.set_context_provider(lambda: {"title": "高等数学", "subtitle": "11-05 · 录播 · 处理中",
+# 右侧面板顶部显示课程上下文
+ctx.ui.set_context_provider(lambda: {"title": "高等数学", "subtitle": "11-05 录播 处理中",
                                      "state": "busy", "selected": True})
 ```
 
@@ -159,8 +159,7 @@ Block：
 {"type": "markdown", "text": "..."}
 {"type": "text", "text": "..."}
 {"type": "keyvalue", "items": [["课程", "复分析"], ["日期", "2026-11-01"]]}
-{"type": "table", "columns": ["节次", "时间"], "rows": [["第9节", "15:55"]],
- "row_actions": [{"label": "观看", "action": "input.play", "keys": ["video_id"]}]}
+{"type": "table", "columns": ["节次", "时间"], "rows": [["第 9 节", "15:55"]]}
 {"type": "cards", "items": [{"title": "...", "subtitle": "...", "actions": [...]}]}
 {"type": "list", "items": [{"text": "...", "action": "x", "value": {...}}]}
 {"type": "buttons", "buttons": [{"label": "刷新", "action": "input.refresh"}]}
@@ -171,11 +170,11 @@ Block：
 {"type": "image", "src": "/api/artifacts/<session>/vlm/000030-000060.jpg"}
 {"type": "tabs", "tabs": [{"title": "知识", "active": True, "blocks": [...],
                           "meta": {"doc_key": "knowledge", "path": "...", "owner": "summarize",
-                                   "selection_actions": [...]}}]}
+                                   "page_id": "reader:my-page", "selection_actions": [...]}}]}
 {"type": "progress", "value": 0.42, "label": "处理进度"}
-# 布尔开关：切换后以 {"enabled": true/false} 调用 action
-{"type": "switch", "label": "实时总结", "checked": True,
- "action": "instant-summarize.toggle", "hint": "关闭后不再累积内容"}
+# 切换开关时，action 的 values 包含 {"enabled": true/false}
+{"type": "switch", "label": "分段笔记", "checked": True,
+ "action": "instant-summarize.toggle"}
 # 内联问答对（reader 渲染成可折叠、可删除的独立组件）
 {"type": "qa", "id": "qa-1a2b3c4d", "ts": "2026-11-10 14:03", "status": "done",
  "intensity": "research", "collapsed": True,
@@ -185,17 +184,8 @@ Block：
 # player：两路视频（m3u8 走 hls.js，flv 走 mpegts.js，其余原生播放）
 {"type": "player", "sources": [{"key": "main", "label": "课堂", "src": "https://.../main.m3u8"},
                               {"key": "screen", "label": "屏幕", "src": "...", "muted": True}],
- "live": False, "processing": False, "finished": False, "part": 1, "parts": 2,
+ "live": False, "processing": False, "finished": False, "queued": False,
  "start_action": "input.start_processing", "pause_action": "input.pause_processing"}
-{"type": "tree", "nodes": [
-    {"label": "高等数学", "subtitle": "2026 秋 · 张三", "expanded": True, "live": True,
-     "toggle": {"action": "input.toggle_course", "value": {"course": "1"}},
-     "children": [
-         {"label": "11-05 08:00–09:35", "badge": "直播中", "badge_class": "live",
-          "active": True,
-          "action": {"action": "input.open_class", "value": {"kind": "live"}}},
-     ]},
-]}
 ```
 
 Action：
@@ -208,18 +198,18 @@ def handler(payload: dict):
     return {"ok": True, "message": "...", "refresh": True, "open_page": "my:page"}
 ```
 
-返回 `refresh=True` 会让前端重新拉取 state；长任务请放到后台线程，立即返回。
+返回 `refresh=True` 会让前端重新拉取 state．长任务需在后台执行，action 立即返回．
 
 ### 6.1 reader：选中菜单与内联问答
 
 ```python
 reader = ctx.require("reader")
 
-# owner 标记“这一页的文档是我给的”，决定选中菜单里出现谁注册的页面级项
+# owner 决定文档显示哪些页面级菜单项
 page_id = reader.show(title="笔记", docs=docs, active="knowledge",
                       page_key=session_id, owner="my-plugin")
 
-# 页面级菜单项：只在“这一页 + 这个 owner”的文档上出现
+# 页面级菜单项按页面和 owner 匹配
 reader.register_selection_action(
     page_id,
     {"id": "my.ask", "label": "提问", "icon": "💬", "kind": "prompt",
@@ -227,7 +217,7 @@ reader.register_selection_action(
     owner="my-plugin",
 )
 
-# 全局菜单项：任何笔记页都出现（ask 插件就是这么注册“提问”的）
+# 全局菜单项适用于所有 reader 页面
 reader.register_selection_action(
     "",
     {"id": "ask.ask", "label": "提问", "kind": "prompt", "action": "ask.ask",
@@ -239,7 +229,7 @@ reader.register_selection_action(
 # 问答块由 reader 做确定性写入；插件只负责产生回答文本
 created = reader.qa_begin(path, question="为什么？", selection=selection,
                           intensity="research")
-ctx = reader.qa_context(path, created["id"], before_words=2000, after_words=2000,
+context = reader.qa_context(path, created["id"], before_words=2000, after_words=2000,
                         history_words=1000)
 answer = my_agent_answer(...)          # 只读 agent，不写文件
 reader.qa_finish(path, created["id"], answer=answer, status="done",
@@ -247,25 +237,26 @@ reader.qa_finish(path, created["id"], answer=answer, status="done",
 reader.qa_set_collapsed(path, created["id"], False)
 ```
 
-- `kind="prompt"`：前端先弹输入框（有 `intensities` 时带强度选择），提交时 values 里带 `{doc_key, path, selection, question, intensity, page_id}`。
-- `qa_begin` 在选中段落下方插入 `pending` 块（问题立刻可见）；`qa_finish` 把回答写回同一块，并把 `status` / `collapsed` 写进 meta。
-- 折叠由 `reader.qa_collapse`（values: `{path, id, collapsed}`，返回 `refresh=false`）完成；删除由 `reader.qa_delete`（values: `{path, id}`）完成，插件不用管。
-- 页面级项只按当前文档的 owner 暴露；全局项不看 owner，由 action 自己判断文档是否合法。
-- 流式过程中的实时展示走 `ctx.ui.notify("qa.live", payload)`（WebSocket `{"type":"notify","topic":"qa.live"}`），payload 里带 `path` / `id` / `phase` / `reasoning_delta` / `text_delta` / `tools` / `elapsed`；结束时带 `status` / `answer_html` / `collapsed`，前端原地 patch，不触发整页刷新。
+- `docs` 中每项包含 `key`、`label` 和 `path`．`path` 指向文稿文件，`owner` 可按文稿覆盖．
+- `kind="prompt"` 先显示输入框．配置 `intensities` 时显示强度选择．提交的 values 包含 `{doc_key, path, selection, question, intensity, page_id}`．
+- `qa_begin` 在选中段落下方插入 `pending` 块．未找到选中内容时，问答块追加到文末．`qa_finish` 更新同一块的回答、`status` 和 `collapsed`．
+- `reader.qa_collapse` 接收 `{path, id, collapsed}`，返回 `refresh=false`．`reader.qa_delete` 接收 `{path, id}`．
+- 页面级项按文档 owner 过滤．全局项不按 owner 过滤，action 需检查文档是否可用．
+- 流式展示使用 `ctx.ui.notify("qa.live", payload)`．payload 包含 `path`、`id` 和流式增量，结束时包含 `status`、`answer_html` 和 `collapsed`．前端直接更新问答块．
 
-Web 层还预注册了通用 action `ui.open_page`，插件可以在按钮里这样用：
+UI 注册表提供通用 action `ui.open_page`：
 
 ```python
 {"type": "buttons", "buttons": [
     {"label": "打开笔记页", "action": "ui.open_page",
-     "value": {"page_id": "summarize:notes"}}
+     "value": {"page_id": "my:page"}}
 ]}
 ```
 
 ## 7. 设置
 
 ```python
-from plugins.settings import SettingsSpec
+from core.settings_spec import SettingsSpec
 
 settings = ctx.require("settings")
 settings.register(SettingsSpec(
@@ -280,14 +271,14 @@ value = settings.get("my.api_key")
 settings.set("my.api_key", "new")
 ```
 
-- secret 在 UI/公开输出中掩码；内部 `get` 返回真实值。
-- `env=("ENV_NAME",)`：首次注册时把环境变量写入 `settings.json`，之后以设置为准，避免隐藏回退。
-- `visible_when=("other.key", (value, ...))`：仅当另一个设置取指定值时显示该字段。
-- `group_note="..."`：显示在该设置分组表单上方。
-- `hidden=True`：持久化但不在表单显示（适合由插件管理的 token）。
-- `readonly=True`：只读展示，保存时忽略。
-- `type="action", action="..."`：渲染为按钮，点击调用对应 UI action。
-- 设置变化发 `settings.changed`。
+- secret 在 UI 和公开输出中掩码，内部 `get` 返回真实值．
+- `env=("ENV_NAME",)`：注册时，如果设置尚未存储，则读取环境变量并写入 `settings.json`．
+- `visible_when=("other.key", (value, ...))`：仅当另一个设置取指定值时显示该字段．
+- `group_note="..."`：显示在该设置分组表单上方．
+- `hidden=True`：持久化但不在表单显示．
+- `readonly=True`：只读展示，保存时忽略．
+- `type="action", action="..."`：渲染为按钮，点击调用对应 UI action．
+- 设置变化发 `settings.changed`．
 
 LLM 设置使用独立的 `models.yml` 与 `roles.yml` 编辑区，不注册模型、密钥或 YAML 字符串的标量设置．两份文件保存在 `data_dir/llm_runtime/`，保存前一起检查．角色支持 `provider/model:level`、`@role` 和缺省继承 `default`．
 
@@ -329,52 +320,34 @@ agent.cancel(writer.id)
 agent.close(writer.id)
 ```
 
-工具直接使用 OMP 的 schema 和动态描述．调用方只声明工具名，不设置 Python 工具参数或截断规则：
+工具使用 OMP 的 schema 和动态描述．调用方声明工具名：
 
-| 工具    | 行为                                         | 调度      |
-| ------- | -------------------------------------------- | --------- |
-| `read`  | 路径选择器、范围、快照与继续读取             | shared    |
-| `grep`  | 正则、文件过滤与命中上下文                   | shared    |
-| `glob`  | 列出授权工作区文件                           | shared    |
-| `edit`  | 模型选择的上游编辑模式，多文件修改与快照检查 | exclusive |
-| `write` | 创建文件或完整写入，遵守上游写入约束         | exclusive |
+| 工具 | 行为 |
+| ---- | ---- |
+| `read` | 读取授权文件，支持路径选择器、范围和快照 |
+| `grep` | 按正则搜索授权工作区 |
+| `glob` | 列出授权工作区文件 |
+| `edit` | 修改授权可写文稿，检查编辑目标与快照 |
+| `write` | 完整写入授权可写文稿 |
 
-`read/grep/edit` 共用会话级工具状态．默认编辑模式为 hashline，模型策略可选择 replace 模式．追加内容使用原生 `edit`．
+`FileWorkspace` 声明文件映射和只读文件．工具使用工作区内的相对路径．运行时拒绝绝对路径、URI、目录逃逸和符号链接．只读会话需将 `tools` 限制为 `read/grep/glob`．
 
-连续只读调用可并行．写入等待前面的调用完成，后面的读取等待写入完成．多个写入保持调用顺序．工具错误返回给对应调用，SDK 继续管理恢复和上下文压缩．完整来源在压缩后仍可读取．
+`on_event` 接收 `AgentEvent`，事件名见第 3 节．文稿变化触发 `agent.file`，应用在 publication lock 内写回授权文件并刷新预览．
 
-`FileWorkspace` 声明授权文件和只读文件．运行时检查全部工具路径和编辑目标，拒绝目录逃逸、符号链接逃逸与未开放 URI．只读会话不注册 `edit/write`．职责提示追加到 SDK 的模型提示模板，不覆盖上游工具说明．
-
-`on_event` 接收 `agent.run.started`、`agent.delta`、`agent.reasoning`、`agent.tool_call`、`agent.tool_result`、`agent.message`、`agent.file` 和终态事件．成功写入触发 `agent.file`，应用在 publication lock 内更新预览．审阅会话读取同一锁下的固定快照．
-
-`cancel` 终止实际模型流与工具执行．`reset` 清除会话，`close` 取消并释放会话．Bun 进程退出时请求返回错误，已保存文稿与来源位置供恢复使用．SDK 保存模型历史，Python 显示记录不再回传给模型．
+`cancel` 取消模型与工具执行．`reset` 取消执行并清除模型历史和显示记录，保留会话．`close` 取消执行并释放会话．SDK 保存模型历史，Python 的显示记录用于界面展示．
 
 ## 9. 文件与数据目录
 
 ```python
 ctx.data_dir                         # data/agent
-ctx.session_dir()                    # data/agent/sessions/<current session>
+ctx.session_dir()                    # data/agent/sessions/<session_id>
 ctx.session_dir("other-session")     # 指定会话
 ```
 
-产物建议：
-
-- 笔记：`notes/`
-- VLM 融合图：`vlm/`
-- STT 临时文件：`stt/`
+会话产物包括 `notes/` 下的文稿和 `vlm/` 下的融合图．
 
 ## 10. 测试
 
-```python
-from config import load_config
-from core.runtime import build_runtime
-
-runtime = build_runtime(load_config(data_dir=tmp_path), plugins=[MyPlugin()])
-runtime.start()
-...
-runtime.stop()
-```
-
-- 确定性测试不访问外网，使用脚本化运行时或本地请求记录．测试面向配置、授权、事件和可见文稿行为，不绑定旧 Python provider 或 worker 实现．
-- 事件异步分发，断言前调用 `runtime.bus.flush(2.0)`。
-- 线程型插件在 `teardown` 中必须停止并 join。
+- 测试通过 `llm=` 注入脚本化服务，避免访问外网．
+- 事件异步分发，断言前调用 `runtime.bus.flush(2.0)`．
+- 线程型插件在 `teardown` 中必须停止并 join．

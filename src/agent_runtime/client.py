@@ -64,7 +64,16 @@ class RuntimeClient:
                     target.put({"type": "error", "error": reason})
 
     def stream(self, method: str, *, on_sent=None, **params):
-        self._start()
+        with self._lock:
+            if method in ("cancel", "close_session"):
+                if (
+                    self._closed
+                    or self._process is None
+                    or self._process.poll() is not None
+                ):
+                    return
+            else:
+                self._start()
         request_id = uuid.uuid4().hex
         target = queue.Queue()
         with self._lock:
@@ -98,6 +107,8 @@ class RuntimeClient:
         for message in self.stream(method, **params):
             if message["type"] == "result":
                 return message["result"]
+        if method in ("cancel", "close_session"):
+            return {}
         raise RuntimeError("Agent runtime returned no result")
 
     def cancel(self, session_id: str):

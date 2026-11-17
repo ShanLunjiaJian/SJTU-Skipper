@@ -154,10 +154,12 @@ class AgentService:
         session = self.get_session(session_id)
         if session is None:
             return
-        self.cancel(session_id)
-        with session.lock:
+        try:
+            self.cancel(session_id)
+        finally:
             try:
-                self._runtime.call("close_session", session_id=session_id)
+                with session.lock:
+                    self._runtime.call("close_session", session_id=session_id)
             finally:
                 with self._lock:
                     self._sessions.pop(session_id, None)
@@ -260,7 +262,10 @@ class AgentService:
                     {"role": "assistant", "content": result.final_message}
                 )
         except Exception as exc:
-            self._runtime.cancel(session_id)
+            try:
+                self._runtime.cancel(session_id)
+            except Exception:
+                pass  # Preserve the run failure if cancellation also fails.
             session.runtime_ready = False
             result.error = str(exc)
         finally:

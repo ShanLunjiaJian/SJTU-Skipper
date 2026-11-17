@@ -565,14 +565,17 @@ code {
   gap: 0 10px;
   padding: 10px 0 10px 17px;
   position: relative;
-  cursor: pointer;
+  cursor: auto;
   list-style: none;
   font: 12px/1.6 var(--font-mono, monospace);
+}
+summary.execution-header {
+  cursor: pointer;
 }
 .execution-header::-webkit-details-marker {
   display: none;
 }
-.execution-header::before {
+summary.execution-header::before {
   content: ">";
   position: absolute;
   left: 0;
@@ -582,7 +585,7 @@ code {
 .execution-block[open] > .execution-header::before {
   transform: rotate(90deg);
 }
-.execution-header:hover {
+summary.execution-header:hover {
   color: var(--accent);
 }
 .execution-title {

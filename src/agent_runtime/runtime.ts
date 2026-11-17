@@ -482,6 +482,7 @@ export class Runtime {
       return { ok: true };
     }
     const conversation = this.sessions.get(id);
+    if (method === "cancel" && !conversation) return { ok: true };
     if (!conversation) throw new Error(`Unknown session: ${id}`);
     if (method === "cancel") {
       await conversation.session.abort();

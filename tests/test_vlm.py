@@ -654,6 +654,23 @@ class TestVlmPlugin:
         assert len(errors) >= 1
         assert "simulated LLM failure" in errors[0].get("error", "")
 
+    def test_selection_failure_has_no_session(self, vlm_plugin, vlm_ctx):
+        failures = []
+        vlm_ctx.events.on(
+            "vlm.error", lambda event: failures.append(dict(event.payload))
+        )
+
+        def fail():
+            vlm_plugin._stop_event.set()
+            raise RuntimeError("selection failed")
+
+        vlm_plugin._select_session = fail
+        vlm_plugin._flush_remaining = lambda: None
+        vlm_plugin._worker_loop()
+        vlm_ctx.events.flush(timeout=1.0)
+        assert failures[0]["session_id"] == ""
+        assert not vlm_plugin._cancelled_sessions
+
     def test_worker_failure_releases_input(self, vlm_plugin, vlm_ctx):
         session = vlm_ctx.streams.start_session(meta={"mode": "fast"})
         session.input_done = True
@@ -786,3 +803,26 @@ def test_idle_session_does_not_block_recording():
     plugin._history_windows = lambda: 3
     current.video_input_done = True
     assert plugin._select_session() is current
+
+
+def test_cancel_releases_preparation_pool(vlm_plugin, vlm_ctx):
+    session = vlm_ctx.streams.start_session()
+    vlm_plugin._processing_session = session
+    waiting = threading.Event()
+    wait_for = session.video.wait_for
+
+    def wait(end, timeout):
+        waiting.set()
+        return wait_for(end, timeout=timeout)
+
+    with patch.object(session.video, "wait_for", side_effect=wait):
+        prepared = vlm_plugin._prepare_pool.submit(
+            vlm_plugin._prepare_next_window, session, 0, 20
+        )
+        assert waiting.wait(3)
+        vlm_plugin.cancel(session.session_id)
+        assert prepared.result(timeout=3) is None
+        assert (
+            vlm_plugin._prepare_pool.submit(lambda: "available").result(timeout=3)
+            == "available"
+        )

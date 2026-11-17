@@ -64,3 +64,16 @@ test("generation honors disabled thinking", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("cancel after generation cleanup is idempotent", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "runtime-cancel-"));
+  const runtime = new Runtime(root);
+  try {
+    await expect(
+      runtime.dispatch("cancel", { session_id: "completed" }, () => {}),
+    ).resolves.toEqual({ ok: true });
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

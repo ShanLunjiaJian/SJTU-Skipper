@@ -276,3 +276,40 @@ def test_agent_ui_actions_remain_usable(tmp_path):
         assert agent.get_session(internal.id).to_dict()["internal"]
     finally:
         runtime.stop()
+
+
+def test_run_preserves_failure_when_cancel_fails(tmp_path):
+    def fail(sdk, params):
+        raise RuntimeError("runtime exited")
+        yield
+
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path, fail)
+    session = agent.create_session("failure")
+
+    def cancel(session_id):
+        raise RuntimeError("cancel transport failed")
+
+    sdk.cancel = cancel
+    try:
+        result = agent.run(session.id, "Run")
+        assert result.error == "runtime exited"
+        with pytest.raises(RuntimeError, match="cancel transport failed"):
+            agent.close(session.id)
+        assert agent.get_session(session.id) is None
+        assert session.id not in sdk.sessions
+    finally:
+        runtime.stop()
+
+
+def test_cleanup_does_not_start_runtime(tmp_path, monkeypatch):
+    from agent_runtime.client import RuntimeClient
+
+    client = RuntimeClient(tmp_path)
+
+    def start():
+        raise AssertionError("Cleanup restarted the runtime")
+
+    monkeypatch.setattr(client, "_start", start)
+    client.cancel("completed")
+    client.call("close_session", session_id="completed")
+    assert client._process is None
