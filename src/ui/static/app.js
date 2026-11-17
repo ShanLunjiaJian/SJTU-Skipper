@@ -534,6 +534,9 @@
       } else if (type === "checkbox" || rawType === "bool") {
         input = el("input", { type: "checkbox", id, name: fieldName });
         input.checked = Boolean(field.value);
+        const label = row.querySelector("label");
+        label.classList.add("checkbox");
+        label.prepend(input);
       } else {
         input = el("input", {
           class: "input",
@@ -568,7 +571,7 @@
         input.readOnly = true;
         input.classList.add("input-readonly");
       }
-      row.appendChild(input);
+      if (input.type !== "checkbox") row.appendChild(input);
       if (field.secret) {
         const status = el("div", {
           class: `form-status ${field.is_set ? "ok" : ""}`,
@@ -919,19 +922,22 @@
     return "";
   }
 
-  function buildQaLive(block) {
-    const live = el("div", {
-      class: "qa-live",
-      dataset: { qaId: block.id || "", qaPath: block.path || "" },
-    });
-    live.appendChild(el("div", { class: "qa-live-phase", text: "思考中…" }));
-    live.appendChild(el("div", { class: "qa-live-tools" }));
-    live.appendChild(el("div", { class: "qa-live-thinking" }));
-    live.appendChild(el("div", { class: "qa-live-answer" }));
-    return live;
+  const qaLiveCache = new Map();
+
+  function qaKey(path, id) {
+    return JSON.stringify([path || "", id]);
+  }
+
+  function qaActivity(block) {
+    return (
+      qaLiveCache.get(qaKey(block.path, block.id))?.activity ||
+      block.activity || { id: `qa-${block.id}`, agents: [] }
+    );
   }
 
   function renderQA(block) {
+    const cached = qaLiveCache.get(qaKey(block.path, block.id));
+    if (block.status === "pending" && cached) block = { ...block, ...cached };
     const pending = String(block.status || "") === "pending";
     const collapsed = Boolean(block.collapsed) && !pending;
     const wrap = el("section", {
@@ -980,21 +986,11 @@
     );
 
     const body = el("div", { class: "qa-body" });
-    body.appendChild(
-      el("div", { class: "qa-msg qa-question" }, [
-        el("div", { class: "qa-role", text: "你的提问" }),
-        el("div", {
-          class: "qa-text markdown",
-          html: block.question_html || escapeHtml(block.question || ""),
-        }),
-      ]),
-    );
     const answerBox = el("div", {
-      class: `qa-msg qa-answer ${pending ? "pending" : ""} ${block.status === "error" ? "qa-failed" : ""}`,
+      class: `qa-answer ${pending ? "pending" : ""} ${block.status === "error" ? "qa-failed" : ""}`,
     });
-    answerBox.appendChild(el("div", { class: "qa-role", text: "Agent 回答" }));
     if (pending) {
-      answerBox.appendChild(buildQaLive(block));
+      answerBox.appendChild(renderAgentActivity(qaActivity(block)));
     } else {
       answerBox.appendChild(
         el("div", {
@@ -1013,14 +1009,6 @@
   // ------------------------------------------------------------------
   // Live Q&A patches (WebSocket notify, never a full-page refresh)
   // ------------------------------------------------------------------
-  const _QA_PHASES = {
-    thinking: "思考中…",
-    tool: "检索 / 读取材料…",
-    answering: "回答中…",
-    done: "已完成",
-    error: "失败",
-  };
-
   function qaNode(path, id) {
     return (
       $$(".qa").find(
@@ -1028,20 +1016,6 @@
           node.dataset.qaId === id && (!path || node.dataset.qaPath === path),
       ) || null
     );
-  }
-
-  function renderQaTools(node, tools) {
-    const box = node.querySelector(".qa-live-tools");
-    if (!box) return;
-    box.replaceChildren();
-    for (const tool of tools || []) {
-      box.appendChild(
-        el("span", {
-          class: `qa-tool ${tool.done ? "done" : "busy"}`,
-          text: `${tool.name || "?"} ${tool.detail || ""}`.trim(),
-        }),
-      );
-    }
   }
 
   function withScrollAnchor(node, mutate) {
@@ -1065,7 +1039,6 @@
       answerBox.classList.remove("pending");
       if (payload.status === "error") answerBox.classList.add("qa-failed");
       answerBox.replaceChildren(
-        el("div", { class: "qa-role", text: "Agent 回答" }),
         el("div", {
           class: "qa-text markdown",
           html:
@@ -1085,32 +1058,30 @@
 
   function applyQaLive(payload) {
     if (!payload || !payload.id) return;
+    const key = qaKey(payload.path, payload.id);
+    const cached = { ...qaLiveCache.get(key), ...payload };
+    const finished = payload.status && payload.status !== "pending";
+    if (finished) delete cached.activity;
+    qaLiveCache.set(key, cached);
     const node = qaNode(payload.path || "", payload.id);
-    if (!node) return;
-    withScrollAnchor(node, () => {
-      const phase = node.querySelector(".qa-live-phase");
-      if (phase && payload.phase) {
-        const text = _QA_PHASES[payload.phase] || payload.phase;
-        phase.textContent = payload.elapsed
-          ? `${text}, ${payload.elapsed}s`
-          : text;
-      }
-      if (Array.isArray(payload.tools)) renderQaTools(node, payload.tools);
-      if (payload.reasoning_delta) {
-        const box = node.querySelector(".qa-live-thinking");
-        if (box) {
-          box.appendChild(document.createTextNode(payload.reasoning_delta));
-          box.scrollTop = box.scrollHeight;
+    const update = () => {
+      if (finished) {
+        const activityId = payload.activity?.id || `qa-${payload.id}`;
+        for (const viewKey of agentViews.keys()) {
+          if (JSON.parse(viewKey)[1] === activityId) disposeAgentView(viewKey);
+        }
+        if (node) finishQaBlock(node, payload);
+      } else if (payload.activity && node?.dataset.qaStatus === "pending") {
+        const answerBox = node.querySelector(".qa-answer");
+        if (answerBox) {
+          const activity = renderAgentActivity(payload.activity);
+          if (activity.parentNode !== answerBox)
+            answerBox.appendChild(activity);
         }
       }
-      if (payload.text_delta) {
-        const box = node.querySelector(".qa-live-answer");
-        if (box) box.appendChild(document.createTextNode(payload.text_delta));
-      }
-      if (payload.status && payload.status !== "pending") {
-        finishQaBlock(node, payload);
-      }
-    });
+    };
+    if (node) withScrollAnchor(node, update);
+    else update();
   }
 
   function renderBlocks(blocks) {
@@ -1143,23 +1114,41 @@
   const agentSelections = new Map();
   const agentViews = new Map();
 
+  function disposeAgentView(key) {
+    agentViews.get(key)?.dispose();
+    agentViews.delete(key);
+    agentSelections.delete(key);
+  }
+
   function cleanupAgentViews() {
     const active = state.ui.active_page;
     const openPages = new Set(state.ui.open_pages || []);
     if (active) openPages.add(active);
     const pages = new Set((state.ui.pages || []).map((page) => page.id));
     const activeKeys = new Set();
-    const collect = (blocks) => {
+    const qaKeys = new Set();
+    const collect = (blocks, page) => {
       for (const block of blocks || []) {
         if (block.type === "agent_activity")
-          activeKeys.add(JSON.stringify([active, block.id]));
+          activeKeys.add(JSON.stringify([page, block.id]));
+        if (block.type === "qa") {
+          const key = qaKey(block.path, block.id);
+          qaKeys.add(key);
+          const cached = qaLiveCache.get(key);
+          if (block.status !== "pending") qaLiveCache.delete(key);
+          else if (!cached?.status || cached.status === "pending")
+            activeKeys.add(JSON.stringify([page, qaActivity(block).id]));
+        }
         if (block.type === "tabs")
-          for (const tab of block.tabs || []) collect(tab.blocks);
+          for (const tab of block.tabs || []) collect(tab.blocks, page);
         if (block.type === "cards")
-          for (const item of block.items || []) collect(item.blocks);
+          for (const item of block.items || []) collect(item.blocks, page);
       }
     };
-    collect(state.ui.page_content?.[active]);
+    for (const [page, blocks] of Object.entries(state.ui.page_content || {}))
+      collect(blocks, page);
+    for (const key of qaLiveCache.keys())
+      if (!qaKeys.has(key)) qaLiveCache.delete(key);
     for (const [key, view] of agentViews) {
       const [page] = JSON.parse(key);
       if (
@@ -1167,9 +1156,7 @@
         !openPages.has(page) ||
         (page === active && !activeKeys.has(key))
       ) {
-        view.dispose();
-        agentViews.delete(key);
-        agentSelections.delete(key);
+        disposeAgentView(key);
       } else if (page !== active) view.close();
     }
   }
@@ -1476,7 +1463,8 @@
         ])
       : new Map();
     for (const agent of view.agents)
-      if (agent.role?.startsWith("chunk:")) roles.set(agent.role, agent.label);
+      if (agent.role && !roles.has(agent.role))
+        roles.set(agent.role, agent.label || agent.role);
     view.roles = roles;
     for (const [value, text] of roles) {
       let option = view.options.get(value);

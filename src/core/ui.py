@@ -288,7 +288,7 @@ class UIManager:
         )
         self.register_command(
             "ui.tasks",
-            "打开任务队列",
+            "任务队列",
             category="视图",
             page_id="ui:tasks",
             keywords="tasks queue 任务 队列",

@@ -72,6 +72,14 @@ class ReaderService:
             owner=owner,
         )
 
+    def register_activity_provider(self, owner, provider):
+        with self._plugin._lock:
+            self._plugin._activity_providers[owner] = provider
+
+    def unregister_activity_provider(self, owner):
+        with self._plugin._lock:
+            self._plugin._activity_providers.pop(owner, None)
+
     # -- selection menu ------------------------------------------------
     def register_selection_action(
         self, page: str, item: dict[str, Any], *, owner: str = ""
@@ -169,6 +177,7 @@ class ReaderPlugin(Plugin):
         self.ctx = ctx
         self._lock = threading.RLock()
         self._states: dict[str, dict[str, Any]] = {}
+        self._activity_providers = {}
         # page id → owner → item id → normalized menu item
         self._selection: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
         # item id → normalized menu item, offered on every reader page
@@ -635,6 +644,15 @@ class ReaderPlugin(Plugin):
             text = texts[doc["path"]]
             owner = str(doc.get("owner", "") or state.get("owner") or "")
             blocks = _document_blocks(text, doc["path"])
+            with self._lock:
+                providers = tuple(self._activity_providers.values())
+            for block in blocks:
+                if block.get("type") == "qa" and block.get("status") == "pending":
+                    for provider in providers:
+                        activity = provider(doc["path"], block["id"])
+                        if activity is not None:
+                            block["activity"] = activity
+                            break
             tabs.append(
                 {
                     "title": doc["label"],

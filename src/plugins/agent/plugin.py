@@ -29,7 +29,7 @@ class AgentService:
         settings_getter: Callable[[str, Any], Any] | None = None,
     ) -> None:
         self._ctx = ctx
-        self._runtime = ctx.llm
+        self._runtime = ctx.require("llm")
         self._default_system_prompt = default_system_prompt
         self._settings_getter = settings_getter
         self._sessions: dict[str, AgentSession] = {}
@@ -374,7 +374,7 @@ class AgentPlugin(Plugin):
         ]
         for spec in agent_specs:
             try:
-                settings.register(spec)
+                settings.register(spec, plugin_id=self.id)
             except Exception:
                 ctx.logger.warning("settings register failed for %s", spec.key)
 

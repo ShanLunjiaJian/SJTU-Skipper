@@ -32,9 +32,10 @@ def pipeline_context(tmp_path, script):
             register_action=lambda *a, **k: None,
         ),
         register_service=lambda *a: None,
+        require=lambda name: sdk if name == "llm" else settings,
     )
     agent = AgentService(ctx)
-    ctx.require = lambda name: settings if name == "settings" else agent
+    ctx.require = lambda name: {"settings": settings, "agent": agent, "llm": sdk}[name]
     ctx.service = lambda name: None
     pipeline = NotesPipelinePlugin()
     pipeline.setup(ctx)

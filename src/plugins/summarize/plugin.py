@@ -95,7 +95,8 @@ class SummarizePlugin(Plugin):
                     type=kind,
                     label=key,
                     group="Summarize",
-                )
+                ),
+                plugin_id=self.id,
             )
         self.settings.register(
             SettingsSpec(
@@ -105,7 +106,8 @@ class SummarizePlugin(Plugin):
                 label="课后处理",
                 options=list(self.ON_STOP_LABELS),
                 group="Summarize",
-            )
+            ),
+            plugin_id=self.id,
         )
         ctx.register_service(self.id, SummarizeService(self))
         if not ctx.ui.has_tab("note"):

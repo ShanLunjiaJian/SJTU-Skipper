@@ -66,7 +66,7 @@ class NotesPipelineService:
 
 class NotesPipelinePlugin(Plugin):
     id = "notes-pipeline"
-    requires = ("settings", "llm-agent", "llm")
+    requires = ("settings", "llm-agent")
     optional_requires = ("stt", "vlm")
     provides = ("notes-pipeline",)
 
@@ -87,7 +87,8 @@ class NotesPipelinePlugin(Plugin):
                     label=label,
                     group="Notes",
                     description="修改后重启服务生效" if key == "concurrency" else "",
-                )
+                ),
+                plugin_id=self.id,
             )
         for key, default, kind, label, group in (
             ("summarize.system_prompt", SYSTEM, "string", "system_prompt", "Summarize"),
@@ -122,7 +123,8 @@ class NotesPipelinePlugin(Plugin):
                     type=kind,
                     label=label,
                     group=group,
-                )
+                ),
+                plugin_id=self.id,
             )
         self.condition = threading.Condition(threading.RLock())
         self.sessions = {}

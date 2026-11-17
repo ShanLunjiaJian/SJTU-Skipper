@@ -2109,6 +2109,7 @@ def test_multipart_progress_uses_full_duration(tmp_path, monkeypatch) -> None:
         job, session, _first, _started = _start_recording_job(ctx, plugin, monkeypatch)
         cursors = {"audio": 6326.0, "video": 6000.0}
         for name, kind in (("stt", "audio"), ("vlm", "video")):
+            ctx.services.register(name, SimpleNamespace(enabled=lambda: True))
             ctx.streams.register_consumer(
                 name,
                 kind,
@@ -2190,6 +2191,8 @@ def test_early_duration_and_completed_progress(tmp_path, monkeypatch):
     plugin._active_job = job
     plugin._jobs[job.id] = job
     plugin._current_class = cls
+    for name in ("stt", "vlm"):
+        ctx.services.register(name, SimpleNamespace(enabled=lambda: True))
     try:
         ctx.streams.seal_text(session.session_id, "transcript", 300)
         ctx.streams.seal_text(session.session_id, "visual", 300)

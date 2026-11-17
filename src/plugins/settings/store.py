@@ -315,9 +315,9 @@ class SettingsService:
     ) -> list[str]:
         """Drop declared specs by key(s) or by owning plugin.
 
-        With ``plugin_id`` every spec owned by that plugin is removed, plus any
-        spec whose key is namespaced ``"<plugin_id>."``; ``key`` may narrow the
-        set to one key or an explicit list.  Returns the removed keys.
+        With ``plugin_id``, remove its owned specs and unowned specs with the
+        ``"<plugin_id>."`` prefix. ``key`` can select one or more keys.
+        Return the removed keys.
         """
 
         wanted: set[str] = set()
@@ -334,7 +334,7 @@ class SettingsService:
                 for existing in self._specs:
                     if self._owners.get(existing) == plugin_id:
                         targets.add(existing)
-                    elif existing.startswith(prefix):
+                    elif existing not in self._owners and existing.startswith(prefix):
                         targets.add(existing)
             for existing in sorted(targets):
                 if self._specs.pop(existing, None) is not None:

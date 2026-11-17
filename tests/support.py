@@ -64,7 +64,7 @@ class FakeSettings:
         self.specs_map: dict[str, SettingsSpec] = {}
         self.changes: list[tuple[str, Any, Any]] = []
 
-    def register(self, spec: SettingsSpec) -> SettingsSpec:
+    def register(self, spec: SettingsSpec, *, plugin_id: str = "") -> SettingsSpec:
         self.specs_map[spec.key] = spec
         if spec.key not in self.values:
             self.values[spec.key] = spec.default

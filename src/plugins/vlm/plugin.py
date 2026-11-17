@@ -124,6 +124,7 @@ class VlmPlugin(Plugin):
     # ----------------------------------------------------------------
     def setup(self, ctx: PluginContext) -> None:
         self._ctx = ctx
+        self._llm = ctx.require("llm")
         self._lock = threading.RLock()
         self._persist_lock = threading.Lock()
         self._worker: threading.Thread | None = None
@@ -360,7 +361,7 @@ class VlmPlugin(Plugin):
             session.video_gate.close()
         for key in requests:
             try:
-                self._ctx.llm.cancel(key)
+                self._llm.cancel(key)
             except Exception:
                 logger.exception("Cannot cancel VLM request %s", key)
 
@@ -573,10 +574,10 @@ class VlmPlugin(Plugin):
                 self._submitted_requests.add(request_id)
                 cancelled = sid in self._cancelled_sessions
             if cancelled:
-                ctx.llm.cancel(request_id)
+                self._llm.cancel(request_id)
 
         try:
-            response = ctx.llm.call(
+            response = self._llm.call(
                 "generate",
                 role="board_recognition",
                 messages=messages,

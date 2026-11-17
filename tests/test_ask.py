@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from config import load_config
+from core.agent_types import AgentEvent
 from core.plugin import Plugin, PluginContext
 from core.runtime import build_runtime
 from plugins.agent import AgentPlugin
-from plugins.ask.plugin import AskPlugin
+from plugins.ask.plugin import AskPlugin, _Live
 from plugins.reader.plugin import ReaderPlugin
 from plugins.settings.plugin import SettingsPlugin
 
@@ -66,7 +69,37 @@ def _open_note(runtime, tmp_path: Path) -> Path:
 
 
 def test_instant_ask_answers_and_persists_fold(tmp_path: Path) -> None:
-    runtime, llm = _build(tmp_path, None)
+    snapshots = []
+
+    def script(sdk, params):
+        yield {
+            "type": "event",
+            "name": "agent.execution",
+            "data": {
+                "metrics": {"model": "test-model", "output_tokens": 3},
+                "block": {
+                    "id": "1:0",
+                    "kind": "text",
+                    "status": "completed",
+                    "text": "Answer",
+                },
+            },
+        }
+        qa_id = events[0]["id"]
+        snapshots.append(runtime.services.require("ask").activity(str(note), qa_id))
+        pages = runtime.ui.state()["page_content"]
+
+        def activities(blocks):
+            for block in blocks:
+                if block.get("type") == "qa":
+                    yield block.get("activity")
+                for tab in block.get("tabs", []):
+                    yield from activities(tab.get("blocks", []))
+
+        assert snapshots[-1] in list(activities(next(iter(pages.values()))))
+        yield {"type": "result", "result": {"final_message": "Answer", "steps": 1}}
+
+    runtime, llm = _build(tmp_path, script)
     events: list[dict] = []
     runtime.bus.on("ui.notify", lambda event: events.append(dict(event.get("payload"))))
     try:
@@ -104,8 +137,18 @@ def test_instant_ask_answers_and_persists_fold(tmp_path: Path) -> None:
         final = next(item for item in events if item.get("status") == "done")
         assert final["collapsed"] is True
         assert "answer_html" in final
-        # Streaming text deltas reached the UI before the final payload.
-        assert any(item.get("text_delta") for item in events)
+        activity = final["activity"]
+        assert activity["id"] == f"qa-{final['id']}"
+        assert activity["agents"][0]["status"] == "completed"
+        assert activity["agents"][0]["blocks"][0]["text"] == "Answer"
+        assert events[0]["activity"]["agents"][0]["blocks"] == []
+        assert snapshots[0]["agents"][0]["model"] == "test-model"
+        assert snapshots[0]["agents"][0]["role"] == "qa"
+        assert _wait_until(
+            lambda: (
+                runtime.services.require("ask").activity(str(note), final["id"]) is None
+            )
+        )
     finally:
         runtime.stop()
 
@@ -164,3 +207,82 @@ def test_research_ask_reads_complete_snapshot(tmp_path: Path) -> None:
         assert not sdk.sessions
     finally:
         runtime.stop()
+
+
+def test_live_accumulates_execution() -> None:
+    plugin = SimpleNamespace(ctx=SimpleNamespace(ui=Mock(), logger=Mock()))
+    with patch("plugins.ask.plugin.time.monotonic", return_value=1.0):
+        live = _Live(plugin, "/note.md", "question")
+        initial = plugin.ctx.ui.notify.call_args.args[1]
+        for data in (
+            {"metrics": {"model": "model", "context_tokens": 123}},
+            {
+                "block": {
+                    "id": "thought",
+                    "kind": "thinking",
+                    "status": "streaming",
+                    "text": "Consider",
+                }
+            },
+            {
+                "block": {
+                    "id": "tool",
+                    "kind": "tool",
+                    "status": "running",
+                    "name": "read",
+                    "arguments": {"path": "note.md"},
+                }
+            },
+            {
+                "block": {
+                    "id": "thought",
+                    "kind": "thinking",
+                    "status": "completed",
+                    "text": "Consider all conditions",
+                }
+            },
+            {
+                "metrics": {"tool_seconds": 2},
+                "block": {
+                    "id": "tool",
+                    "kind": "tool",
+                    "status": "completed",
+                    "name": "read",
+                    "result": "source",
+                },
+            },
+            {
+                "block": {
+                    "id": "answer",
+                    "kind": "text",
+                    "status": "streaming",
+                    "text": "Answer",
+                }
+            },
+        ):
+            live.on_event(AgentEvent("agent.execution", "session", data=data))
+        live.on_event(
+            AgentEvent("agent.reasoning", "session", data={"text": "duplicate"})
+        )
+        assert plugin.ctx.ui.notify.call_count == 1
+        live.publish(force=True)
+        pending = plugin.ctx.ui.notify.call_args.args[1]
+        agent = pending["activity"]["agents"][0]
+        assert agent["context_tokens"] == 123
+        assert agent["tool_seconds"] == 2
+        assert [block["id"] for block in agent["blocks"]] == [
+            "thought",
+            "tool",
+            "answer",
+        ]
+        assert agent["blocks"][0]["text"] == "Consider all conditions"
+        assert agent["blocks"][1]["result"] == "source"
+        live.finish(status="error", answer="Failure", elapsed=2)
+        final = plugin.ctx.ui.notify.call_args.args[1]
+    assert initial["activity"]["agents"][0]["blocks"] == []
+    assert agent["status"] == "running"
+    assert agent["blocks"][-1]["status"] == "streaming"
+    assert final["activity"]["agents"][0]["status"] == "failed"
+    assert final["activity"]["agents"][0]["blocks"][-1]["status"] == "failed"
+    assert final["answer"] == "Failure"
+    assert final["collapsed"] is False

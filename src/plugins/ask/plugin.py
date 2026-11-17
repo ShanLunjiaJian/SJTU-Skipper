@@ -7,7 +7,6 @@ back.  Answers live in the note as ``qa`` markdown blocks (owned by ``reader``).
 
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
@@ -32,7 +31,7 @@ RESEARCH = "research"
 
 
 class AskService:
-    """Narrow public ``ask`` service (1 method)."""
+    """Submit questions and read active execution snapshots."""
 
     __slots__ = ("_plugin",)
 
@@ -44,13 +43,16 @@ class AskService:
 
         return self._plugin._on_ask(payload)  # noqa: SLF001 - the plugin owns it
 
+    def activity(self, path: str, qa_id: str) -> dict[str, Any] | None:
+        return self._plugin._activity(path, qa_id)
+
 
 class AskPlugin(Plugin):
     """Reader selection menu → in-note Q&A with a live, collapsible answer."""
 
     id = "ask"
     requires = ("settings", "llm-agent", "reader")
-    optional_requires = ("summarize", "instant-summarize")
+    optional_requires = ("notes-pipeline",)
     provides = ("ask",)
 
     def setup(self, ctx: PluginContext) -> None:
@@ -59,6 +61,7 @@ class AskPlugin(Plugin):
         self._agent = ctx.require("agent")
         self._reader = ctx.require("reader")
         self._active: set[str] = set()
+        self._live: dict[tuple[str, str], _Live] = {}
         self._active_lock = threading.Lock()
         self._closed = False
 
@@ -67,6 +70,7 @@ class AskPlugin(Plugin):
 
         ctx.register_service("ask", AskService(self))
         ctx.ui.register_action(ACTION, self._on_ask, plugin_id=self.id)
+        self._reader.register_activity_provider(self.id, self._activity)
 
         self._reader.register_selection_action(
             "",
@@ -103,12 +107,18 @@ class AskPlugin(Plugin):
         if reader is not None:
             try:
                 reader.unregister_selection_action("", SELECTION_ID, owner=self.id)
+                reader.unregister_activity_provider(self.id)
             except Exception:  # noqa: BLE001 - shutdown is best effort
                 pass
 
     # ------------------------------------------------------------------
     # Settings
     # ------------------------------------------------------------------
+    def _activity(self, path, qa_id):
+        with self._active_lock:
+            live = self._live.get((str(Path(path).resolve()), qa_id))
+        return live.activity() if live is not None else None
+
     def _setting(self, key: str, default: Any) -> Any:
         return self._settings.get(f"ask.{key}", default)
 
@@ -176,6 +186,9 @@ class AskPlugin(Plugin):
 
     def _run(self, path: str, qa_id: str, selection: str, intensity: str) -> None:
         live = _Live(self, path, qa_id)
+        key = (str(Path(path).resolve()), qa_id)
+        with self._active_lock:
+            self._live[key] = live
         status = "done"
         answer = ""
         started = time.time()
@@ -186,14 +199,18 @@ class AskPlugin(Plugin):
             status = "error"
             answer = f"（回答失败：{exc}）"
 
-        self._reader.qa_finish(
-            path,
-            qa_id,
-            answer=answer,
-            status=status,
-            collapsed=(status == "done"),
-        )
-        live.finish(status=status, answer=answer, elapsed=time.time() - started)
+        try:
+            self._reader.qa_finish(
+                path,
+                qa_id,
+                answer=answer,
+                status=status,
+                collapsed=(status == "done"),
+            )
+            live.finish(status=status, answer=answer, elapsed=time.time() - started)
+        finally:
+            with self._active_lock:
+                self._live.pop(key, None)
 
     def _answer(
         self,
@@ -306,10 +323,10 @@ class AskPlugin(Plugin):
         note = Path(path)
         names = set()
         names.add(note.name)
-        for owner in ("summarize", "instant-summarize"):
-            service = self.ctx.service(owner)
-            if service is not None:
-                names.update(name for name, _ in service.note_files().values())
+        pipeline = self.ctx.service("notes-pipeline")
+        if pipeline is not None:
+            for kind in ("final", "instant"):
+                names.update(name for name, _ in pipeline.note_files(kind).values())
         files = {
             name: str(note.parent / name)
             for name in sorted(names)
@@ -321,33 +338,25 @@ class AskPlugin(Plugin):
         return files
 
     def _source_file(self, note: Path) -> Path | None:
-        """The lecture record that belongs to *note*, asked from its owner."""
+        """Locate the complete source through its owning pipeline."""
 
-        service = self.ctx.service("summarize")
-        if service is not None:
-            for session_id in (note.parent.parent.name,):
-                if not session_id:
-                    continue
-                found = service.source_path(session_id)
-                if found is not None and Path(found).exists():
-                    return Path(found)
+        pipeline = self.ctx.service("notes-pipeline")
+        if pipeline is not None:
+            found = pipeline.source_path(note.parent.parent.name)
+            if found is not None and Path(found).exists():
+                return Path(found)
         fallback = note.parent.parent / "lecture_source.md"
         return fallback if fallback.exists() else None
 
     def _doc_label(self, name: str) -> str:
         """Human title of a note file, asked from the plugin that writes it."""
 
-        for service_name in ("summarize", "instant-summarize"):
-            service = self.ctx.service(service_name)
-            if service is None:
-                continue
-            try:
-                files = service.note_files()
-            except Exception:  # noqa: BLE001 - a label must never break an answer
-                continue
-            for filename, title in (files or {}).values():
-                if filename == name:
-                    return title
+        pipeline = self.ctx.service("notes-pipeline")
+        if pipeline is not None:
+            for kind in ("final", "instant"):
+                for filename, title in pipeline.note_files(kind).values():
+                    if filename == name:
+                        return title
         return _DEFAULT_DOC_LABELS.get(name, Path(name).stem)
 
     def _course_name(self) -> str:
@@ -362,7 +371,7 @@ class AskPlugin(Plugin):
 # Live streaming helper
 # ---------------------------------------------------------------------------
 class _Live:
-    """Accumulates the agent's stream and pushes throttled UI notifications."""
+    """Accumulate native execution events and throttle full UI snapshots."""
 
     _INTERVAL = 0.1
 
@@ -370,130 +379,91 @@ class _Live:
         self._plugin = plugin
         self._path = path
         self._qa_id = qa_id
-        self._phase = "thinking"
-        self._tools: list[dict[str, Any]] = []
-        self._reasoning = ""
-        self._answer = ""
-        self._pending_reasoning = ""
-        self._pending_text = ""
-        self._started = time.time()
-        self._last = 0.0
+        self._agent: dict[str, Any] = {
+            "id": "main",
+            "role": "qa",
+            "label": "Agent 回答",
+            "status": "running",
+            "model": "",
+            "thinking": "",
+            "context_tokens": 0,
+            "context_window": 0,
+            "llm_seconds": 0,
+            "tool_seconds": 0,
+            "output_tokens": 0,
+            "tokens_per_second": 0,
+            "blocks": [],
+        }
+        self._started = time.monotonic()
+        self._last = self._started
         self._lock = threading.Lock()
+        self.publish(force=True)
 
     def on_event(self, event: Any) -> None:
-        kind = event.type
+        if event.type != "agent.execution":
+            return
         data = event.data or {}
-        step = event.step
-        logger = self._plugin.ctx.logger
-
-        if kind == "agent.reasoning":
-            delta = str(data.get("text") or "")
-            if not delta:
-                return
-            with self._lock:
-                self._reasoning += delta
-                self._pending_reasoning += delta
-                self._phase = "thinking"
-            self.publish()
-        elif kind == "agent.delta":
-            delta = str(data.get("text") or "")
-            if not delta:
-                return
-            with self._lock:
-                self._answer += delta
-                self._pending_text += delta
-                self._phase = "answering"
-            self.publish()
-        elif kind == "agent.tool_call":
-            name = str(data.get("name") or "?")
-            arguments = data.get("arguments") or {}
-            logger.info(
-                "ask %s step %s tool %s %s",
-                self._qa_id,
-                step,
-                name,
-                json.dumps(arguments, ensure_ascii=False),
-            )
-            with self._lock:
-                self._tools.append(
-                    {
-                        "name": name,
-                        "id": data.get("id", data.get("tool_call_id")),
-                        "detail": _tool_detail(name, arguments),
-                        "done": False,
-                    }
-                )
-                self._phase = "tool"
-            self.publish(force=True)
-        elif kind == "agent.tool_result":
-            logger.info(
-                "ask %s step %s tool %s result: %s",
-                self._qa_id,
-                step,
-                data.get("name", "?"),
-                str(data.get("result", ""))[:500],
-            )
-            with self._lock:
-                call_id = data.get("id", data.get("tool_call_id"))
-                for tool in self._tools:
-                    if not tool["done"] and (
-                        call_id is None or tool.get("id") == call_id
-                    ):
-                        tool["done"] = True
+        with self._lock:
+            self._agent.update(data.get("metrics") or {})
+            block = data.get("block")
+            if block is not None:
+                blocks = self._agent["blocks"]
+                for index, existing in enumerate(blocks):
+                    if existing["id"] == block["id"]:
+                        blocks[index] = dict(block)
                         break
-            self.publish(force=True)
-        elif kind == "agent.message":
-            content = str(data.get("content") or "")
-            if content:
-                logger.info("ask %s step %s reply:\n%s", self._qa_id, step, content)
-        elif kind == "agent.error":
-            logger.warning(
-                "ask %s step %s error: %s", self._qa_id, step, data.get("error")
-            )
+                else:
+                    blocks.append(dict(block))
+        self.publish()
+
+    def activity(self) -> dict[str, Any]:
+        with self._lock:
+            return self._activity()
+
+    def _activity(self) -> dict[str, Any]:
+        return {
+            "id": f"qa-{self._qa_id}",
+            "agents": [
+                {
+                    **self._agent,
+                    "blocks": [dict(block) for block in self._agent["blocks"]],
+                }
+            ],
+        }
 
     def publish(self, *, force: bool = False) -> None:
         with self._lock:
-            now = time.time()
+            now = time.monotonic()
             if not force and now - self._last < self._INTERVAL:
                 return
             self._last = now
-            reasoning = self._pending_reasoning
-            text = self._pending_text
-            self._pending_reasoning = ""
-            self._pending_text = ""
             payload = {
                 "path": self._path,
                 "id": self._qa_id,
                 "status": "pending",
-                "phase": self._phase,
-                "reasoning_delta": reasoning,
-                "text_delta": text,
-                "tools": [dict(tool) for tool in self._tools],
+                "activity": self._activity(),
                 "elapsed": round(now - self._started, 1),
             }
         self._plugin.ctx.ui.notify("qa.live", payload)
 
     def finish(self, *, status: str, answer: str, elapsed: float) -> None:
-        payload = {
-            "path": self._path,
-            "id": self._qa_id,
-            "status": status,
-            "phase": "done" if status == "done" else "error",
-            "answer": answer,
-            "answer_html": render_markdown(answer),
-            "collapsed": status == "done",
-            "elapsed": round(elapsed, 1),
-        }
-        logger = self._plugin.ctx.logger
-        # The full thinking trace goes to the log verbatim, never truncated.
-        if self._reasoning:
-            logger.info(
-                "ask %s reasoning (%d chars):\n%s",
-                self._qa_id,
-                len(self._reasoning),
-                self._reasoning,
-            )
-        logger.info(
+        with self._lock:
+            execution_status = "completed" if status == "done" else "failed"
+            self._agent["status"] = execution_status
+            for block in self._agent["blocks"]:
+                if block["status"] in ("streaming", "running"):
+                    block["status"] = execution_status
+            payload = {
+                "path": self._path,
+                "id": self._qa_id,
+                "status": status,
+                "activity": self._activity(),
+                "answer": answer,
+                "answer_html": render_markdown(answer),
+                "collapsed": status == "done",
+                "elapsed": round(elapsed, 1),
+            }
+        self._plugin.ctx.logger.info(
             "ask %s answer (%s, %.1fs):\n%s",
             self._qa_id,
             status,
@@ -501,16 +471,6 @@ class _Live:
             answer,
         )
         self._plugin.ctx.ui.notify("qa.live", payload)
-
-
-def _tool_detail(name: str, arguments: Mapping[str, Any]) -> str:
-    if name == "read":
-        return str(arguments.get("path", "?"))
-    if name == "grep":
-        return f"{arguments.get('pattern', '')} @ {arguments.get('path', '*')}"
-    if name == "glob":
-        return str(arguments.get("pattern", arguments.get("path", "*")))
-    return json.dumps(arguments, ensure_ascii=False)[:120]
 
 
 # Fallback titles when the notes plugins are not loaded (service API first).

@@ -648,3 +648,24 @@ def test_device_login_imports_oauth_into_runtime(tmp_path, monkeypatch):
         assert backend.calls[-1] == ("logout", {"provider": "opencode"})
     finally:
         runtime.stop()
+
+
+def test_unload_preserves_settings_owned_by_pipeline(tmp_path):
+    service = SettingsService(SettingsStore(tmp_path / "settings.json"))
+    service.register(
+        SettingsSpec(
+            key="summarize.review_enabled", label="Review", type="bool", default=True
+        ),
+        plugin_id="notes-pipeline",
+    )
+    service.register(
+        SettingsSpec(
+            key="summarize.on_stop", label="Stop", type="string", default="skip"
+        ),
+        plugin_id="summarize",
+    )
+    service.unregister(plugin_id="summarize")
+    assert service.get_spec("summarize.review_enabled") is not None
+    assert service.get_spec("summarize.on_stop") is None
+    service.unregister(plugin_id="notes-pipeline")
+    assert service.get_spec("summarize.review_enabled") is None

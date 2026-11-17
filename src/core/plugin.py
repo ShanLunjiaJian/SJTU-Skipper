@@ -832,6 +832,9 @@ class PluginManager:
                 logging.getLogger("lecture_agent.plugins").exception(
                     "selection action cleanup failed for plugin %s", pid
                 )
+        drop_activity = getattr(reader, "unregister_activity_provider", None)
+        if callable(drop_activity):
+            drop_activity(pid)
 
     def teardown(self) -> None:
         with self._lock:

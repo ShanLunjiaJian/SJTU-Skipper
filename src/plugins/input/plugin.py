@@ -1876,14 +1876,15 @@ class InputPlugin(Plugin):
         notes = (
             pipeline.status(session_id) if pipeline is not None and session_id else None
         )
-        settings = self._ctx.require("settings")
-        note_enabled = (
-            bool(settings.get("instant-summarize.enabled", True)) and notes is not None
-        )
+        note_enabled = bool(notes and notes["chunk_enabled"])
+        enabled_by_kind = {}
+        for kind, service_id in (("audio", "stt"), ("video", "vlm")):
+            service = self._ctx.service(service_id)
+            enabled_by_kind[kind] = bool(service is not None and service.enabled())
         ratios = []
         enabled = []
-        for kind, key in (("audio", "stt.enabled"), ("video", "vlm.enabled")):
-            if settings.get(key, True):
+        for kind in ("audio", "video"):
+            if enabled_by_kind[kind]:
                 enabled.append(kind)
                 ratios.append(
                     min(1.0, cursors[kind] / total_seconds) if total_seconds else 0.0
@@ -1927,18 +1928,15 @@ class InputPlugin(Plugin):
                 else 0.0,
             }
         )
-        for kind, name, key in (
-            ("audio", "STT", "stt.enabled"),
-            ("video", "VLM", "vlm.enabled"),
-        ):
+        for kind, name in (("audio", "STT"), ("video", "VLM")):
             blocks.append(
                 {
                     "type": "progress",
                     "label": f"{name} 进度 {_fmt_clock(cursors[kind])} / {denominator}"
-                    if settings.get(key, True)
+                    if enabled_by_kind[kind]
                     else f"{name} 进度 未启用",
                     "value": min(1.0, cursors[kind] / total_seconds)
-                    if total_seconds and settings.get(key, True)
+                    if total_seconds and enabled_by_kind[kind]
                     else 0.0,
                 }
             )
