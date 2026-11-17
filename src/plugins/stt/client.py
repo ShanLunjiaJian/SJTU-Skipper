@@ -7,7 +7,7 @@ import threading
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-import httpx
+import httpx2
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 from websockets.sync.client import connect
 
@@ -85,11 +85,11 @@ class STTClient:
         server_url: str,
         *,
         timeout: float = 60.0,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx2.BaseTransport | None = None,
     ) -> None:
         self.server_url = server_url.rstrip("/")
         self.timeout = timeout
-        self._http = httpx.Client(timeout=timeout, transport=transport)
+        self._http = httpx2.Client(timeout=timeout, transport=transport)
         self._cancel = threading.Event()
         self._lock = threading.Lock()
         self._streams: set[STTStream] = set()
@@ -130,9 +130,9 @@ class STTClient:
                     raise SttError(
                         "The STT service returned an invalid transcription."
                     ) from exc
-            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            except (httpx2.ConnectError, httpx2.ConnectTimeout) as exc:
                 error = SttError(str(exc), connection_failed=True)
-            except httpx.HTTPError as exc:
+            except httpx2.HTTPError as exc:
                 raise SttError(str(exc)) from exc
             except SttError as exc:
                 error = exc

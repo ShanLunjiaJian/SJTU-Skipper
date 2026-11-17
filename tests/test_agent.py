@@ -12,7 +12,7 @@ from core.plugin import Plugin
 from core.runtime import build_runtime
 from core.workspace import FileWorkspace
 from plugins.agent import AgentPlugin
-from tests.support import FakeLLM, FakeSettings
+from tests.support import FakeSettings
 
 
 class ScriptedRuntime:
@@ -22,6 +22,7 @@ class ScriptedRuntime:
         self.runs = []
         self.sessions = {}
         self.cancelled = {}
+        self.closed = False
 
     def call(self, method, **params):
         self.calls.append((method, params))
@@ -50,6 +51,9 @@ class ScriptedRuntime:
                 "result": {"final_message": "Answer", "steps": 1, "total_tokens": 14},
             }
 
+    def close(self):
+        self.closed = True
+
 
 class StubSettingsPlugin(Plugin):
     id = "settings"
@@ -71,8 +75,7 @@ class StubLLMPlugin(Plugin):
 
 
 def _make_agent_runtime(tmp_path, script=None, settings=None):
-    llm = FakeLLM()
-    llm.runtime = ScriptedRuntime(script)
+    llm = ScriptedRuntime(script)
     settings = settings or FakeSettings()
     runtime = build_runtime(
         load_config(data_dir=tmp_path),
@@ -80,7 +83,7 @@ def _make_agent_runtime(tmp_path, script=None, settings=None):
         plugins=[StubSettingsPlugin(settings), StubLLMPlugin(), AgentPlugin()],
     )
     runtime.start()
-    return runtime, runtime.services.require("agent"), llm.runtime, settings
+    return runtime, runtime.services.require("agent"), llm, settings
 
 
 def test_sessions_use_roles_and_authorized_files(tmp_path):
@@ -143,7 +146,7 @@ def test_runs_keep_sdk_history_and_forward_events(tmp_path):
         runtime.stop()
 
 
-def test_file_content_is_published_before_callbacks_and_refresh(tmp_path):
+def test_file_content_is_published_before_callbacks_and_refresh(tmp_path, monkeypatch):
     text = "# Formula\n\n$$\nf(x) = \"quoted\" + 'nested'\n$$\n"
 
     def script(sdk, params):
@@ -156,19 +159,42 @@ def test_file_content_is_published_before_callbacks_and_refresh(tmp_path):
 
     runtime, agent, sdk, _ = _make_agent_runtime(tmp_path, script)
     try:
+        from contextlib import contextmanager
+
+        guarded = []
+
+        @contextmanager
+        def write_guard(target):
+            assert target == path
+            guarded.append(True)
+            try:
+                yield
+            finally:
+                guarded.pop()
+
         path = tmp_path / "notes.md"
         path.write_text("old")
+        write = FileWorkspace.write
+
+        def guarded_write(workspace, logical, content):
+            assert guarded
+            return write(workspace, logical, content)
+
+        monkeypatch.setattr(FileWorkspace, "write", guarded_write)
         session = agent.create_session("writer", files={"notes.md": path})
         seen = []
         result = agent.run(
             session.id,
             "Save",
             on_event=lambda event: (
-                seen.append(path.read_text()) if event.type == "agent.file" else None
+                seen.append((path.read_text(), bool(guarded)))
+                if event.type == "agent.file"
+                else None
             ),
+            write_guard=write_guard,
         )
         assert not result.error
-        assert seen == [text]
+        assert seen == [(text, False)]
         assert path.read_text() == text
     finally:
         runtime.stop()

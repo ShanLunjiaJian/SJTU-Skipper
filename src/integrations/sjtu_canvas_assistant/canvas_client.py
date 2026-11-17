@@ -17,7 +17,7 @@ from typing import (
 )
 from urllib.parse import urlparse
 
-import httpx
+import httpx2
 from pydantic import TypeAdapter
 
 from .exceptions import (
@@ -49,13 +49,13 @@ class CanvasClient:
         token: str,
         *,
         timeout_seconds: float = 30.0,
-        http_client: Optional[httpx.Client] = None,
+        http_client: Optional[httpx2.Client] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self._owns_client = http_client is None
-        self._client = http_client or httpx.Client(
-            timeout=httpx.Timeout(timeout_seconds),
+        self._client = http_client or httpx2.Client(
+            timeout=httpx2.Timeout(timeout_seconds),
             follow_redirects=True,
             headers={"User-Agent": "sjtu-canvas-assistant/0.1"},
         )
@@ -90,17 +90,17 @@ class CanvasClient:
         *,
         params: ParamInput = None,
         headers: Optional[Mapping[str, str]] = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         url = self._absolute_url(path_or_url)
         try:
             response = self._client.request(
                 method, url, params=params, headers=self._headers(headers)
             )
-        except httpx.TimeoutException as exc:
+        except httpx2.TimeoutException as exc:
             raise CanvasNetworkError(
                 f"Canvas request timed out: {method} {_safe_url_label(url)}"
             ) from exc
-        except httpx.TransportError as exc:
+        except httpx2.TransportError as exc:
             raise CanvasNetworkError(
                 f"Canvas network failure: {method} {_safe_url_label(url)}"
             ) from exc
@@ -108,7 +108,7 @@ class CanvasClient:
         self._raise_for_status(response)
         return response
 
-    def _raise_for_status(self, response: httpx.Response) -> None:
+    def _raise_for_status(self, response: httpx2.Response) -> None:
         if response.status_code < 400:
             return
         message = self._safe_error_message(response)
@@ -123,7 +123,7 @@ class CanvasClient:
         )
 
     @staticmethod
-    def _safe_error_message(response: httpx.Response) -> str:
+    def _safe_error_message(response: httpx2.Response) -> str:
         try:
             payload = response.json()
         except json.JSONDecodeError:

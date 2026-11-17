@@ -371,10 +371,7 @@ class SJTUCatalog:
         ``start`` / ``end`` format: ``YYYY-MM-DD HH:MM:SS``.
         """
         self._require_token()
-        try:
-            import httpx
-        except ImportError:
-            raise InputError("httpx 未安装，无法查询直播列表。")
+        import httpx2
 
         _token, headers = self._ensure_live_token()
 
@@ -387,7 +384,7 @@ class SJTUCatalog:
             "page.orders[0].field": "courBeginTime",
         }
 
-        with httpx.Client(timeout=httpx.Timeout(15.0), follow_redirects=True) as cl:
+        with httpx2.Client(timeout=httpx2.Timeout(15.0), follow_redirects=True) as cl:
             try:
                 resp = cl.get(
                     f"{NEW_VIDEO_SERVICE_ROOT}/v1/vod_live",
@@ -395,11 +392,11 @@ class SJTUCatalog:
                     headers=headers,
                 )
                 resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
+            except httpx2.HTTPStatusError as exc:
                 raise InputError(f"直播列表查询失败 (HTTP {exc.response.status_code})")
-            except httpx.TimeoutException:
+            except httpx2.TimeoutException:
                 raise InputError("直播列表查询超时")
-            except httpx.TransportError as exc:
+            except httpx2.TransportError as exc:
                 raise InputError(f"直播列表网络错误：{exc}")
 
         try:
@@ -434,14 +431,11 @@ class SJTUCatalog:
 
     def get_live_devices(self, live_id: str) -> list[dict[str, Any]]:
         """Fetch camera/device list for a live stream."""
-        try:
-            import httpx
-        except ImportError:
-            raise InputError("httpx 未安装。")
+        import httpx2
 
         _token, headers = self._ensure_live_token()
 
-        with httpx.Client(timeout=httpx.Timeout(15.0), follow_redirects=True) as cl:
+        with httpx2.Client(timeout=httpx2.Timeout(15.0), follow_redirects=True) as cl:
             try:
                 resp = cl.get(
                     f"{NEW_VIDEO_SERVICE_ROOT}/v1/course_vod_videoinfos",
@@ -449,11 +443,11 @@ class SJTUCatalog:
                     headers=headers,
                 )
                 resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
+            except httpx2.HTTPStatusError as exc:
                 raise InputError(f"直播设备查询失败 (HTTP {exc.response.status_code})")
-            except httpx.TimeoutException:
+            except httpx2.TimeoutException:
                 raise InputError("直播设备查询超时")
-            except httpx.TransportError as exc:
+            except httpx2.TransportError as exc:
                 raise InputError(f"直播设备网络错误：{exc}")
 
         try:

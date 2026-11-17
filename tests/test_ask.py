@@ -13,7 +13,6 @@ from plugins.ask.plugin import AskPlugin
 from plugins.reader.plugin import ReaderPlugin
 from plugins.settings.plugin import SettingsPlugin
 
-from support import FakeLLM
 from tests.test_agent import ScriptedRuntime
 
 
@@ -36,8 +35,7 @@ def _wait_until(predicate, timeout: float = 8.0, interval: float = 0.05) -> bool
 
 def _build(tmp_path: Path, script) -> tuple:
     cfg = load_config(data_dir=tmp_path)
-    llm = FakeLLM()
-    llm.runtime = ScriptedRuntime(script)
+    llm = ScriptedRuntime(script)
     runtime = build_runtime(
         cfg,
         plugins=[
@@ -50,7 +48,7 @@ def _build(tmp_path: Path, script) -> tuple:
         llm=llm,
     )
     runtime.start()
-    return runtime, llm.runtime
+    return runtime, llm
 
 
 def _open_note(runtime, tmp_path: Path) -> Path:

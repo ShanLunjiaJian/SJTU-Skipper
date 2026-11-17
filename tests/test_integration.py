@@ -16,7 +16,6 @@ from plugins.settings.plugin import SettingsPlugin
 from plugins.summarize.plugin import SummarizePlugin
 from plugins.notes_pipeline import NotesPipelinePlugin
 
-from support import FakeLLM
 from tests.test_agent import ScriptedRuntime
 
 
@@ -34,9 +33,7 @@ def _notes_llm(contents, role):
             }
         yield {"type": "result", "result": {"final_message": "Saved", "steps": 2}}
 
-    llm = FakeLLM()
-    llm.runtime = ScriptedRuntime(script)
-    return llm
+    return ScriptedRuntime(script)
 
 
 class StubLLM(Plugin):
@@ -109,7 +106,7 @@ def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
         ), "instant_note_knowledge.md was not written"
         assert "AI" in (notes / "instant_note_gossip.md").read_text(encoding="utf-8")
         assert "作业" in (notes / "instant_note_notice.md").read_text(encoding="utf-8")
-        assert llm.runtime.runs, "instant notes never started an SDK run"
+        assert llm.runs, "instant notes never started an SDK run"
     finally:
         runtime.stop()
 
@@ -176,7 +173,7 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
         assert "## 留数定理" in content
         assert "[00:" not in content, "notes must not be timestamped logs"
         assert "习题 3.1" in (notes / "note_notice.md").read_text(encoding="utf-8")
-        assert llm.runtime.runs, "whole lecture never started an SDK run"
+        assert llm.runs, "whole lecture never started an SDK run"
     finally:
         runtime.stop()
 
@@ -199,8 +196,7 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
             "result": {"final_message": "**答**：第一段是在说定义．", "steps": 1},
         }
 
-    llm = FakeLLM()
-    llm.runtime = ScriptedRuntime(script)
+    llm = ScriptedRuntime(script)
     runtime = build_runtime(
         cfg,
         plugins=[
@@ -246,9 +242,9 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
         assert "这一段的定义是什么？" in content
 
         declaration = next(
-            params for method, params in llm.runtime.calls if method == "create_session"
+            params for method, params in llm.calls if method == "create_session"
         )
-        prompt = llm.runtime.runs[-1]["instruction"]
+        prompt = llm.runs[-1]["instruction"]
         assert "这是第一段笔记内容。" in prompt
         assert "第二段笔记内容。" in prompt
         assert "这一段的定义是什么？" in prompt

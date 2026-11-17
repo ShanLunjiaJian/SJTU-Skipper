@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from core.events import EventBus
@@ -184,11 +184,11 @@ def test_settings_service_and_debug_page(tmp_path: Path) -> None:
 
 
 def test_http_metadata_precedes_binary_audio() -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "duration_ms": 1,
@@ -198,7 +198,7 @@ def test_http_metadata_precedes_binary_audio() -> None:
             },
         )
 
-    client = STTClient("http://test", transport=httpx.MockTransport(handler))
+    client = STTClient("http://test", transport=httpx2.MockTransport(handler))
     try:
         client.transcribe(b"RIFF\x00\xff", language="English", context="calculus")
     finally:
@@ -217,11 +217,11 @@ def test_http_metadata_precedes_binary_audio() -> None:
 def test_bounded_structured_retry(status: int, attempts: int) -> None:
     calls = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(request.content)
-        return httpx.Response(status, json={"error": {"message": "Rejected."}})
+        return httpx2.Response(status, json={"error": {"message": "Rejected."}})
 
-    client = STTClient("http://test", transport=httpx.MockTransport(handler))
+    client = STTClient("http://test", transport=httpx2.MockTransport(handler))
     try:
         with pytest.raises(SttError) as error:
             client.transcribe(b"wav", language="Chinese", context="")
@@ -378,9 +378,9 @@ def test_manual_http_preserves_log_and_metadata(
     plugin, ctx = app
     seen = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request.content)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "duration_ms": 500,
@@ -400,7 +400,7 @@ def test_manual_http_preserves_log_and_metadata(
     monkeypatch.setattr(
         plugin,
         "_new_client",
-        lambda: STTClient("http://test", transport=httpx.MockTransport(handler)),
+        lambda: STTClient("http://test", transport=httpx2.MockTransport(handler)),
     )
     session = ctx.streams.current
     session.audio.append(b"\x00\x00" * 8000)

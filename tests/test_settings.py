@@ -505,24 +505,13 @@ class ConfigurationRuntime:
 def make_llm_settings_runtime(tmp_path, monkeypatch):
     from plugins.llm_core import plugin as llm_plugin
 
-    class Service:
-        def __init__(self, *, runtime):
-            self.runtime = runtime
-
-        def close(self):
-            self.runtime.close()
-
-        def info(self):
-            return self.runtime.call("info")
-
     monkeypatch.setattr(llm_plugin, "RuntimeClient", ConfigurationRuntime)
-    monkeypatch.setattr(llm_plugin, "LLMService", Service)
     plugin = llm_plugin.LLMPlugin()
     runtime = build_runtime(
         load_config(data_dir=tmp_path), plugins=[SettingsPlugin(), plugin]
     )
     runtime.start()
-    return runtime, plugin, runtime.services.require("llm").runtime
+    return runtime, plugin, runtime.services.require("llm")
 
 
 def test_external_yaml_editors_save_without_settings_copies(tmp_path, monkeypatch):

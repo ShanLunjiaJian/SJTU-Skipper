@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 
-import httpx
+import httpx2
 from bs4 import BeautifulSoup
 from pydantic import ValidationError
 
@@ -84,7 +84,7 @@ class SJTUVideoClient:
         timeout_seconds: float = 30.0,
         video_token: str = "",
         video_course_id: str = "",
-        http_client: Optional[httpx.Client] = None,
+        http_client: Optional[httpx2.Client] = None,
     ) -> None:
         self.canvas_base_url = canvas_base_url.rstrip("/")
         self.canvas_token = canvas_token
@@ -95,8 +95,8 @@ class SJTUVideoClient:
         )
         self._is_new_system = False
         self._owns_client = http_client is None
-        self._client = http_client or httpx.Client(
-            timeout=httpx.Timeout(timeout_seconds),
+        self._client = http_client or httpx2.Client(
+            timeout=httpx2.Timeout(timeout_seconds),
             follow_redirects=True,
             headers={
                 "User-Agent": "sjtu-canvas-assistant/0.1",
@@ -132,7 +132,7 @@ class SJTUVideoClient:
         json_body: Optional[Mapping[str, Any]] = None,
         follow_redirects: Optional[bool] = None,
         service: str = "video",
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         kwargs: Dict[str, Any] = {
             "params": params,
             "headers": headers,
@@ -143,11 +143,11 @@ class SJTUVideoClient:
             kwargs["follow_redirects"] = follow_redirects
         try:
             response = self._client.request(method, url, **kwargs)
-        except httpx.TimeoutException as exc:
+        except httpx2.TimeoutException as exc:
             raise VideoNetworkError(
                 f"{service} request timed out: {method} {_safe_url_label(url)}"
             ) from exc
-        except httpx.TransportError as exc:
+        except httpx2.TransportError as exc:
             raise VideoNetworkError(
                 f"{service} network failure: {method} {_safe_url_label(url)}"
             ) from exc
@@ -210,7 +210,7 @@ class SJTUVideoClient:
         return self._unwrap_video_payload(payload)
 
     @staticmethod
-    def _decode_json(response: httpx.Response, service_label: str) -> Any:
+    def _decode_json(response: httpx2.Response, service_label: str) -> Any:
         try:
             return response.json()
         except json.JSONDecodeError as exc:
@@ -219,7 +219,7 @@ class SJTUVideoClient:
             ) from exc
 
     @staticmethod
-    def _safe_error_message(response: httpx.Response) -> str:
+    def _safe_error_message(response: httpx2.Response) -> str:
         try:
             payload = response.json()
         except json.JSONDecodeError:

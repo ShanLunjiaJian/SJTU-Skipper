@@ -128,13 +128,13 @@ def test_large_file_uses_parallel_ranges(http_base: str, tmp_path: Path) -> None
 
 
 def test_cache_ranges(http_base: str, tmp_path: Path) -> None:
-    import httpx
+    import httpx2
 
     handle = MediaDownloader().start(
         f"{http_base}/lecture.mp4", tmp_path / "lecture.mp4"
     )
     try:
-        with httpx.Client() as client:
+        with httpx2.Client() as client:
             response = client.get(handle.input_url, headers={"Range": "bytes=-17"})
             assert response.status_code == 206
             assert response.content == _Handler.payload[-17:]

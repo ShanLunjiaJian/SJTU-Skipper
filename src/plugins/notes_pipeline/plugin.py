@@ -858,6 +858,9 @@ class NotesPipelinePlugin(Plugin):
                     session_id,
                     self._lecture_context(sid) + "\n" + instruction,
                     on_event=on_event,
+                    write_guard=lambda path: publication_lock(
+                        self.ctx.data_dir / "sessions" / sid / "notes"
+                    ),
                 )
                 with self.condition:
                     self._check_running(sid)

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -214,10 +214,10 @@ def test_media_relay_forwards_range(tmp_path: Path) -> None:
     app = create_app(runtime)
     seen: dict[str, Any] = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen["range"] = request.headers.get("range")
         seen["url"] = str(request.url)
-        return httpx.Response(
+        return httpx2.Response(
             206,
             headers={
                 "content-type": "video/mp4",
@@ -233,8 +233,8 @@ def test_media_relay_forwards_range(tmp_path: Path) -> None:
             data={"username": "test", "password": "test"},
             follow_redirects=False,
         )
-        test_client.app.state.media_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(handler)
+        test_client.app.state.media_client = httpx2.AsyncClient(
+            transport=httpx2.MockTransport(handler)
         )
         response = test_client.get(
             "/api/media",

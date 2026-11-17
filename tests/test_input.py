@@ -1232,7 +1232,6 @@ class TestSJTUCatalogUnit:
         """name field maps subjName > courName > name (real API uses subjName)."""
         from integrations.sjtu_canvas import SJTUCatalog
 
-        # Patch _ensure_live_token + httpx to return a synthetic payload
         fake_records = [
             {
                 "id": 200951,
@@ -1256,7 +1255,7 @@ class TestSJTUCatalogUnit:
         with mock.patch.object(
             SJTUCatalog, "_ensure_live_token", return_value=("fake-jwt", {})
         ):
-            with mock.patch("httpx.Client.get") as mock_get:
+            with mock.patch("httpx2.Client.get") as mock_get:
                 mock_get.return_value.status_code = 200
                 mock_get.return_value.json.return_value = {
                     "code": 0,

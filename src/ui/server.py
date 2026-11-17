@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -155,9 +155,9 @@ def create_app(runtime: Runtime) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owns_runtime = not runtime.started
         broadcaster.bind_loop(asyncio.get_running_loop())
-        app.state.media_client = httpx.AsyncClient(
+        app.state.media_client = httpx2.AsyncClient(
             follow_redirects=True,
-            timeout=httpx.Timeout(30.0, read=120.0),
+            timeout=httpx2.Timeout(30.0, read=120.0),
             headers={"User-Agent": "sjtu-skipper/0.1"},
         )
         subscription = runtime.bus.on(
@@ -188,7 +188,7 @@ def create_app(runtime: Runtime) -> FastAPI:
             notify_subscription.cancel()
             # Any subscription this adapter registered under "server" goes too.
             runtime.bus.remove_plugin("server")
-            client: httpx.AsyncClient | None = getattr(app.state, "media_client", None)
+            client: httpx2.AsyncClient | None = getattr(app.state, "media_client", None)
             if client is not None:
                 try:
                     await client.aclose()
@@ -337,7 +337,7 @@ def create_app(runtime: Runtime) -> FastAPI:
         """
 
         url = _allowed_media_url(src)
-        client: httpx.AsyncClient | None = getattr(
+        client: httpx2.AsyncClient | None = getattr(
             request.app.state, "media_client", None
         )
         if client is None:
@@ -356,7 +356,7 @@ def create_app(runtime: Runtime) -> FastAPI:
         )
         try:
             upstream = await client.send(upstream_request, stream=True)
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             logger.warning("media relay failed for %s: %s", url, exc)
             raise HTTPException(status_code=502, detail=f"media relay failed: {exc}")
 

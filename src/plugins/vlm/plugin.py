@@ -37,7 +37,7 @@ from .prompts import (
     BLANK_BOARD_MARKER,
     BOARD_RECOGNITION_PROMPT,
     NO_CHANGE_MARKER,
-    build_user_message,
+    build_image_content,
     collapse_repetitions,
     is_trivial_board_text,
 )
@@ -360,7 +360,7 @@ class VlmPlugin(Plugin):
             session.video_gate.close()
         for key in requests:
             try:
-                self._ctx.llm.runtime.cancel(key)
+                self._ctx.llm.cancel(key)
             except Exception:
                 logger.exception("Cannot cancel VLM request %s", key)
 
@@ -536,11 +536,11 @@ class VlmPlugin(Plugin):
         timestamp: str,
         *,
         history: list[str] | None = None,
-    ) -> str:
-        """One VLM request for an encoded JPEG; returns stripped text."""
+    ) -> dict[str, Any]:
+        """Generate one board transcription from an encoded JPEG."""
 
         if self._shutting_down:
-            return ""
+            return {"content": ""}
         ctx = self._ctx
         data_url = "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode()
         prompt_text = str(self._setting("vlm.prompt", BOARD_RECOGNITION_PROMPT)).strip()
@@ -552,7 +552,7 @@ class VlmPlugin(Plugin):
         messages: list[dict[str, Any]] = [
             {
                 "role": "user",
-                "content": build_user_message(
+                "content": build_image_content(
                     timestamp=timestamp,
                     image_data_url=data_url,
                     prompt_text=prompt_text,
@@ -573,10 +573,11 @@ class VlmPlugin(Plugin):
                 self._submitted_requests.add(request_id)
                 cancelled = sid in self._cancelled_sessions
             if cancelled:
-                ctx.llm.runtime.cancel(request_id)
+                ctx.llm.cancel(request_id)
 
         try:
-            response = ctx.llm.chat(
+            response = ctx.llm.call(
+                "generate",
                 role="board_recognition",
                 messages=messages,
                 temperature=0.1,
@@ -589,12 +590,14 @@ class VlmPlugin(Plugin):
                 self._submitted_requests.discard(request_id)
         if sid in self._cancelled_sessions:
             raise RuntimeError("VLM session cancelled")
-        if response.finish_reason == "length":
+        if response.get("finish_reason") == "length":
             raise RuntimeError(
                 "VLM output reached the model token limit; transcription is incomplete"
             )
-        text = getattr(response, "content", str(response)).strip()
-        return collapse_repetitions(text)
+        response["content"] = collapse_repetitions(
+            str(response.get("content") or "").strip()
+        )
+        return response
 
     def _on_settings_changed(self, event: Event) -> None:
         if event.get("key") != "vlm.enabled":
@@ -833,8 +836,13 @@ class VlmPlugin(Plugin):
         self, session, prepared: PreparedWindow, history: list[str]
     ) -> dict:
         timestamp = f"{_fmt_time(prepared.start)} - {_fmt_time(prepared.end)}"
-        text = self._ask_image(prepared.image_bytes, timestamp, history=history)
-        return {"image_path": str(prepared.image_path), "text": text}
+        response = self._ask_image(prepared.image_bytes, timestamp, history=history)
+        return {
+            "image_path": str(prepared.image_path),
+            "text": response["content"],
+            "model": response.get("model", ""),
+            "usage": response.get("usage", {}),
+        }
 
     def _run_window(
         self, start: float, end: float, frames: list[VideoFrame]
@@ -965,7 +973,8 @@ class VlmPlugin(Plugin):
                 source="vlm",
                 meta={
                     "image_path": image_path,
-                    "model": self._setting("vlm.model", "deepseek-flash"),
+                    "model": result.get("model", ""),
+                    "usage": result.get("usage", {}),
                 },
             )
             if item is not None:

@@ -27,13 +27,12 @@ from core import (
     UIManager,
     VideoFrame,
 )
-from llm.types import ImagePart, TextPart
 from plugins.vlm.fusion import fuse_frames
 from plugins.vlm.plugin import VlmPlugin, _fmt_time
 from plugins.vlm.prompts import (
     BLANK_BOARD_MARKER,
     NO_CHANGE_MARKER,
-    build_user_message,
+    build_image_content,
     collapse_repetitions,
     is_trivial_board_text,
 )
@@ -195,28 +194,30 @@ class TestPrompts:
         text = "$$\nA = B\n$$\n\n$$\nC = D\n$$\n\n$$\nA = B\n$$"
         assert collapse_repetitions(text) == text
 
-    def test_build_user_message_structure(self):
-        content = build_user_message(
+    def test_build_image_content_structure(self):
+        content = build_image_content(
             timestamp="00:30", image_data_url="data:image/jpeg;base64,abc"
         )
         assert isinstance(content, list)
         assert len(content) == 2
-        assert isinstance(content[0], TextPart)
-        assert isinstance(content[1], ImagePart)
-        assert "00:30" in content[0].text
-        assert content[1].url == "data:image/jpeg;base64,abc"
+        assert content[0]["type"] == "text"
+        assert "00:30" in content[0]["text"]
+        assert content[1] == {
+            "type": "image_url",
+            "image_url": {"url": "data:image/jpeg;base64,abc"},
+        }
 
-    def test_build_user_message_no_image_url(self):
-        content = build_user_message(timestamp="00:00", image_data_url="")
+    def test_build_image_content_no_image_url(self):
+        content = build_image_content(timestamp="00:00", image_data_url="")
         assert len(content) == 1
-        assert isinstance(content[0], TextPart)
+        assert content[0]["type"] == "text"
 
     def test_history_is_passed_as_text_and_asks_for_delta(self):
-        content = build_user_message(
+        content = build_image_content(
             timestamp="10:00",
             history=["第一版板书 A", "第二版板书 B"],
         )
-        text = content[0].text
+        text = content[0]["text"]
         assert "第一版板书 A" in text
         assert "第二版板书 B" in text
 
@@ -277,30 +278,12 @@ def vlm_ctx(tmp_path: Path) -> PluginContext:
     services.register("settings", fake_settings, plugin_id="<test>")
     ui = UIManager()
 
-    class LLMProxy:
-        def __init__(self, svc):
-            self._svc = svc
-
-        def _service(self):
-            return self._svc.get("llm")
-
-        def chat(self, **kw):
-            return self._service().chat(**kw)
-
-        def stream(self, **kw):
-            return self._service().stream(**kw)
-
-        def info(self):
-            return self._service().info()
-
-    llm_proxy = LLMProxy(services)
-
     ctx = PluginContext(
         plugin_id="vlm",
         data_dir=tmp_path,
         events=bus,
         streams=hub,
-        llm=llm_proxy,
+        llm=fake_llm,
         ui=ui,
         services=services,
         meta=MetaRegistry(),
@@ -445,7 +428,18 @@ class TestVlmPlugin:
 
         # Inject scripted LLM response
         fake_llm = vlm_ctx.service("llm")
-        fake_llm.script = ["定理 1：设 $f$ 在 $D$ 上全纯。"]
+        fake_llm.script = [
+            {
+                "content": "定理 1：设 $f$ 在 $D$ 上全纯。",
+                "finish_reason": "stop",
+                "model": "board-model",
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 20,
+                    "total_tokens": 30,
+                },
+            }
+        ]
 
         # Create synthetic frame
         arr = _synthetic_frame()
@@ -473,7 +467,8 @@ class TestVlmPlugin:
         assert item.start == 10.0
         assert item.end == 11.0
         assert "image_path" in item.meta
-        assert "model" in item.meta
+        assert item.meta["model"] == "board-model"
+        assert item.meta["usage"]["total_tokens"] == 30
 
         log = (
             vlm_ctx.data_dir
@@ -486,7 +481,8 @@ class TestVlmPlugin:
         assert records[-1]["end"] == 11.0
         assert "定理 1" in records[-1]["text"]
 
-        last_call = fake_llm.calls[-1]
+        method, last_call = fake_llm.calls[-1]
+        assert method == "generate"
         assert last_call["role"] == "board_recognition"
         assert "model" not in last_call
         assert "extra" not in last_call
@@ -588,20 +584,43 @@ class TestVlmPlugin:
         assert len(vlm_ctx.streams.current.visual) == visual_before
 
     def test_truncated_response_is_not_committed(self, vlm_plugin, vlm_ctx):
-        from tests.support import FakeResponse
-
         settings = vlm_ctx.service("settings")
         settings.set("vlm.fusion", False)
         fake_llm = vlm_ctx.service("llm")
-        fake_llm.script = [
-            FakeResponse(content="Incomplete formula", finish_reason="length")
-        ]
+        fake_llm.script = [{"content": "Incomplete formula", "finish_reason": "length"}]
         session = vlm_ctx.streams.current
         frames = _make_frames(3)
         with pytest.raises(RuntimeError, match="transcription is incomplete"):
             vlm_plugin.process_window(0.0, 3.0, frames)
         assert not session.visual.items_since(0)
         assert not vlm_plugin._coverage(session).covers("video", 0.0, 3.0)
+
+    @pytest.mark.parametrize("cancel_before_sent", [False, True])
+    def test_cancel_during_submission(
+        self, vlm_plugin, vlm_ctx, monkeypatch, cancel_before_sent
+    ):
+        session = vlm_ctx.streams.current
+        fake_llm = vlm_ctx.service("llm")
+        cancelled = []
+        monkeypatch.setattr(fake_llm, "cancel", cancelled.append)
+
+        def generate(method, **params):
+            assert method == "generate"
+            if cancel_before_sent:
+                vlm_plugin.cancel(session.session_id)
+                assert not cancelled
+            params["on_sent"]()
+            if not cancel_before_sent:
+                vlm_plugin.cancel(session.session_id)
+            assert cancelled == [params["session_id"]]
+            return {"content": "Cancelled board", "finish_reason": "stop"}
+
+        monkeypatch.setattr(fake_llm, "call", generate)
+        with pytest.raises(RuntimeError, match="VLM session cancelled"):
+            vlm_plugin._ask_image(b"jpeg", "00:00")
+        assert not vlm_plugin._requests
+        assert not vlm_plugin._submitted_requests
+        assert not session.visual.items_since(0)
 
     def test_second_window_sends_previous_transcription(
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
@@ -619,7 +638,7 @@ class TestVlmPlugin:
         vlm_plugin.process_window(5.0, 6.0, [_make_video_frame(jpeg, 5.0, 6.0)])
 
         assert len(fake_llm.calls) == 2
-        second = fake_llm.calls[1]["messages"][0]["content"][0].text
+        second = fake_llm.calls[1][1]["messages"][0]["content"][0]["text"]
         assert "定理 A" in second
 
     def test_llm_error_emits_vlm_error(

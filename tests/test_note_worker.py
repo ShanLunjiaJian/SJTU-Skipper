@@ -24,7 +24,7 @@ def pipeline_context(tmp_path, script):
     ctx = SimpleNamespace(
         data_dir=tmp_path,
         streams=StreamHub(),
-        llm=SimpleNamespace(runtime=sdk),
+        llm=sdk,
         events=SimpleNamespace(on=lambda *a, **k: None, emit=lambda *a, **k: None),
         ui=SimpleNamespace(
             refresh=lambda reason: None,

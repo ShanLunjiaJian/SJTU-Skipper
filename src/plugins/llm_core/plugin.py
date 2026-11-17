@@ -15,7 +15,6 @@ from integrations.opencode_go import (
     poll_device_token,
     start_device_flow,
 )
-from llm.service import LLMService
 
 logger = logging.getLogger("lecture_agent.plugin.llm")
 
@@ -51,7 +50,6 @@ class LLMPlugin(Plugin):
 
     def __init__(self) -> None:
         self._settings: Any = None
-        self._service: LLMService | None = None
         self._runtime: RuntimeClient | None = None
         self._ctx: PluginContext | None = None
         self._login_lock = threading.RLock()
@@ -64,14 +62,8 @@ class LLMPlugin(Plugin):
         self._ctx = ctx
         self._settings = ctx.require("settings")
         runtime = RuntimeClient(ctx.data_dir / "llm_runtime")
-        try:
-            service = LLMService(runtime=runtime)
-        except Exception:
-            runtime.close()
-            raise
         self._runtime = runtime
-        self._service = service
-        ctx.register_service("llm", service)
+        ctx.register_service("llm", runtime)
         handlers = (
             self._handle_configure,
             self._handle_credentials,
@@ -89,9 +81,8 @@ class LLMPlugin(Plugin):
         if self._ctx is not None:
             for action in _ACTIONS:
                 self._ctx.ui.unregister_action(action)
-        if self._service is not None:
-            self._service.close()
-        self._service = None
+        if self._runtime is not None:
+            self._runtime.close()
         self._runtime = None
 
     def _refresh(self) -> None:

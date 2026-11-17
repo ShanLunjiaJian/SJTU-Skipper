@@ -33,14 +33,7 @@ devShell 提供 Python、Bun、uv、ffmpeg 和动态库路径．非 Nix 系统�
 
 `start.sh` 检查 Bun 和项目依赖，再设置 `PYTHONPATH=src` 并启动 Python．修改源码后重启服务即可．
 
-服务必须在前台运行才能接收 Ctrl+C：直接在终端执行上面的命令，不要加 `&`、`nohup` 或 `setsid`．后台 shell 启动的进程可能无法接收终端的 Ctrl+C 信号．前台运行时，Ctrl+C 会在 5 秒内退出（`SHUTDOWN_TIMEOUT`，见 `src/config.py`）；再次按 Ctrl+C 可强制退出，也可使用 `pkill -f "sjtu-skipper serve"`．
-
-安装后的命令行入口：
-
-```bash
-.venv/bin/sjtu-skipper check
-.venv/bin/sjtu-skipper serve
-```
+服务必须在前台运行才能接收 Ctrl+C：直接在终端执行上面的命令，不要加 `&`、`nohup` 或 `setsid`．后台 shell 启动的进程可能无法接收终端的 Ctrl+C 信号．前台运行时，Ctrl+C 会在 5 秒内退出（`SHUTDOWN_TIMEOUT`，见 `src/config.py`）；再次按 Ctrl+C 可强制退出．
 
 打开页面后：
 
@@ -69,13 +62,6 @@ LLM 配置保存在 `data/agent/llm_runtime/models.yml` 和 `roles.yml`．设置
 - 提供方凭据由项目 OMP `AuthStorage` 管理，保存在 `data/agent/llm_runtime/credentials.db`．API key 与 OpenCode OAuth 凭据分别保存，设置页只显示配置状态．无鉴权服务设置 `auth: none`．
 
 模型配置由设置页保存到 YAML，凭据写入项目 `AuthStorage`．普通插件设置保存在 `data/agent/settings.json`．首次使用时在设置页配置提供方、角色与密钥．
-
-### 3. 命令行
-
-```bash
-sjtu-skipper serve [--host 0.0.0.0] [--port 8765] [--data-dir PATH]
-sjtu-skipper check
-```
 
 ## 架构一览
 
@@ -113,7 +99,7 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 | reader | `reader` | 通用 Markdown 阅读页（每门课一页），持有选中菜单与内联问答块 |
 | instant-summarize | `instant-summarize` | 分段笔记页面与预览开关，直播和录播均可使用 |
 
-分段核心区间由 `notes.chunk_seconds` 设置，`notes.overlap_seconds` 提供左侧原文上下文．重叠原文不重复计入正文．`notes.concurrency` 限制笔记 agent 并发数．分段预览标为未审阅；`note_review` 统一检查完整笔记的来源覆盖与正确性．生成失败时保留已发布笔记和用户问答．
+分段核心区间由 `notes.chunk_seconds` 设置，`notes.overlap_seconds` 提供左侧原文上下文．重叠原文不重复计入正文．`notes.concurrency` 限制笔记 agent 并发数．分段预览标为未审阅；`note_review` 统一检查完整笔记的来源覆盖与正确性．
 
 写作者每次 `edit` 或 `write` 成功后，应用在发布锁内更新预览．浏览器可在生成期间阅读已保存文稿．审阅者读取锁保护的固定快照．来源始终只读，完整来源在上下文压缩后仍可重新读取．
 

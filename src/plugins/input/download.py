@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-import httpx
+import httpx2
 
 logger = logging.getLogger("lecture_agent.plugins.input.download")
 
@@ -167,11 +167,11 @@ class MediaDownloader:
     # ------------------------------------------------------------------
     # Probing
     # ------------------------------------------------------------------
-    def _make_client(self, timeout: float | None = None) -> httpx.Client:
+    def _make_client(self, timeout: float | None = None) -> httpx2.Client:
         value = self._timeout if timeout is None else timeout
-        return httpx.Client(
+        return httpx2.Client(
             follow_redirects=True,
-            timeout=httpx.Timeout(value, read=value),
+            timeout=httpx2.Timeout(value, read=value),
             headers=self._headers,
         )
 

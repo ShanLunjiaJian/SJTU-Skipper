@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import httpx
+import httpx2
 import pytest
 
 from integrations import opencode_go
@@ -19,7 +19,7 @@ def test_start_device_flow(monkeypatch) -> None:
     def fake_post(url, *, json, timeout):
         assert url == opencode_go.DEVICE_CODE_URL
         assert json["client_id"] == "opencode-cli"
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "device_code": "dev",
@@ -30,7 +30,7 @@ def test_start_device_flow(monkeypatch) -> None:
             },
         )
 
-    monkeypatch.setattr(opencode_go.httpx, "post", fake_post)
+    monkeypatch.setattr(opencode_go.httpx2, "post", fake_post)
     flow = start_device_flow()
     assert flow.device_code == "dev"
     assert flow.user_code == "ABCD"
@@ -50,8 +50,8 @@ def test_poll_pending_then_token(monkeypatch) -> None:
     def fake_post(url, *, json, timeout):
         calls["n"] += 1
         if calls["n"] == 1:
-            return httpx.Response(400, json={"error": "authorization_pending"})
-        return httpx.Response(
+            return httpx2.Response(400, json={"error": "authorization_pending"})
+        return httpx2.Response(
             200,
             json={
                 "access_token": "st_new",
@@ -61,7 +61,7 @@ def test_poll_pending_then_token(monkeypatch) -> None:
             },
         )
 
-    monkeypatch.setattr(opencode_go.httpx, "post", fake_post)
+    monkeypatch.setattr(opencode_go.httpx2, "post", fake_post)
     assert poll_device_token(flow) is None
     tokens = poll_device_token(flow)
     assert tokens is not None
@@ -75,7 +75,7 @@ def test_refresh_token(monkeypatch) -> None:
     def fake_post(url, *, json, timeout):
         assert json["grant_type"] == "refresh_token"
         assert json["refresh_token"] == "rt_old"
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "access_token": "st_new",
@@ -85,7 +85,7 @@ def test_refresh_token(monkeypatch) -> None:
             },
         )
 
-    monkeypatch.setattr(opencode_go.httpx, "post", fake_post)
+    monkeypatch.setattr(opencode_go.httpx2, "post", fake_post)
     tokens = refresh_access_token("rt_old")
     assert tokens.access_token == "st_new"
     assert tokens.refresh_token == "rt_new"
@@ -93,8 +93,8 @@ def test_refresh_token(monkeypatch) -> None:
 
 def test_refresh_error_is_reported(monkeypatch) -> None:
     def fake_post(url, *, json, timeout):
-        return httpx.Response(400, text="invalid_grant")
+        return httpx2.Response(400, text="invalid_grant")
 
-    monkeypatch.setattr(opencode_go.httpx, "post", fake_post)
+    monkeypatch.setattr(opencode_go.httpx2, "post", fake_post)
     with pytest.raises(OpenCodeGoError):
         refresh_access_token("rt_bad")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from contextlib import AbstractContextManager
 
 from core.file_access import publication_lock
 from core.agent_types import AgentEvent, AgentProfile, AgentRunResult, AgentTool
@@ -28,7 +29,7 @@ class AgentService:
         settings_getter: Callable[[str, Any], Any] | None = None,
     ) -> None:
         self._ctx = ctx
-        self._runtime = ctx.llm.runtime
+        self._runtime = ctx.llm
         self._default_system_prompt = default_system_prompt
         self._settings_getter = settings_getter
         self._sessions: dict[str, AgentSession] = {}
@@ -170,6 +171,7 @@ class AgentService:
         user_input: str,
         *,
         on_event: Callable[[AgentEvent], None] | None = None,
+        write_guard: Callable[[Path], AbstractContextManager] | None = None,
     ) -> AgentRunResult:
         session = self._require_session(session_id)
         if not session.lock.acquire(blocking=False):
@@ -236,13 +238,12 @@ class AgentService:
                             f"Runtime changed an unauthorized file: {logical}"
                         )
                     path = session.workspace.path(logical)
-                    lecture = session.meta.get("lecture_session")
-                    publication = (
-                        self._ctx.data_dir / "sessions" / str(lecture) / "notes"
-                        if lecture
-                        else path.parent
+                    guard = (
+                        write_guard(path)
+                        if write_guard
+                        else publication_lock(path.parent)
                     )
-                    with publication_lock(publication):
+                    with guard:
                         if (
                             "previous" in data
                             and path.read_text(encoding="utf-8") != data["previous"]

@@ -15,7 +15,7 @@ if [[ ! -x $PY ]]; then
 fi
 
 if ! command -v bun >/dev/null 2>&1; then
-  echo "error: Bun >=1.4.4 is required; enter nix develop (see README)." >&2
+  echo "error: Bun >=1.4.4 is required." >&2
   exit 1
 fi
 bun -e 'if (Bun.semver.satisfies(Bun.version, ">=1.4.4") === false) throw new Error("Bun >=1.4.4 is required")'

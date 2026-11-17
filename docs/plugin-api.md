@@ -15,7 +15,7 @@ class MyPlugin(Plugin):
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
         self.settings = ctx.require("settings")
-        self.llm = ctx.llm            # 角色请求代理，由项目 Bun 运行时执行
+        self.llm = ctx.llm            # 项目 OMP 运行时
 
         ctx.ui.add_tab("right", "my-tab", "我的工具", icon="✦")
         ctx.ui.add_toolbox_item(
@@ -119,23 +119,22 @@ ctx.register_service("my.service", my_object)
 ## 5. LLM
 
 ```python
-response = ctx.llm.chat(
+response = ctx.llm.call(
+    "generate",
     role="board_recognition",
     messages=[{"role": "user", "content": "描述图中板书"}],
-    max_tokens=1024,
 )
-response.content
-response.usage
+response["content"]
+response["usage"]
 
-for event in ctx.llm.stream(role="board_recognition", messages=[...]):
-    if event.type == "text":
-        print(event.text)
+for frame in ctx.llm.stream("generate", role="board_recognition", messages=messages):
+    if frame.get("name") == "llm.delta":
+        print(frame["data"]["text"])
 ```
 
-- 单次生成使用 `ctx.llm.chat/stream(role=...)`，文件任务使用 `agent` 服务．两者共用项目 Bun 运行时、角色解析和提供方鉴权．
-- Bun 运行时管理提供方鉴权和模型工具循环．`ChatResponse/StreamEvent` 是 Python 响应类型．
+- `llm` 服务提供项目 OMP 运行时的 `call`、`stream`、`cancel` 和 `close`．单次生成、交互会话、配置和鉴权共用该接口．文件任务由 `agent` 服务管理应用状态．
 - 模型和思考级别来自 `roles.yml`．提供方、模型能力与兼容参数来自 `models.yml`．`api` 的可选值由安装的 OMP SDK 决定．
-- Agent 会话创建时固定配置，保存配置不改变已创建的会话．`ctx.llm.info()` 返回角色与提供方状态．`ctx.require("llm").usage_snapshot()` 按 `provider/model` 返回用量．
+- `ctx.llm.call("info")` 返回角色、提供方状态和用量．Agent 会话创建时固定配置．
 - `stt` 使用独立 HTTP/WebSocket 服务协议．
 
 ## 6. UI
