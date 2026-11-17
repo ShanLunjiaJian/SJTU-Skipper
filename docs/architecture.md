@@ -106,7 +106,7 @@ Python 与 Bun 使用带请求 ID 的 JSON Lines 通信．stdout 传 IPC 消息�
 - `models.yml` 使用 OMP `providers` 结构，声明提供方、模型、协议和能力．仅显式配置的模型可被调用．
 - `roles.yml` 使用 `provider/model:level` 或 `@role` 选择器．未填写角色继承 `default`．
 - `board_recognition` 选择板书模型，`note_chunk` 选择片段模型，`note_writer` 选择整课写作模型，`note_review` 选择独立审阅模型．
-- `ask_instant`、`ask_research`、`agent_chat` 和 `compaction` 分别选择问答、交互助手与上下文压缩模型．
+- `ask_instant`、`ask_research` 选择问答模型，`compaction` 选择上下文压缩模型．
 
 提供方凭据保存在项目 `AuthStorage` 的 `credentials.db`．设置页支持 API key 和 OpenCode 设备登录．OAuth 刷新与登出共用凭据存储．界面只显示凭据状态，不回显密钥．
 

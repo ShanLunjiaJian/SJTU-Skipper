@@ -30,8 +30,6 @@ class ScriptedRuntime:
             self.sessions[params["id"]] = params
             self.cancelled[params["id"]] = threading.Event()
             return {"model": "lecture/test"}
-        if method == "reset":
-            self.cancelled[params["session_id"]].clear()
         elif method == "close_session":
             self.sessions.pop(params["session_id"], None)
         return {}
@@ -131,14 +129,6 @@ def test_runs_keep_sdk_history_and_forward_events(tmp_path):
             "agent.delta",
             "agent.run.finished",
         ]
-        assert [message["content"] for message in session.messages] == [
-            "First question",
-            "Answer",
-            "Second question",
-            "Answer",
-        ]
-        agent.reset(session.id)
-        assert not session.messages
         agent.close(session.id)
         assert agent.get_session(session.id) is None
         assert session.id not in sdk.sessions
@@ -274,33 +264,14 @@ def test_cancel_stops_active_runtime_run(tmp_path):
     runtime, agent, _, _ = _make_agent_runtime(tmp_path, script)
     try:
         session = agent.create_session("chat")
-        thread = agent._run_async(session.id, "Run")
+        thread = threading.Thread(target=agent.run, args=(session.id, "Run"))
+        thread.start()
         assert started.wait(3)
         assert agent.run(session.id, "Concurrent").error
         agent.cancel(session.id)
         thread.join(3)
         assert not thread.is_alive()
         assert session.cancelled.is_set()
-    finally:
-        runtime.stop()
-
-
-def test_agent_ui_actions_remain_usable(tmp_path):
-    runtime, agent, _, settings = _make_agent_runtime(tmp_path)
-    try:
-        state = runtime.ui.state()
-        assert "agent:chat" in [page["id"] for page in state["pages"]]
-        created = runtime.ui.dispatch_action(
-            "agent.new_session", {"name": "My lecture"}
-        )
-        assert created.ok and created.open_page == "agent:chat"
-        session_id = agent.list_sessions()[0]["id"]
-        assert runtime.ui.dispatch_action(
-            "agent.select_session", {"session_id": session_id}
-        ).ok
-        assert runtime.ui.dispatch_action("agent.reset", {"session_id": session_id}).ok
-        internal = agent.create_session("background", meta={"internal": True})
-        assert agent.get_session(internal.id).to_dict()["internal"]
     finally:
         runtime.stop()
 

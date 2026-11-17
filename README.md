@@ -56,7 +56,7 @@ devShell 提供 Python、Bun、uv、ffmpeg 和动态库路径．非 Nix 系统�
 LLM 配置保存在 `data/agent/llm_runtime/models.yml` 和 `roles.yml`．设置页检查两份 YAML 后保存．配置变更只影响随后创建的模型会话．
 
 - `models.yml` 使用 OMP `providers` 结构．提供方配置 `baseUrl`、`api`、鉴权和 headers，模型配置输入能力、上下文限制与思考能力．`api` 接受已安装 OMP SDK 支持的协议，包括 `openai-completions` 和 `openai-responses`．
-- `roles.yml` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、整课写作、审阅、修订、问答、交互助手与上下文压缩．未填写的角色继承 `default`．
+- `roles.yml` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、整课写作、审阅、修订、问答与上下文压缩．未填写的角色继承 `default`．
 - 板书角色 `board_recognition` 必须选择支持图像输入的模型．无效选择器、角色循环或不支持的思考级别会阻止保存．
 - 默认模型为 `deepseek-flash`．省略 `maxTokens` 时继承 OMP 模型能力信息；显式填写时使用配置值．
 - 提供方凭据由项目 OMP `AuthStorage` 管理，保存在 `data/agent/llm_runtime/credentials.db`．API key 与 OpenCode OAuth 凭据分别保存，设置页只显示配置状态．无鉴权服务设置 `auth: none`．

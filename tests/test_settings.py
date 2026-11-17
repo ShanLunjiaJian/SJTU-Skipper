@@ -480,7 +480,7 @@ class ConfigurationRuntime:
                 },
             ],
             "roles": {
-                "agent_chat": {
+                "default": {
                     "provider": "lecture",
                     "model": "example",
                     "thinkingLevel": "high",

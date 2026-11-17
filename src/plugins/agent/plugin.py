@@ -94,7 +94,7 @@ class AgentService:
         session = AgentSession(
             name=name,
             agent=profile.name if profile else "",
-            role=role or (profile.role if profile else "agent_chat"),
+            role=role or (profile.role if profile else "default"),
             system_prompt=prompt,
             workspace=ws,
             tools=names,
@@ -140,17 +140,6 @@ class AgentService:
         session.cancelled.set()
         self._runtime.cancel(session_id)
 
-    def reset(self, session_id: str) -> None:
-        session = self._require_session(session_id)
-        self.cancel(session_id)
-        with session.lock:
-            if session.runtime_ready:
-                self._runtime.call("reset", session_id=session_id)
-            else:
-                self._create_runtime_session(session)
-            session.messages.clear()
-            session.cancelled.clear()
-
     def close(self, session_id: str) -> None:
         session = self.get_session(session_id)
         if session is None:
@@ -185,7 +174,6 @@ class AgentService:
                 raise RuntimeError("Agent run cancelled")
             if not session.runtime_ready:
                 self._create_runtime_session(session)
-            session.messages.append({"role": "user", "content": user_input})
             self._emit("agent.run.started", session, 0, on_event)
             completed = False
             for frame in self._runtime.stream(
@@ -217,20 +205,8 @@ class AgentService:
                     model = (data.get("metrics") or {}).get("model")
                     if model is not None:
                         session.model = str(model)
-                elif name == "agent.message":
-                    session.messages.append(
-                        {"role": "assistant", "content": str(data.get("content") or "")}
-                    )
                 elif name == "agent.tool_call":
                     calls += 1
-                elif name == "agent.tool_result":
-                    session.messages.append(
-                        {
-                            "role": "tool",
-                            "content": str(data.get("result") or ""),
-                            "name": data.get("name", ""),
-                        }
-                    )
                 elif name == "agent.file":
                     logical = str(data.get("file") or "")
                     if logical not in session.workspace:
@@ -259,13 +235,6 @@ class AgentService:
                 raise RuntimeError("Agent runtime ended without a result")
             if session.cancelled.is_set():
                 result.error = "Agent run cancelled"
-            if result.final_message and (
-                not session.messages
-                or session.messages[-1].get("content") != result.final_message
-            ):
-                session.messages.append(
-                    {"role": "assistant", "content": result.final_message}
-                )
         except Exception as exc:
             try:
                 self._runtime.cancel(session_id)
@@ -295,16 +264,6 @@ class AgentService:
                 session.lock.release()
         return result
 
-    def _run_async(self, session_id: str, user_input: str) -> threading.Thread:
-        thread = threading.Thread(
-            target=self.run,
-            args=(session_id, user_input),
-            daemon=True,
-            name=f"agent-run-{session_id}",
-        )
-        thread.start()
-        return thread
-
     def _emit(self, event_type, session, step, on_event, **data):
         self._ctx.events.emit(event_type, session_id=session.id, step=step, **data)
         if on_event is not None:
@@ -319,28 +278,9 @@ class AgentService:
 
 _AGENT_SETTINGS_GROUP = "Agent"
 
-_AGENT_PAGE_ID = "agent:chat"
-
-
-def _is_user_session(item: Any) -> bool:
-    """True for sessions the user owns.
-
-    Plugins that drive the agent in the background mark their sessions with
-    ``meta["internal"] = True``; nothing here knows their names.
-    """
-
-    if isinstance(item, Mapping):
-        return not bool(item.get("internal"))
-    meta = getattr(item, "meta", None)
-    return not bool(meta.get("internal")) if isinstance(meta, Mapping) else True
-
 
 class AgentPlugin(Plugin):
-    """Registers the ``agent`` service, tools, settings, and UI.
-
-    id: ``"llm-agent"``
-    requires: ``("settings", "llm")``
-    """
+    """Register the agent task service and its settings."""
 
     id = "llm-agent"
     requires = ("settings", "llm")
@@ -349,10 +289,6 @@ class AgentPlugin(Plugin):
     def __init__(self) -> None:
         self.ctx: PluginContext | None = None
         self.service: AgentService | None = None
-        self._page_added = False
-        self._command_added = False
-        self._actions: list[str] = []
-        self._current_session_id = ""
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -394,7 +330,6 @@ class AgentPlugin(Plugin):
         ctx.meta.register(
             "agent",
             lambda: {
-                "role": "agent_chat",
                 "sessions": len(self.service.list_sessions()),
             },
             plugin_id=self.id,
@@ -414,66 +349,10 @@ class AgentPlugin(Plugin):
         ]:
             ctx.events.define(evt_name, evt_desc)
 
-        # --- UI ---
-        # The agent is a page, not a sidebar tab: open it from the menu bar or
-        # the command palette (Ctrl+P).
-        ui = ctx.ui
-        ui.add_page(
-            _AGENT_PAGE_ID,
-            "Agent",
-            render=self._render_chat,
-            icon="✦",
-            order=600,
-            plugin_id=self.id,
-        )
-        self._page_added = True
-
-        # Actions
-        for action_id, handler in [
-            ("agent.chat", self._handle_chat),
-            ("agent.new_session", self._handle_new_session),
-            ("agent.select_session", self._handle_select_session),
-            ("agent.reset", self._handle_reset),
-        ]:
-            ui.register_action(action_id, handler, plugin_id=self.id)
-            self._actions.append(action_id)
-
-        ui.register_command(
-            "agent.open",
-            "Agent",
-            subtitle="与课堂 Agent 对话、查看会话",
-            category="视图",
-            icon="✦",
-            order=20,
-            page_id=_AGENT_PAGE_ID,
-            keywords="agent chat session llm",
-            plugin_id=self.id,
-        )
-        self._command_added = True
-
         ctx.logger.info("agent plugin ready; %s sessions", 0)
 
     def teardown(self) -> None:
         ctx = self.ctx
-        if ctx is not None:
-            for action_id in self._actions:
-                try:
-                    ctx.ui.unregister_action(action_id)
-                except Exception:
-                    pass
-            self._actions.clear()
-            if self._command_added:
-                try:
-                    ctx.ui.unregister_command("agent.open")
-                except Exception:
-                    pass
-                self._command_added = False
-            if self._page_added:
-                try:
-                    ctx.ui.remove_page(_AGENT_PAGE_ID)
-                except Exception:
-                    pass
-                self._page_added = False
         if self.service is not None:
             for item in self.service.list_sessions():
                 try:
@@ -484,174 +363,3 @@ class AgentPlugin(Plugin):
                             "Failed to close agent session %s", item["id"]
                         )
         self.service = None
-
-    # ------------------------------------------------------------------
-    # UI renderers
-    # ------------------------------------------------------------------
-    def _ui_sessions(self) -> list[dict[str, Any]]:
-        """User-facing sessions; hide summarize's internal worker sessions."""
-
-        service = self.service
-        if service is None:
-            return []
-        return [s for s in service.list_sessions() if _is_user_session(s)]
-
-    def _current_session(self, sessions: list[dict[str, Any]]) -> str:
-        """Return the selected session id, falling back to the newest one."""
-
-        ids = {s["id"] for s in sessions}
-        if self._current_session_id in ids:
-            return self._current_session_id
-        preferred = next(
-            (s for s in reversed(sessions) if _is_user_session(s)),
-            sessions[-1] if sessions else None,
-        )
-        self._current_session_id = preferred["id"] if preferred else ""
-        return self._current_session_id
-
-    def _render_chat(self) -> list[dict[str, Any]]:
-        service = self.service
-        if service is None:
-            return [{"type": "text", "text": "服务未就绪"}]
-        sessions = self._ui_sessions()
-        if not sessions:
-            return [
-                {
-                    "type": "markdown",
-                    "text": "### Agent\n\n暂无会话。请先创建会话。",
-                }
-            ]
-        current_id = self._current_session(sessions)
-        current = next((s for s in sessions if s["id"] == current_id), sessions[0])
-        session = service.get_session(current["id"])
-        blocks: list[dict[str, Any]] = [
-            {
-                "type": "markdown",
-                "text": f"### Agent - {current['name']}\n\n"
-                f"model: {current['model']}  |  "
-                f"messages: {current['message_count']}",
-            }
-        ]
-        if session is not None:
-            # A running session holds its lock for the whole run (minutes for a
-            # handout job), so waiting for it would freeze the entire UI state
-            # render.  Take a best-effort snapshot instead.
-            if session.lock.acquire(timeout=0.05):
-                try:
-                    msgs = list(session.messages)
-                finally:
-                    session.lock.release()
-            else:
-                msgs = list(session.messages)
-                blocks.append(
-                    {
-                        "type": "text",
-                        "text": "（会话正在运行，消息列表可能不完整）",
-                    }
-                )
-            for msg in msgs[-20:]:
-                role = msg.get("role", "?")
-                content = str(msg.get("content", ""))
-                if not content and role == "assistant":
-                    content = "*(tool calls)*"
-                if not content:
-                    content = f"*(tool result for {msg.get('name', '?')})*"
-                blocks.append(
-                    {
-                        "type": "log",
-                        "lines": [
-                            {
-                                "time": role.upper(),
-                                "text": content[:500],
-                            }
-                        ],
-                    }
-                )
-        blocks.append(
-            {
-                "type": "form",
-                "fields": [
-                    {
-                        "name": "message",
-                        "label": "输入",
-                        "type": "text",
-                        "placeholder": "输入消息...",
-                    }
-                ],
-                "submit": {"label": "发送", "action": "agent.chat"},
-            }
-        )
-        return blocks
-
-    # ------------------------------------------------------------------
-    # Action handlers
-    # ------------------------------------------------------------------
-    def _handle_chat(self, payload: dict[str, Any]) -> dict[str, Any]:
-        service = self.service
-        if service is None:
-            return {"ok": False, "message": "服务未就绪"}
-        message = str(
-            payload.get("message", "") or payload.get("values", {}).get("message", "")
-        )
-        if not message.strip():
-            return {"ok": False, "message": "消息为空"}
-
-        sessions = self._ui_sessions()
-        if not sessions:
-            session = service.create_session("default")
-            self._current_session_id = session.id
-            session_id = session.id
-        else:
-            session_id = self._current_session(sessions)
-
-        service._run_async(session_id, message)  # noqa: SLF001 - internal UI path
-        return {"ok": True, "message": "Agent 正在处理…", "refresh": True}
-
-    def _handle_new_session(self, payload: dict[str, Any]) -> dict[str, Any]:
-        service = self.service
-        if service is None:
-            return {"ok": False, "message": "服务未就绪"}
-        name = str(payload.get("name", "") or "default")
-        session = service.create_session(name)
-        self._current_session_id = session.id
-        return {
-            "ok": True,
-            "message": f"已创建会话 {name!r}",
-            "refresh": True,
-            "open_page": _AGENT_PAGE_ID,
-        }
-
-    def _handle_select_session(self, payload: dict[str, Any]) -> dict[str, Any]:
-        service = self.service
-        if service is None:
-            return {"ok": False, "message": "服务未就绪"}
-        values = (
-            payload.get("values") if isinstance(payload.get("values"), dict) else {}
-        )
-        session_id = str(payload.get("session_id") or values.get("session_id") or "")
-        if not session_id:
-            return {"ok": False, "message": "缺少会话 ID"}
-        if service.get_session(session_id) is None:
-            return {"ok": False, "message": "会话不存在或已关闭"}
-        self._current_session_id = session_id
-        return {
-            "ok": True,
-            "message": "已切换会话",
-            "refresh": True,
-            "open_page": _AGENT_PAGE_ID,
-        }
-
-    def _handle_reset(self, payload: dict[str, Any]) -> dict[str, Any]:
-        service = self.service
-        if service is None:
-            return {"ok": False, "message": "服务未就绪"}
-        values = (
-            payload.get("values") if isinstance(payload.get("values"), dict) else {}
-        )
-        session_id = str(payload.get("session_id") or values.get("session_id") or "")
-        if not session_id:
-            session_id = self._current_session(self._ui_sessions())
-        if not session_id:
-            return {"ok": False, "message": "没有可重置的会话"}
-        service.reset(session_id)
-        return {"ok": True, "message": "已重置", "refresh": True}

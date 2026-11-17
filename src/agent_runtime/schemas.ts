@@ -170,7 +170,7 @@ export const ipcRequestSchema = type({
   .or({
     "+": "reject",
     id: nonemptyString,
-    method: "'cancel' | 'close_session' | 'reset'",
+    method: "'cancel' | 'close_session'",
     params: sessionParams,
   })
   .or({

@@ -887,7 +887,7 @@ class NotesPipelinePlugin(Plugin):
             system_prompt=self.setting("instant-summarize.system_prompt", "") or SYSTEM,
             role="note_chunk",
             tools=["read", "grep", "glob", "edit", "write"],
-            meta={"internal": True, "role": "notes", "lecture_session": sid},
+            meta={"role": "notes", "lecture_session": sid},
         )
         try:
             result = self._agent_run(sid, session.id, instruction)
@@ -1110,7 +1110,6 @@ class NotesPipelinePlugin(Plugin):
             role="note_writer",
             tools=["read", "grep", "glob", "edit", "write"],
             meta={
-                "internal": True,
                 "role": "writer",
                 "lecture_session": sid,
                 **({"review": review} if review_enabled else {}),

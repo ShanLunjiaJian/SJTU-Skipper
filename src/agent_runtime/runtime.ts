@@ -32,7 +32,6 @@ const ROLE_NAMES = [
   "note_revision",
   "ask_instant",
   "ask_research",
-  "agent_chat",
   "compaction",
 ];
 interface Configuration {
@@ -298,7 +297,7 @@ export class Runtime {
       if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
         throw new Error("Invalid session ID");
       }
-      const role = String(params.role ?? "agent_chat");
+      const role = String(params.role ?? "default");
       const resolved = this.resolve(config, role);
       const compact = this.resolve(config, "compaction");
       const cwd = path.join(this.root, "workspaces", id);
@@ -492,18 +491,6 @@ export class Runtime {
     if (method === "close_session") {
       await conversation.session.dispose();
       this.sessions.delete(id);
-      return { ok: true };
-    }
-    if (method === "reset") {
-      for (const [target, original] of conversation.workspace.files) {
-        await writeFile(target, await readFile(original));
-        conversation.workspace.published.set(target, await Bun.file(target).text());
-      }
-      await conversation.session.newSession();
-      const saved = conversation.session.sessionManager.getSessionFile();
-      if (saved) {
-        await writeFile(path.join(this.root, `session-${id}.path`), saved, { mode: 0o600 });
-      }
       return { ok: true };
     }
     if (method === "run") {

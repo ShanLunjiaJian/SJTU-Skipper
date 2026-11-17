@@ -18,7 +18,7 @@ class AgentProfile:
     """Declare a task prompt, runtime role, and allowed tools."""
 
     name: str
-    role: str = "agent_chat"
+    role: str = "default"
     system_prompt: str = ""
     description: str = ""
     tools: list[AgentTool] = field(default_factory=list)

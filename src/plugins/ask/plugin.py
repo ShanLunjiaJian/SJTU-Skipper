@@ -247,7 +247,6 @@ class AskPlugin(Plugin):
                     agent=profile,
                     workspace=FileWorkspace(frozen, readonly=frozen),
                     meta={
-                        "internal": True,
                         "role": "ask",
                         "qa_id": qa_id,
                         "intensity": intensity,
