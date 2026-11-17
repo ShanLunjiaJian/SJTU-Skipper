@@ -1244,19 +1244,23 @@
             : `Text${text ? `: ${text.trim().split("\n")[0]}` : ""}`;
     row.className = `execution-block execution-${block.kind || "text"}`;
     row.dataset.status = block.status || "completed";
-    const header = el(isRead ? "div" : "summary", { class: "execution-header" }, [
-      el("span", { class: "execution-title", text: title }),
-      el("span", {
-        class: "execution-status",
-        text: block.status || "completed",
-      }),
-      el("span", {
-        class: "execution-seconds",
-        text: executionNumber(block.seconds)
-          ? `${block.seconds.toFixed(1)}s`
-          : "",
-      }),
-    ]);
+    const header = el(
+      isRead ? "div" : "summary",
+      { class: "execution-header" },
+      [
+        el("span", { class: "execution-title", text: title }),
+        el("span", {
+          class: "execution-status",
+          text: block.status || "completed",
+        }),
+        el("span", {
+          class: "execution-seconds",
+          text: executionNumber(block.seconds)
+            ? `${block.seconds.toFixed(1)}s`
+            : "",
+        }),
+      ],
+    );
     if (isRead) {
       row.replaceChildren(header);
       return;

@@ -117,7 +117,7 @@ class AgentService:
             tools=list(session.tools),
             meta=session.meta,
         )
-        session.model = str(result.get("model") or session.role)
+        session.model = str(result["model"])
         session.runtime_ready = True
 
     def get_session(self, session_id: str) -> AgentSession | None:
@@ -211,7 +211,11 @@ class AgentService:
                 step = int(data.pop("step", 0))
                 data.pop("session_id", None)
                 session.meta["step"] = step
-                if name == "agent.message":
+                if name == "agent.execution":
+                    model = (data.get("metrics") or {}).get("model")
+                    if model is not None:
+                        session.model = str(model)
+                elif name == "agent.message":
                     session.messages.append(
                         {"role": "assistant", "content": str(data.get("content") or "")}
                     )

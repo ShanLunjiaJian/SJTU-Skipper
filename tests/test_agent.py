@@ -313,3 +313,22 @@ def test_cleanup_does_not_start_runtime(tmp_path, monkeypatch):
     client.cancel("completed")
     client.call("close_session", session_id="completed")
     assert client._process is None
+
+
+def test_execution_updates_session_model(tmp_path):
+    def script(sdk, params):
+        yield {
+            "type": "event",
+            "name": "agent.execution",
+            "data": {"metrics": {"model": "resolved-model"}},
+        }
+        yield {"type": "result", "result": {"final_message": "Answer"}}
+
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path, script)
+    try:
+        session = agent.create_session("chat")
+        result = agent.run(session.id, "Question")
+        assert not result.error
+        assert agent.list_sessions()[0]["model"] == "resolved-model"
+    finally:
+        runtime.stop()

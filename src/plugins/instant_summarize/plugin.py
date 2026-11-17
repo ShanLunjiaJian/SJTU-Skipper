@@ -90,7 +90,7 @@ class InstantSummarizePlugin(Plugin):
         return {"ok": True, "refresh": True}
 
     def _read(self, payload):
-        sid = self.ctx.streams.notes_session_id
+        sid = str(payload.get("session_id") or self.ctx.streams.notes_session_id)
         docs = [
             {
                 "key": key,

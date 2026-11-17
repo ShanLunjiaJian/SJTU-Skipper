@@ -293,7 +293,8 @@ export class Runtime {
     if (method === "create_session") {
       const config = await this.load();
       const id = String(params.id);
-      if (this.sessions.has(id)) return { id };
+      const existing = this.sessions.get(id);
+      if (existing) return { id, model: existing.session.model?.id ?? "" };
       if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
         throw new Error("Invalid session ID");
       }
@@ -474,7 +475,7 @@ export class Runtime {
         emit,
         review: gate,
       });
-      return { id };
+      return { id, model: result.session.model?.id ?? "" };
     }
     const id = String(params.session_id);
     if (method === "cancel" && this.generations.has(id)) {

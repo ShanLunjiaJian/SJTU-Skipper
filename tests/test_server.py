@@ -94,6 +94,15 @@ def test_navigation_restores_dynamic_pages(client):
     runtime.services.register(
         "summarize", SimpleNamespace(open_notes=notes, open_logs=logs)
     )
+
+    def instant_notes(payload):
+        selected.update(session=payload["session_id"], doc=payload["doc"])
+        runtime.ui.add_page(
+            f"reader:notes:{payload['session_id']}:instant-summarize", "Draft notes"
+        )
+        return {"ok": True}
+
+    runtime.ui.register_action("instant-summarize.read", instant_notes)
     runtime.services.register(
         "reader",
         SimpleNamespace(
@@ -112,6 +121,7 @@ def test_navigation_restores_dynamic_pages(client):
     for route in [
         {"page": "input:session", "class": "class:math:rec:video"},
         {"page": f"reader:notes:{sid}:summarize", "doc": "knowledge"},
+        {"page": f"reader:notes:{sid}:instant-summarize", "doc": "notice"},
         {"page": f"summarize:logs:{sid}"},
         {"page": ""},
     ]:

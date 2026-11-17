@@ -248,15 +248,26 @@ def create_app(runtime: Runtime) -> FastAPI:
             else:
                 if page == "input:session" and request.class_id:
                     runtime.services.require("input").open_class(request.class_id)
-                elif page.startswith("reader:notes:") and page.endswith(":summarize"):
-                    sid = page.removeprefix("reader:notes:").removesuffix(":summarize")
+                elif page.startswith("reader:notes:") and page.endswith(
+                    (":summarize", ":instant-summarize")
+                ):
+                    kind = page.rsplit(":", 1)[1]
+                    sid = page.removeprefix("reader:notes:").removesuffix(f":{kind}")
                     if not sid or Path(sid).name != sid or sid in {".", ".."}:
                         raise ValueError("Invalid session ID")
                     if not (runtime.data_dir / "sessions" / sid).is_dir():
                         raise KeyError("Session not found")
-                    runtime.services.require("summarize").open_notes(
-                        sid, request.doc or "knowledge"
-                    )
+                    if kind == "instant-summarize":
+                        result = runtime.ui.dispatch_action(
+                            "instant-summarize.read",
+                            {"session_id": sid, "doc": request.doc or "knowledge"},
+                        )
+                        if not result.ok:
+                            raise KeyError(result.message)
+                    else:
+                        runtime.services.require("summarize").open_notes(
+                            sid, request.doc or "knowledge"
+                        )
                 elif page.startswith("summarize:logs:"):
                     sid = page.removeprefix("summarize:logs:")
                     if not sid or Path(sid).name != sid or sid in {".", ".."}:
