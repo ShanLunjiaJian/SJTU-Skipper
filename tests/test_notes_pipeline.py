@@ -1095,6 +1095,114 @@ def test_continuation_reopens_saved_writer_and_preserves_qa(
         assert not env.agent.sessions
 
 
+def test_failed_continuation_can_retry(tmp_path):
+    def run(session, instruction):
+        if instruction == "First revision":
+            write_notes(session, "Unpublished revision")
+            return note_result(error="Continuation generation failed")
+        assert instruction == "Retry revision"
+        assert "Latest body" in session.workspace.text("note_knowledge.md")
+        return write_notes(session, "Recovered revision")
+
+    with note_pipeline(tmp_path, run) as env:
+        pipeline = env.pipeline
+
+        def reopen(session_id, **params):
+            session = SimpleNamespace(id=session_id, **params)
+            env.agent.sessions[session_id] = session
+            return session
+
+        env.agent.reopen = reopen
+        with pipeline.condition:
+            state = saved_writer(pipeline)
+            notes = tmp_path / "sessions" / "lecture" / "notes"
+            published = {name: (notes / name).read_bytes() for name in NOTE_HEADERS}
+            payload = {
+                "session_id": "lecture",
+                "agent_session_id": "writer",
+                "message": "First revision",
+            }
+            assert pipeline.message(payload)["ok"]
+            assert pipeline.condition.wait_for(
+                lambda: state["phase"] == NotePhase.FAILED and not pipeline.active,
+                timeout=8,
+            )
+            status = pipeline.status("lecture")
+            assert status["error"] == "Continuation generation failed"
+            assert status["generation_state"] == GenerationState.FINISHED
+            assert not state["finalize_requested"]
+            assert not pipeline.continuations and not pipeline.writer_messages
+            assert {
+                name: (notes / name).read_bytes() for name in NOTE_HEADERS
+            } == published
+            assert pipeline.message({**payload, "message": "Retry revision"})["ok"]
+            assert pipeline.condition.wait_for(
+                lambda: state["phase"] == NotePhase.PUBLISHED and not pipeline.active,
+                timeout=8,
+            )
+            assert any(
+                row["error"] == "Continuation generation failed"
+                for row in pipeline.status("lecture")["errors"]
+            )
+        assert [instruction for _, instruction in env.agent.calls] == [
+            "First revision",
+            "Retry revision",
+        ]
+        assert all(
+            "Recovered revision" in (notes / name).read_text() for name in NOTE_HEADERS
+        )
+        assert not env.agent.sessions
+
+
+@pytest.mark.parametrize("draft", [False, True])
+def test_initial_failure_cannot_continue(tmp_path, draft):
+    def run(session, instruction):
+        write_notes(session, "Unpublished initial notes")
+        if draft:
+            env.pipeline._publish_lecture(
+                session.meta["lecture_session"], session.workspace, draft=True
+            )
+        return note_result(error="Initial generation failed")
+
+    with note_pipeline(
+        tmp_path, run, settings={"instant-summarize.enabled": False}
+    ) as env:
+        pipeline = env.pipeline
+        session = env.hub.start_session()
+        session.transcript.append("Definition", start=0, end=10)
+        env.hub.end_session()
+        env.hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 10, final=True)
+        with pipeline.condition:
+            assert pipeline.finalize(session.session_id)
+            state = pipeline._state(session.session_id)
+            assert pipeline.condition.wait_for(
+                lambda: state["phase"] == NotePhase.FAILED and not pipeline.active,
+                timeout=8,
+            )
+            writer_id = state["writer"]["session_id"]
+            runtime = tmp_path / "llm_runtime"
+            runtime.mkdir(exist_ok=True)
+            transcript = runtime / f"{writer_id}.jsonl"
+            transcript.write_text("{}\n")
+            (runtime / f"session-{writer_id}.path").write_text(str(transcript))
+            assert state["finalize_requested"]
+            assert not pipeline.message(
+                {
+                    "session_id": session.session_id,
+                    "agent_session_id": writer_id,
+                    "message": "Continue",
+                }
+            )["ok"]
+            assert (
+                pipeline.status(session.session_id)["error"]
+                == "Initial generation failed"
+            )
+            assert not pipeline.queue and not pipeline.continuations
+        notes = tmp_path / "sessions" / session.session_id / "notes"
+        assert all((notes / name).exists() == draft for name in NOTE_HEADERS)
+        assert len(env.agent.calls) == 1
+
+
 def test_continuation_requires_saved_transcript(tmp_path):
     with note_pipeline(tmp_path, lambda session, instruction: note_result()) as env:
         pipeline = env.pipeline

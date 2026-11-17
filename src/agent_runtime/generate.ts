@@ -1,4 +1,5 @@
-import { completeSimple, streamSimple } from "@oh-my-pi/pi-ai";
+import { streamSimple } from "@oh-my-pi/pi-ai";
+import { setTimeout as delay } from "node:timers/promises";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type {
   Model,
@@ -97,21 +98,28 @@ export async function generate(
   let attempts = 0;
   let result;
   if (board) {
-    result = await completeSimple(model, context, {
-      ...options,
-      onAttempt(message) {
-        ++attempts;
-        emit(RuntimeEvent.LLM_ATTEMPT, {
-          attempt: attempts,
-          outcome: AIError.is(message.errorId, AIError.Flag.ThinkingLoop)
-            ? AttemptOutcome.THINKING_LOOP
-            : message.stopReason === "error" || message.stopReason === "aborted"
-              ? AttemptOutcome.ERROR
-              : AttemptOutcome.SUCCESS,
-          ...(message.errorMessage ? { error: message.errorMessage } : {}),
-        });
-      },
-    });
+    const maxAttempts = input.loop_max_attempts ?? 3;
+    for (;;) {
+      signal.throwIfAborted();
+      const events = streamSimple(model, context, options);
+      for await (const _event of events) {
+      }
+      result = await events.result();
+      ++attempts;
+      const loop =
+        result.stopReason === "error" && AIError.is(result.errorId, AIError.Flag.ThinkingLoop);
+      emit(RuntimeEvent.LLM_ATTEMPT, {
+        attempt: attempts,
+        outcome: loop
+          ? AttemptOutcome.THINKING_LOOP
+          : result.stopReason === "error" || result.stopReason === "aborted"
+            ? AttemptOutcome.ERROR
+            : AttemptOutcome.SUCCESS,
+        ...(result.errorMessage ? { error: result.errorMessage } : {}),
+      });
+      if (!loop || attempts >= maxAttempts) break;
+      await delay(Math.min(500 * 2 ** (attempts - 1), 8000), undefined, { signal });
+    }
     signal.throwIfAborted();
     if (result.stopReason === "error" && AIError.is(result.errorId, AIError.Flag.ThinkingLoop)) {
       return {

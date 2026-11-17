@@ -124,7 +124,7 @@ test("run block IDs remain distinct and interrupted blocks finish", () => {
   turn();
   const firstId = updates.find((update) => update.block?.kind === ExecutionBlockKind.TEXT)!.block!
     .id;
-  expect(updates.at(-2)?.block?.status).toBe(ExecutionBlockStatus.ABORTED);
+  expect(updates.at(-2)?.block?.status).toBe(ExecutionBlockStatus.CANCELLED);
   first();
   const second = start();
   turn();

@@ -3111,7 +3111,7 @@
       }
     }
     const key = active
-      ? `${active}\u0000${JSON.stringify(blocks || [], (k, v) => (k === "true" ? undefined : v))}`
+      ? `${active}\u0000${JSON.stringify(blocks || [], (k, v) => (k === "collapsed" ? undefined : v))}`
       : "__welcome__";
     if (samePage && state.pageKey === key) return false;
     if (!samePage && composingWithin(container)) return false;

@@ -371,35 +371,39 @@ test("an accepted review survives a harmless user message", async () => {
   }
 });
 
-for (const exhausted of [false, true]) {
-  test(`board loop ${exhausted ? "exhaustion" : "recovery"} keeps failed text private`, async () => {
-    let requests = 0;
-    const loop = String.raw`\lambda_1 = \frac{1-\lambda\beta}{1-\lambda}\quad \rho=\lambda_1-\gamma^2`;
-    const env = await localRuntime(() => {
-      ++requests;
-      return sse(modelText(exhausted || requests === 1 ? loop.repeat(40) : "Complete board"));
+for (const maxAttempts of [1, 2, 3]) {
+  for (const exhausted of [false, true]) {
+    test(`board loop ${maxAttempts} attempts ${exhausted ? "exhaustion" : "recovery"} keeps failed text private`, async () => {
+      let requests = 0;
+      const loop = String.raw`\lambda_1 = \frac{1-\lambda\beta}{1-\lambda}\quad \rho=\lambda_1-\gamma^2`;
+      const env = await localRuntime(() => {
+        ++requests;
+        return sse(modelText(exhausted || requests === 1 ? loop.repeat(40) : "Complete board"));
+      });
+      const events: { name: RuntimeEvent; data: Record<string, unknown> }[] = [];
+      try {
+        const result = await env.runtime.dispatch(
+          IpcMethod.GENERATE,
+          {
+            messages: [{ role: "user", content: "Read board" }],
+            loop_max_attempts: maxAttempts,
+          },
+          (name, data) => events.push({ name, data }),
+        );
+        expect(requests).toBe(exhausted ? maxAttempts : Math.min(2, maxAttempts));
+        const failed = exhausted || maxAttempts === 1;
+        expect(result).toHaveProperty("content", failed ? "" : "Complete board");
+        if (failed) expect(result).toHaveProperty("error.code", "thinking_loop");
+        expect(
+          events
+            .filter((event) => event.name === RuntimeEvent.LLM_DELTA)
+            .map((event) => event.data.text),
+        ).toEqual(failed ? [] : ["Complete board"]);
+      } finally {
+        await env.close();
+      }
     });
-    const events: { name: RuntimeEvent; data: Record<string, unknown> }[] = [];
-    try {
-      const result = await env.runtime.dispatch(
-        IpcMethod.GENERATE,
-        {
-          messages: [{ role: "user", content: "Read board" }],
-        },
-        (name, data) => events.push({ name, data }),
-      );
-      expect(requests).toBe(exhausted ? 3 : 2);
-      expect(result).toHaveProperty("content", exhausted ? "" : "Complete board");
-      if (exhausted) expect(result).toHaveProperty("error.code", "thinking_loop");
-      expect(
-        events
-          .filter((event) => event.name === RuntimeEvent.LLM_DELTA)
-          .map((event) => event.data.text),
-      ).toEqual(exhausted ? [] : ["Complete board"]);
-    } finally {
-      await env.close();
-    }
-  });
+  }
 }
 
 test("cancel during loop backoff prevents another attempt", async () => {
@@ -763,6 +767,22 @@ test("reopen requires readable history and preserves its messages", async () => 
     );
     expect(JSON.stringify(requests.at(-1)?.messages)).toContain("Original task");
     expect(JSON.stringify(requests.at(-1)?.messages)).toContain("Saved answer");
+    await runtime.dispatch(IpcMethod.CLOSE_SESSION, { session_id: "history" }, () => {});
+    await runtime.dispatch(
+      IpcMethod.CREATE_SESSION,
+      { id: "history", prompt: "Fresh instructions" },
+      () => {},
+    );
+    await runtime.dispatch(
+      IpcMethod.RUN,
+      { session_id: "history", instruction: "Fresh task" },
+      () => {},
+    );
+    const fresh = JSON.stringify(requests.at(-1)?.messages);
+    expect(fresh).not.toContain("Original task");
+    expect(fresh).not.toContain("Saved answer");
+    expect(fresh).toContain("Fresh instructions");
+    expect(fresh).toContain("Fresh task");
   } finally {
     await fixture.close();
   }

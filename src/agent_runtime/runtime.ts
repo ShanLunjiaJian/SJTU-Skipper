@@ -437,9 +437,10 @@ export class Runtime {
       try {
         const sessionDir = path.join(this.root, "sessions");
         const pointer = path.join(this.root, `session-${id}.path`);
-        const saved = (await Bun.file(pointer).exists())
-          ? await Bun.file(pointer).text()
-          : undefined;
+        const saved =
+          method === IpcMethod.REOPEN_SESSION && (await Bun.file(pointer).exists())
+            ? (await Bun.file(pointer).text()).trim()
+            : undefined;
         if (method === IpcMethod.REOPEN_SESSION && !saved?.trim())
           throw new Error(`Saved session transcript is unavailable: ${id}`);
         if (method === IpcMethod.REOPEN_SESSION && saved) {
@@ -513,7 +514,10 @@ export class Runtime {
                   await reviewer.workspace.initialize(files, Object.keys(files));
                 } else {
                   await this.dispatch(
-                    IpcMethod.CREATE_SESSION,
+                    saved &&
+                      (await Bun.file(path.join(this.root, `session-${child}.path`)).exists())
+                      ? IpcMethod.REOPEN_SESSION
+                      : IpcMethod.CREATE_SESSION,
                     {
                       id: child,
                       role,

@@ -318,6 +318,14 @@ class VlmPlugin(Plugin):
                 description="每个窗口最多采样的帧数；0 表示不限制（全量帧很慢）",
             ),
             SettingsSpec(
+                key="vlm.loop_max_attempts",
+                label="重复输出最大尝试次数",
+                type=SettingType.INT,
+                default=3,
+                group="VLM",
+                description="包含首次识别；检测到重复输出时重新尝试",
+            ),
+            SettingsSpec(
                 key="vlm.fusion",
                 label="启用融合",
                 type=SettingType.BOOL,
@@ -583,6 +591,9 @@ class VlmPlugin(Plugin):
         session = self._processing_session or ctx.streams.current
         sid = session.session_id
         request_id = f"vlm_{sid}_{time.monotonic_ns()}"
+        max_attempts = int(self._setting("vlm.loop_max_attempts", 3))
+        if max_attempts < 1:
+            raise ValueError("vlm.loop_max_attempts 必须至少为 1")
         with self._lock:
             if sid in self._cancelled_sessions:
                 raise RuntimeError("VLM session cancelled")
@@ -601,6 +612,7 @@ class VlmPlugin(Plugin):
                 role=AgentRole.BOARD_RECOGNITION,
                 messages=messages,
                 temperature=0.1,
+                loop_max_attempts=max_attempts,
                 session_id=request_id,
                 on_sent=sent,
             )
@@ -613,7 +625,7 @@ class VlmPlugin(Plugin):
         if error := response.get("error"):
             if (
                 error.get("code") == GenerationErrorCode.THINKING_LOOP
-                and error.get("attempts") == 3
+                and error.get("attempts") == max_attempts
             ):
                 raise VLMRecognitionError(
                     error["message"],

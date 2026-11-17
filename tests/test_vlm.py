@@ -330,17 +330,20 @@ def test_recording_eof_after_idle_finishes_tail(vlm_plugin, vlm_ctx):
 
 
 @pytest.mark.parametrize(
-    "code,attempts,recoverable",
+    "code,attempts,max_attempts,recoverable",
     [
-        (GenerationErrorCode.THINKING_LOOP, 3, True),
-        (GenerationErrorCode.THINKING_LOOP, 2, False),
-        ("provider_error", 3, False),
+        (GenerationErrorCode.THINKING_LOOP, 3, 3, True),
+        (GenerationErrorCode.THINKING_LOOP, 2, 3, False),
+        (GenerationErrorCode.THINKING_LOOP, 2, 2, True),
+        ("provider_error", 3, 3, False),
     ],
 )
 def test_structured_error_classification(
-    vlm_plugin, vlm_ctx, code, attempts, recoverable
+    vlm_plugin, vlm_ctx, code, attempts, max_attempts, recoverable
 ):
     from plugins.vlm.plugin import VLMRecognitionError
+
+    vlm_ctx.service("settings").set("vlm.loop_max_attempts", max_attempts)
 
     vlm_ctx.service("llm").script = [
         {

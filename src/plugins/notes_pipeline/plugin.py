@@ -19,6 +19,7 @@ from core.agent_types import (
     ExecutionStatus,
     ExecutionBlockKind,
     ExecutionBlockStatus,
+    GenerationErrorCode,
     ReviewerEventType,
     ReviewStatus,
 )
@@ -359,7 +360,7 @@ class NotesPipelinePlugin(Plugin):
                 key = lambda row: tuple(
                     row.get(name) for name in ("source", "start", "end", "code")
                 )
-                if failure.get("code") != "thinking_loop" or not any(
+                if failure.get("code") != GenerationErrorCode.THINKING_LOOP or not any(
                     key(row) == key(failure) for row in state["errors"]
                 ):
                     state["errors"].append(failure)
@@ -455,7 +456,13 @@ class NotesPipelinePlugin(Plugin):
             if not live:
                 if not writer:
                     return reject("主写作会话记录不可用")
-                if not is_writer or state["phase"] != NotePhase.PUBLISHED:
+                if not is_writer or not (
+                    state["phase"] == NotePhase.PUBLISHED
+                    or (
+                        state["phase"] == NotePhase.FAILED
+                        and not state["finalize_requested"]
+                    )
+                ):
                     return reject("会话已完成，不能发送消息")
                 if any(task[0] == sid for task in self.queue) or any(
                     task["session_id"] == sid
@@ -468,11 +475,12 @@ class NotesPipelinePlugin(Plugin):
                     return reject(f"主写作会话记录不可用：{exc}")
                 self.writer_messages[sid] = [text]
                 self.continuations[sid] = ContinuationStage.QUEUED
+                # Only initial publication keeps this request set after a failure.
                 state.update(
                     phase=NotePhase.WRITING,
                     review_status=ReviewStatus.NOT_REVIEWED,
                     error="",
-                    finalize_requested=True,
+                    finalize_requested=False,
                 )
                 state.pop("restart_cancelled", None)
                 self.queue.append((sid, NoteTaskKind.FINAL, -1))

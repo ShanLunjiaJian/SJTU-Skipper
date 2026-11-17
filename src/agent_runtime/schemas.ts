@@ -132,6 +132,7 @@ export const generateInputSchema = type({
   "system_prompt?": "string",
   "max_tokens?": type("number.integer > 0").or("null"),
   "temperature?": finiteNumber.atLeast(0).or("null"),
+  "loop_max_attempts?": "number.integer > 0",
   "reasoning?": type
     .enumerated(Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max)
     .or(type.enumerated(...Object.values(ReasoningMode))),

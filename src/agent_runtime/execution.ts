@@ -12,7 +12,7 @@ export enum ExecutionBlockStatus {
   STREAMING = "streaming",
   RUNNING = "running",
   COMPLETED = "completed",
-  ABORTED = "aborted",
+  CANCELLED = "cancelled",
   FAILED = "failed",
 }
 
@@ -134,7 +134,7 @@ export function observeExecution(session: AgentSession, emit: Emit, sessionId: s
         if (block?.status !== ExecutionBlockStatus.STREAMING) continue;
         block.status =
           event.message.stopReason === "aborted"
-            ? ExecutionBlockStatus.ABORTED
+            ? ExecutionBlockStatus.CANCELLED
             : event.message.stopReason === "error"
               ? ExecutionBlockStatus.FAILED
               : block.kind === ExecutionBlockKind.TOOL
@@ -187,7 +187,7 @@ export function observeExecution(session: AgentSession, emit: Emit, sessionId: s
           block.status !== ExecutionBlockStatus.RUNNING
         )
           continue;
-        block.status = ExecutionBlockStatus.ABORTED;
+        block.status = ExecutionBlockStatus.CANCELLED;
         publish(block);
       }
     }
