@@ -1331,12 +1331,10 @@ kbd {
   position: fixed;
   inset: 0;
   z-index: 60;
-  background: rgba(32, 33, 36, 0.4);
   display: flex;
   justify-content: center;
   align-items: flex-start;
   padding-top: 12vh;
-  backdrop-filter: blur(2px);
 }
 .palette[hidden] {
   display: none;
@@ -1878,12 +1876,10 @@ kbd {
   position: fixed;
   inset: 0;
   z-index: 70;
-  background: rgba(32, 33, 36, 0.4);
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding-top: 14vh;
-  backdrop-filter: blur(2px);
 }
 .ask-modal[hidden] {
   display: none;
