@@ -81,7 +81,7 @@ llm-agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 
 `vlm` 按采样窗口读取视频帧，通过 `picture_parser` 融合图像，再由 `board_recognition` 角色识别．请求按窗口顺序执行，`vlm.prepare_ahead` 控制图像预处理是否提前执行．已不需要的帧会释放．
 
-识别提示要求只记录可见内容，并使用文字历史提取板书变化．无变化或重复内容不追加到 `visual`．融合图、板书文本和采样覆盖区间分别保存．
+模型每个采样窗口读取采样时间和融合图，逐板面转录为 Markdown．提示词见 `src/plugins/vlm/prompts.py`．模型对照图像复核符号，不读取旧转录．程序用 `vlm.history_windows` 指定的历史窗口精确去重，再把新行写入 `visual`．融合图、板书文本和采样覆盖区间分别保存．
 
 ## OMP SDK 运行时
 

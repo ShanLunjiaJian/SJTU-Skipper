@@ -33,8 +33,6 @@ from plugins.vlm.fusion import fuse_frames
 from plugins.vlm.plugin import VlmPlugin, _fmt_time
 from plugins.vlm.prompts import (
     BLANK_BOARD_MARKER,
-    NO_CHANGE_MARKER,
-    build_image_content,
     collapse_repetitions,
     is_trivial_board_text,
 )
@@ -175,33 +173,6 @@ class TestPrompts:
     def test_collapse_keeps_non_repeated_content(self):
         text = "$$\nA = B\n$$\n\n$$\nC = D\n$$\n\n$$\nA = B\n$$"
         assert collapse_repetitions(text) == text
-
-    def test_build_image_content_structure(self):
-        content = build_image_content(
-            timestamp="00:30", image_data_url="data:image/jpeg;base64,abc"
-        )
-        assert isinstance(content, list)
-        assert len(content) == 2
-        assert content[0]["type"] == "text"
-        assert "00:30" in content[0]["text"]
-        assert content[1] == {
-            "type": "image_url",
-            "image_url": {"url": "data:image/jpeg;base64,abc"},
-        }
-
-    def test_build_image_content_no_image_url(self):
-        content = build_image_content(timestamp="00:00", image_data_url="")
-        assert len(content) == 1
-        assert content[0]["type"] == "text"
-
-    def test_history_is_passed_as_text_and_asks_for_delta(self):
-        content = build_image_content(
-            timestamp="10:00",
-            history=["第一版板书 A", "第二版板书 B"],
-        )
-        text = content[0]["text"]
-        assert "第一版板书 A" in text
-        assert "第二版板书 B" in text
 
 
 class TestTrivialBoardText:
@@ -419,7 +390,6 @@ def test_live_gap_continues_to_success(vlm_plugin, vlm_ctx):
     settings.set("vlm.window_seconds", 5.0)
     settings.set("vlm.cadence_live_seconds", 5.0)
     settings.set("vlm.fusion", False)
-    settings.set("vlm.dedupe_threshold", 0.0)
     session = vlm_ctx.streams.current
     session.video_gate.configure(60.0)
     for _ in range(10):
@@ -479,7 +449,6 @@ class TestVlmPlugin:
         settings.set("vlm.enabled", True)
         settings.set("vlm.window_seconds", 5.0)
         settings.set("vlm.cadence_recording_seconds", 5.0)
-        settings.set("vlm.dedupe_threshold", 0.92)
         settings.set("vlm.fusion", False)
 
         session = vlm_ctx.streams.current
@@ -590,7 +559,6 @@ class TestVlmPlugin:
         settings = vlm_ctx.service("settings")
         settings.set("vlm.enabled", True)
         settings.set("vlm.model", "deepseek-flash")
-        settings.set("vlm.dedupe_threshold", 0.0)
         settings.set("vlm.fusion", False)
 
         fake_llm = vlm_ctx.service("llm")
@@ -659,7 +627,6 @@ class TestVlmPlugin:
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
     ):
         settings = vlm_ctx.service("settings")
-        settings.set("vlm.dedupe_threshold", 0.0)
         settings.set("vlm.fusion", False)
 
         fake_llm = vlm_ctx.service("llm")
@@ -679,7 +646,6 @@ class TestVlmPlugin:
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
     ):
         settings = vlm_ctx.service("settings")
-        settings.set("vlm.dedupe_threshold", 0.0)
         settings.set("vlm.fusion", False)
 
         fake_llm = vlm_ctx.service("llm")
@@ -695,49 +661,25 @@ class TestVlmPlugin:
         assert result.get("ok") is True
         assert len(vlm_ctx.streams.current.visual) == visual_before
 
-    def test_process_window_deduplicates(
-        self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
-    ):
-        settings = vlm_ctx.service("settings")
-        settings.set("vlm.dedupe_threshold", 0.5)
-        settings.set("vlm.fusion", False)
-
-        same_text = "定理 2.1 设 $G$ 是一个群。"
+    def test_process_window_keeps_changed_formula(self, vlm_plugin, vlm_ctx):
+        vlm_ctx.service("settings").set("vlm.fusion", False)
+        repeated = "$$\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n$$"
+        old = "$x_1 + x_2 + x_3 = y_1 + y_2$"
+        changed = "$x_1 + x_2 + x_3 = y_1 - y_2$"
         fake_llm = vlm_ctx.service("llm")
-        fake_llm.script = [same_text, same_text]
+        fake_llm.script = [
+            f"{repeated}\n\n{old}",
+            f"{repeated}\n\n{changed}",
+            f"{repeated}\n\n{changed}",
+        ]
 
-        arr = _synthetic_frame()
-        jpeg = _to_jpeg(arr)
+        jpeg = _to_jpeg(_synthetic_frame())
+        for start in (0.0, 1.0, 2.0):
+            frames = [_make_video_frame(jpeg, start, start + 1)]
+            vlm_plugin.process_window(start, start + 1, frames)
 
-        frames1 = [_make_video_frame(jpeg, 0.0, 1.0)]
-        vlm_plugin.process_window(0.0, 1.0, frames1)
-
-        frames2 = [_make_video_frame(jpeg, 1.0, 2.0)]
-        result2 = vlm_plugin.process_window(1.0, 2.0, frames2)
-
-        assert result2.get("skipped") is True
         visual = vlm_ctx.streams.current.visual
-        assert len(visual) == 1
-
-    def test_process_window_skips_no_change_marker(
-        self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
-    ):
-        settings = vlm_ctx.service("settings")
-        settings.set("vlm.dedupe_threshold", 0.0)
-        settings.set("vlm.fusion", False)
-
-        fake_llm = vlm_ctx.service("llm")
-        fake_llm.script = [NO_CHANGE_MARKER]
-
-        arr = _synthetic_frame()
-        jpeg = _to_jpeg(arr)
-        frames = [_make_video_frame(jpeg, 5.0, 6.0)]
-
-        visual_before = len(vlm_ctx.streams.current.visual)
-        result = vlm_plugin.process_window(5.0, 6.0, frames)
-
-        assert result.get("skipped") is True
-        assert len(vlm_ctx.streams.current.visual) == visual_before
+        assert [item.text for item in visual] == [f"{repeated}\n\n{old}", changed]
 
     def test_truncated_response_is_not_committed(self, vlm_plugin, vlm_ctx):
         settings = vlm_ctx.service("settings")
@@ -780,11 +722,10 @@ class TestVlmPlugin:
         assert not vlm_plugin._submitted_requests
         assert not session.visual.items_since(0)
 
-    def test_second_window_sends_previous_transcription(
+    def test_recognition_does_not_receive_previous_transcription(
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
     ):
         settings = vlm_ctx.service("settings")
-        settings.set("vlm.dedupe_threshold", 0.0)
         settings.set("vlm.fusion", False)
 
         fake_llm = vlm_ctx.service("llm")
@@ -796,14 +737,18 @@ class TestVlmPlugin:
         vlm_plugin.process_window(5.0, 6.0, [_make_video_frame(jpeg, 5.0, 6.0)])
 
         assert len(fake_llm.calls) == 2
-        second = fake_llm.calls[1][1]["messages"][0]["content"][0]["text"]
-        assert "定理 A" in second
+        instruction, input_message = fake_llm.calls[1][1]["messages"]
+        assert instruction["role"] == "system"
+        evidence, image = input_message["content"]
+        assert input_message["role"] == "user"
+        assert image["type"] == "image_url"
+        assert evidence == {"type": "text", "text": "采样时间：00:05 - 00:06"}
+        assert "定理 A" not in instruction["content"]
 
     def test_llm_error_emits_vlm_error(
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
     ):
         settings = vlm_ctx.service("settings")
-        settings.set("vlm.dedupe_threshold", 0.0)
         settings.set("vlm.fusion", False)
 
         fake_llm = vlm_ctx.service("llm")
@@ -915,15 +860,15 @@ def test_prepare_overlaps_recognition(vlm_plugin, vlm_ctx, monkeypatch):
     recognition_started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
-    histories = []
+    recognized = []
 
     def prepare(session, start, end, frames):
         if start == 5:
             prepared_next.set()
         return PreparedWindow(start, end, Path("board.jpg"), b"jpeg")
 
-    def recognize(session, prepared, history):
-        histories.append(list(history))
+    def recognize(prepared):
+        recognized.append(prepared.start)
         recognition_started.set()
         if prepared.start == 0:
             assert prepared_next.wait(2)
@@ -945,10 +890,14 @@ def test_prepare_overlaps_recognition(vlm_plugin, vlm_ctx, monkeypatch):
     try:
         assert prepared_next.wait(2)
         assert recognition_started.wait(2)
-        assert len(histories) == 1
+        assert recognized == [0.0]
         release.set()
         assert finished.wait(2)
-        assert histories[1] == ["Definition at 0.0"]
+        assert recognized == [0.0, 5.0]
+        assert [item.text for item in session.visual] == [
+            "Definition at 0.0",
+            "Definition at 5.0",
+        ]
     finally:
         release.set()
         worker.join(2)
