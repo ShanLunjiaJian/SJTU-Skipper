@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from core.ui import UIManager
 from plugins.notes_pipeline.plugin import NotesPipelinePlugin
 from plugins.settings.store import SettingsService, SettingsStore
 
@@ -12,10 +13,7 @@ def test_pipeline_registers_generation_settings(tmp_path):
         require=services.__getitem__,
         register_service=services.__setitem__,
         events=SimpleNamespace(on=lambda *args, **kwargs: None),
-        ui=SimpleNamespace(
-            register_task_provider=lambda *args, **kwargs: None,
-            register_action=lambda *args, **kwargs: None,
-        ),
+        ui=UIManager(),
     )
     pipeline = NotesPipelinePlugin()
     pipeline.setup(ctx)
