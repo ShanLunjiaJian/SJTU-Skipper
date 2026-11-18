@@ -21,7 +21,6 @@ from __future__ import annotations
 import threading
 from datetime import datetime
 from hashlib import sha256
-from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -31,17 +30,13 @@ from contextlib import ExitStack
 from core.ui import BlockType, render_markdown
 
 from core import note_document as qa
+from .types import SelectionKind
 
 PAGE_ID = "reader:main"
 PAGE_PREFIX = "reader:notes:"
 OPEN_ACTION = "reader.open"
 DELETE_QA_ACTION = "reader.qa_delete"
 COLLAPSE_QA_ACTION = "reader.qa_collapse"
-
-
-class SelectionKind(StrEnum):
-    ACTION = "action"
-    PROMPT = "prompt"
 
 
 class ReaderService:

@@ -15,6 +15,18 @@ class LogLevel(StrEnum):
     CRITICAL = "CRITICAL"
 
 
+def parse_log_level(value: LogLevel | str) -> LogLevel:
+    """Accept ``debug``/``DEBUG``/``LogLevel.DEBUG`` and reject anything else."""
+
+    if isinstance(value, LogLevel):
+        return value
+    try:
+        return LogLevel(str(value).strip().upper())
+    except ValueError as exc:
+        names = ", ".join(level.value.lower() for level in LogLevel)
+        raise ValueError(f"unknown log level {value!r}; expected one of {names}") from exc
+
+
 _CONFIGURED = False
 
 

@@ -407,13 +407,8 @@ class NotesPipelinePlugin(Plugin):
     def _writer_inputs(self, sid, writer):
         root = self._directory(sid)
         files = {name: root / relative for name, relative in writer["files"].items()}
-        pointer = (
-            self.ctx.data_dir / "llm_runtime" / f"session-{writer['session_id']}.path"
-        )
-        transcript = pointer.read_text(encoding="utf-8").strip()
-        if not transcript:
+        if not self.agent.can_resume(writer["session_id"])[0]:
             raise RuntimeError("主写作会话记录不可用")
-        Path(transcript).read_text(encoding="utf-8")
         for path in files.values():
             path.read_text(encoding="utf-8")
         notes = self.ctx.data_dir / "sessions" / sid / "notes"

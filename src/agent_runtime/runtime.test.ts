@@ -371,6 +371,85 @@ test("an accepted review survives a harmless user message", async () => {
   }
 });
 
+test("message admitted during the final review check is delivered", async () => {
+  let writers = 0;
+  let reviews = 0;
+  const delivered: string[] = [];
+  const fixture = await localRuntime((body) => {
+    if (JSON.stringify(body.messages).includes("LATE_REVIEW")) {
+      ++reviews;
+      return sse(
+        modelText(
+          JSON.stringify({
+            correct: true,
+            explanation: "Checked",
+            confidence: 1,
+            findings: [],
+          }),
+        ),
+      );
+    }
+    ++writers;
+    const last = taskWithoutReminder(userTexts(body).at(-1) ?? "");
+    if (last === "Late message") {
+      delivered.push(last);
+      return sse(modelText("Delivered"));
+    }
+    if (writers === 1) return sse(modelTool("review_notes", {}, "late-review"));
+    return sse(modelText("Reviewed"));
+  });
+  try {
+    const files: Record<string, string> = {};
+    for (const name of [
+      "lecture_source.md",
+      "note_knowledge.md",
+      "note_gossip.md",
+      "note_notice.md",
+    ]) {
+      files[name] = path.join(fixture.root, name);
+      await Bun.write(files[name]!, "Notes");
+    }
+    await fixture.runtime.dispatch(
+      IpcMethod.CREATE_SESSION,
+      {
+        id: "late",
+        files,
+        meta: { review: { system: "LATE_REVIEW", prompt: "Review", maxRounds: 1 } },
+      },
+      () => {},
+    );
+    const gate = fixture.runtime["sessions"].get("late")!.review!;
+    const satisfied = gate.satisfied.bind(gate);
+    let injected = false;
+    gate.satisfied = async () => {
+      const value = await satisfied();
+      if (!injected) {
+        injected = true;
+        expect(
+          await fixture.runtime.dispatch(
+            IpcMethod.MESSAGE,
+            { session_id: "late", message: "Late message" },
+            () => {},
+          ),
+        ).toEqual({ accepted: true });
+      }
+      return value;
+    };
+    const result = await fixture.runtime.dispatch(
+      IpcMethod.RUN,
+      { session_id: "late", instruction: "Review notes" },
+      () => {},
+    );
+    expect(injected).toBe(true);
+    expect(delivered).toEqual(["Late message"]);
+    expect(result).toMatchObject({ final_message: "Delivered", review_status: "passed" });
+    expect(reviews).toBe(1);
+    expect(writers).toBeGreaterThan(1);
+  } finally {
+    await fixture.close();
+  }
+});
+
 for (const maxAttempts of [1, 2, 3]) {
   for (const exhausted of [false, true]) {
     test(`board loop ${maxAttempts} attempts ${exhausted ? "exhaustion" : "recovery"} keeps failed text private`, async () => {

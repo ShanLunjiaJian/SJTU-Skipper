@@ -32,7 +32,7 @@ from core.ui import render_markdown
 from core.file_access import publication_lock
 from core.workspace import FileWorkspace
 from plugins.notes_pipeline.types import NotePublication
-from plugins.reader.plugin import SelectionKind
+from plugins.reader.types import SelectionKind
 
 from .prompts import ASK_PROMPT_TEMPLATE, INSTANT_SYSTEM_PROMPT, RESEARCH_SYSTEM_PROMPT
 

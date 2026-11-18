@@ -20,6 +20,7 @@ class ScriptedRuntime:
         self.runs = []
         self.sessions = {}
         self.cancelled = {}
+        self.transcripts = {}
         self.closed = False
 
     def call(self, method: IpcMethod, **params):
@@ -34,6 +35,9 @@ class ScriptedRuntime:
 
     def cancel(self, session_id):
         self.cancelled[session_id].set()
+
+    def session_transcript(self, session_id):
+        return self.transcripts.get(session_id)
 
     def stream(self, method: IpcMethod, **params):
         assert method == IpcMethod.RUN
@@ -500,5 +504,33 @@ def test_reopen_uses_strict_native_operation(tmp_path):
         assert restored.id == session.id
         assert restored.model == "restored-model"
         assert not restored.cancelled.is_set()
+    finally:
+        runtime.stop()
+
+
+def test_can_resume_reads_saved_transcript_through_runtime(tmp_path):
+    from agent_runtime.client import RuntimeClient
+
+    runtime, agent, _sdk, _ = _make_agent_runtime(tmp_path)
+    try:
+        live = agent.create_session("writer")
+        client = RuntimeClient(tmp_path)
+        agent._runtime = client
+        assert agent.can_resume("") == (False, "agent session is unknown")
+        assert agent.can_resume("writer") == (
+            False,
+            "saved session transcript is unavailable",
+        )
+        transcript = tmp_path / "writer.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        (tmp_path / "session-writer.path").write_text(str(transcript), encoding="utf-8")
+        assert agent.can_resume("writer") == (True, "")
+        (tmp_path / "session-writer.path").write_text("", encoding="utf-8")
+        assert not agent.can_resume("writer")[0]
+        transcript.unlink()
+        (tmp_path / "session-writer.path").write_text(str(transcript), encoding="utf-8")
+        assert not agent.can_resume("writer")[0]
+        assert agent.can_resume(live.id) == (False, "agent session is still live")
+        assert client._process is None
     finally:
         runtime.stop()

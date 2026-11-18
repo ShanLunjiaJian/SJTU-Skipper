@@ -177,6 +177,23 @@ class AgentService:
         except Exception as exc:
             return {"accepted": False, "reason": str(exc)}
 
+    def can_resume(self, session_id: str) -> tuple[bool, str]:
+        """Report whether ``session_id`` still has a reopenable transcript.
+
+        The runtime owns the transcript layout; the check stays behind the
+        ``llm`` service instead of a consumer plugin reading runtime files.
+        """
+
+        if not session_id:
+            return False, "agent session is unknown"
+        with self._lock:
+            live = session_id in self._sessions
+        if live:
+            return False, "agent session is still live"
+        if self._runtime.session_transcript(session_id) is None:
+            return False, "saved session transcript is unavailable"
+        return True, ""
+
     def _create_runtime_session(
         self, session: AgentSession, *, method: IpcMethod = IpcMethod.CREATE_SESSION
     ) -> None:

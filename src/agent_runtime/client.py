@@ -121,6 +121,27 @@ class RuntimeClient:
     def cancel(self, session_id: str):
         return self.call(IpcMethod.CANCEL, session_id=session_id)
 
+    def session_transcript(self, session_id: str) -> Path | None:
+        """Return the saved SDK transcript of *session_id*, if it is reopenable.
+
+        The pointer/transcript layout is private to this runtime process, so
+        plugins ask the ``agent`` service instead of reading it themselves.
+        """
+
+        if not session_id:
+            return None
+        try:
+            value = (self.data_dir / f"session-{session_id}.path").read_text(
+                encoding="utf-8"
+            )
+        except OSError:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        path = Path(value)
+        return path if path.is_file() else None
+
     def close(self):
         with self._lock:
             process = self._process

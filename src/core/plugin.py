@@ -806,7 +806,12 @@ class PluginManager:
                 )
         drop_activity = getattr(reader, "unregister_activity_provider", None)
         if callable(drop_activity):
-            drop_activity(pid)
+            try:
+                drop_activity(pid)
+            except Exception:  # noqa: BLE001 - reader cleanup is best effort
+                logging.getLogger("lecture_agent.plugins").exception(
+                    "activity provider cleanup failed for plugin %s", pid
+                )
 
     def teardown(self) -> None:
         with self._lock:

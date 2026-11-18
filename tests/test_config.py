@@ -40,3 +40,28 @@ def test_env_overrides(tmp_path: Path, monkeypatch) -> None:
     cfg = load_config()
     assert cfg.data_dir == (tmp_path / "env").resolve()
     assert cfg.port == 8123
+
+
+def test_log_level_accepts_lowercase(tmp_path: Path, monkeypatch) -> None:
+    from applog import LogLevel
+
+    monkeypatch.setenv("LECTURE_AGENT_DATA_DIR", str(tmp_path / "levels"))
+    monkeypatch.setenv("LECTURE_AGENT_LOG_LEVEL", "debug")
+    assert load_config().log_level is LogLevel.DEBUG
+
+    config_file = tmp_path / "agent.toml"
+    config_file.write_text(
+        "\n".join(["[agent]", f'data_dir = "{tmp_path / "toml-levels"}"', 'log_level = "warning"']),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("LECTURE_AGENT_LOG_LEVEL")
+    assert load_config(config_file=config_file).log_level is LogLevel.WARNING
+
+
+def test_log_level_rejects_unknown_value(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+
+    monkeypatch.setenv("LECTURE_AGENT_DATA_DIR", str(tmp_path / "bad-level"))
+    monkeypatch.setenv("LECTURE_AGENT_LOG_LEVEL", "chatty")
+    with pytest.raises(ValueError, match="unknown log level"):
+        load_config()

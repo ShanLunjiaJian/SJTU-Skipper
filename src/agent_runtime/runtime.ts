@@ -93,7 +93,8 @@ export class Runtime {
     ++control.generation;
     control.notification.resolve();
     return this.queueRunOperation(control, async () => {
-      if (control.cancelled) return { accepted: false, reason: MessageRejectionReason.INACTIVE };
+      if (control.cancelled || !control.acceptingMessages)
+        return { accepted: false, reason: MessageRejectionReason.INACTIVE };
       const admitted = await conversation.session.joinActiveTurn(text, undefined, {
         queue: "steering",
       });
@@ -865,13 +866,29 @@ export class Runtime {
             conversation.review?.hasPending()
           )
             continue;
-          if (conversation.review && !(await conversation.review.satisfied())) {
-            if (conversation.review.exhausted())
-              throw new Error("Review round limit reached without approval of the saved notes");
-            prompts = [
-              "The saved notes do not have a passing review. Call review_notes, address its findings, and obtain approval for the saved notes before completing.",
-            ];
-            continue;
+          if (conversation.review) {
+            const satisfied = await conversation.review.satisfied();
+            if (control.cancelled) throw new Error("Agent run cancelled");
+            // ``satisfied`` reads the note files, so a message may have been
+            // admitted while it awaited: stay in the loop and deliver it
+            // instead of completing the run with an undelivered inbox.
+            if (
+              generation !== control.generation ||
+              control.inbox.length ||
+              control.barrier ||
+              conversation.review.hasPending()
+            )
+              continue;
+            if (!satisfied) {
+              if (conversation.review.exhausted())
+                throw new Error(
+                  "Review round limit reached without approval of the saved notes",
+                );
+              prompts = [
+                "The saved notes do not have a passing review. Call review_notes, address its findings, and obtain approval for the saved notes before completing.",
+              ];
+              continue;
+            }
           }
           control.acceptingMessages = false;
           break;

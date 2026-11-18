@@ -6,6 +6,7 @@
 
 ```python
 from core.plugin import Plugin, PluginContext
+from core.ui import Side
 
 
 class MyPlugin(Plugin):
@@ -17,7 +18,7 @@ class MyPlugin(Plugin):
         self.settings = ctx.require("settings")
         self.llm = ctx.llm            # 项目 OMP 运行时
 
-        ctx.ui.add_tab("right", "my-tab", "我的工具", icon="✦")
+        ctx.ui.add_tab(Side.RIGHT, "my-tab", "我的工具", icon="✦")
         ctx.ui.add_toolbox_item(
             "my-tab", "my-item", "快捷操作",
             render=lambda: [{"type": "text", "text": "hello"}],
@@ -88,7 +89,7 @@ ctx.events.emit("my.event", value=1)
 - `stream.appended` / `stream.sealed`
 - `settings.changed`
 - `ui.changed`
-- `agent.run.started` / `agent.run.ready` / `agent.delta` / `agent.reasoning` / `agent.message` / `agent.tool_call` / `agent.tool_result` / `agent.file` / `agent.run.finished` / `agent.error`
+- `agent.run.started` / `agent.run.ready` / `agent.delta` / `agent.reasoning` / `agent.message` / `agent.tool_call` / `agent.tool_result` / `agent.file` / `agent.execution` / `agent.reviewer` / `agent.run.finished` / `agent.error`
 - `vlm.segment` / `vlm.error`
 - `stt.partial` / `stt.segment` / `stt.anomaly` / `stt.error`
 - `input.status` / `input.error`
@@ -113,34 +114,40 @@ ctx.register_service("my.service", my_object)
 - 服务名包括 `settings`、`llm`、`agent`、`input`、`stt`、`vlm`、`notes-pipeline`、`summarize`、`instant-summarize` 和 `reader`．
 - `stt.status()` 返回服务地址、模型、语言、会话 ID、音频时长、处理游标、覆盖时长、片段数、临时文字和失败区间等状态．
 - `stt.transcribe(start=None, end=None)` 同步处理保留 PCM 中尚未覆盖的区间．`start` 缺省为已调度游标，`end` 缺省为 `start + 120` 秒，并限制在音频终点内．调用会追加转写、记录覆盖并推进已调度游标，返回 `ok/start/end/segments/chars/items`．
-- 服务调用使用公开服务对象，不导入插件实现．共享类型从 `core` 导入．
+- 服务调用使用公开服务对象，不导入插件实现．共享类型与枚举（`Side`、`BlockType`、`FormInputType`、`TaskState`、`StreamKind`、`MediaKind`、`SettingType`）从 `core` 导入．
 - `requires` 声明必需插件，控制加载顺序和服务访问权限．缺失必需插件时加载失败．`optional_requires` 声明可选插件；调用 `ctx.service(name)` 可取得服务或 `None`．
 
 ## 5. LLM
 
 ```python
+from core.agent_types import IpcMethod
+
 response = ctx.llm.call(
-    "generate",
+    IpcMethod.GENERATE,
     role="board_recognition",
     messages=[{"role": "user", "content": "描述图中板书"}],
 )
 response["content"]
 response["usage"]
 
-for frame in ctx.llm.stream("generate", role="board_recognition", messages=messages):
+for frame in ctx.llm.stream(IpcMethod.GENERATE, role="board_recognition", messages=messages):
     if frame.get("name") == "llm.delta":
         print(frame["data"]["text"])
 ```
 
-- `llm` 服务提供项目 OMP 运行时的 `call`、`stream`、`cancel` 和 `close`．单次生成、交互会话、配置和鉴权共用该接口．文件任务由 `agent` 服务管理应用状态．
+- `llm` 服务提供项目 OMP 运行时的 `call`、`stream`、`cancel`、`close` 和 `session_transcript`．单次生成、交互会话、配置和鉴权共用该接口．文件任务由 `agent` 服务管理应用状态．
+- `call`/`stream` 的方法参数必须是 `IpcMethod` 成员（`generate`、`info`、`configure` 等）．
+- `session_transcript(session_id)` 返回可恢复会话的 SDK transcript 路径，或 `None`．运行时的指针与 transcript 布局属于 `llm` 服务，其他插件不要自行读取运行时目录．
 - 模型和思考级别来自 `roles.yml`．提供方、模型能力与兼容参数来自 `models.yml`．`api` 的可选值由安装的 OMP SDK 决定．
-- `ctx.llm.call("info")` 返回角色、提供方状态和用量．Agent 会话创建时固定配置．
+- `ctx.llm.call(IpcMethod.INFO)` 返回角色、提供方状态和用量．Agent 会话创建时固定配置．
 - `stt` 使用独立 HTTP/WebSocket 服务协议．
 
 ## 6. UI
 
 ```python
-tab = ctx.ui.add_tab("left", "courses", "课程", icon="▤", order=10)
+from core.ui import Side
+
+tab = ctx.ui.add_tab(Side.LEFT, "courses", "课程", icon="▤", order=10)
 item = ctx.ui.add_toolbox_item("courses", "courses.list", "我的课程", render=render_list,
                                page_id="input:course:123")
 page = ctx.ui.add_page("input:course:123", "课程详情", render=render_page, closable=True)
@@ -266,13 +273,13 @@ UI 注册表提供通用 action `ui.open_page`：
 ## 7. 设置
 
 ```python
-from core.settings_spec import SettingsSpec
+from core.settings_spec import SettingType, SettingsSpec
 
 settings = ctx.require("settings")
 settings.register(SettingsSpec(
     key="my.api_key",
     label="API Key",
-    type="secret",
+    type=SettingType.SECRET,
     default="",
     group="My Plugin",
     description="...",
@@ -281,13 +288,14 @@ value = settings.get("my.api_key")
 settings.set("my.api_key", "new")
 ```
 
+- `type` 必须是 `SettingType` 成员（`SettingType.SECRET`、`SettingType.INT` 等），字符串形式会被拒绝．
 - secret 在 UI 和公开输出中掩码，内部 `get` 返回真实值．
 - `env=("ENV_NAME",)`：注册时，如果设置尚未存储，则读取环境变量并写入 `settings.json`．
 - `visible_when=("other.key", (value, ...))`：仅当另一个设置取指定值时显示该字段．
 - `group_note="..."`：显示在该设置分组表单上方．
 - `hidden=True`：持久化但不在表单显示．
 - `readonly=True`：只读展示，保存时忽略．
-- `type="action", action="..."`：渲染为按钮，点击调用对应 UI action．
+- `type=SettingType.ACTION, action="..."`：渲染为按钮，点击调用对应 UI action．
 - 设置变化发 `settings.changed`．
 
 LLM 设置使用独立的 `models.yml` 与 `roles.yml` 编辑区，不注册模型、密钥或 YAML 字符串的标量设置．两份文件保存在 `data_dir/llm_runtime/`，保存前一起检查．角色支持 `provider/model:level`、`@role` 和缺省继承 `default`．
@@ -347,6 +355,8 @@ agent.close(writer.id)
 `message(session_id, message)` 返回 `{accepted, reason?}`．消息只进入活动 run，立即中断目标回合并在同一任务中继续；`agent.run.ready` 表示开始接纳．关闭目标拒绝消息，不创建空会话．`cancel` 终止整个任务；`close` 取消执行并释放会话．SDK 保存模型历史，Python 的显示记录用于界面展示．
 
 `reopen(session_id, *, name, workspace, system_prompt, role, tools, meta)` 恢复已关闭的会话．指针或 transcript 缺失时失败，不回退到创建．业务所有者负责重新进入原任务流程；笔记流水线只恢复已发布主写作，完成分段、审阅和问答不恢复．
+
+`can_resume(session_id)` 返回 `(bool, reason)`：会话仍活动或运行时已无可用 transcript 时为 `False`．恢复前用它判断，不要直接读取运行时目录．
 
 ## 9. 文件与数据目录
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from config import SHUTDOWN_TIMEOUT, load_config
-from applog import LogLevel, setup_logging
+from applog import LogLevel, parse_log_level, setup_logging
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -21,7 +21,7 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=Path, default=None, help="agent.toml path")
     parser.add_argument(
         "--log-level",
-        type=LogLevel,
+        type=parse_log_level,
         choices=list(LogLevel),
         default=None,
         help="logging level",
@@ -37,6 +37,7 @@ def _config_from_args(args: argparse.Namespace):
     )
     if args.log_level:
         cfg.log_level = args.log_level
+    setup_logging(cfg.log_level)
     return cfg
 
 

@@ -295,3 +295,39 @@ def test_missing_optional_dependency_is_not_an_error(tmp_path: Path) -> None:
         assert runtime.services.require("soft") == "available"
     finally:
         runtime.stop()
+
+
+def test_unload_survives_failing_reader_cleanup(tmp_path: Path) -> None:
+    class BadReader(Plugin):
+        id = "reader"
+        provides = ("reader",)
+
+        def setup(self, ctx: PluginContext) -> None:
+            class Facade:
+                def unregister_selection_action(self, owner: str = "") -> None:
+                    raise RuntimeError("selection cleanup failed")
+
+                def unregister_activity_provider(self, plugin_id: str) -> None:
+                    raise RuntimeError("activity cleanup failed")
+
+            ctx.register_service("reader", Facade())
+
+    class Target(Plugin):
+        id = "target"
+        provides = ("target",)
+
+        def setup(self, ctx: PluginContext) -> None:
+            ctx.register_service("target", object())
+            ctx.ui.add_tab(Side.LEFT, "target.tab", "目标")
+
+    runtime = build_runtime(
+        load_config(data_dir=tmp_path), plugins=[BadReader(), Target()]
+    )
+    runtime.start()
+    try:
+        assert runtime.unload_plugin("target") == ["target"]
+        assert "target" not in runtime.plugins.loaded
+        assert runtime.services.get("target") is None
+        assert not runtime.ui.has_tab("target.tab")
+    finally:
+        runtime.stop()

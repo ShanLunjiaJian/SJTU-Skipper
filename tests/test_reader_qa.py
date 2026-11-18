@@ -7,7 +7,7 @@ from config import load_config
 from core.runtime import build_runtime
 from core.ui import BlockType
 from plugins.reader import ReaderPlugin
-from plugins.reader.plugin import SelectionKind
+from plugins.reader.types import SelectionKind
 from core import note_document as qa
 
 

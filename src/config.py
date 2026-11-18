@@ -8,7 +8,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from applog import LogLevel
+from applog import LogLevel, parse_log_level
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data" / "agent"
@@ -91,7 +91,7 @@ def load_config(
         cfg.data_dir = Path(section.get("data_dir", cfg.data_dir))
         cfg.host = str(section.get("host", cfg.host))
         cfg.port = int(section.get("port", cfg.port))
-        cfg.log_level = LogLevel(section.get("log_level", cfg.log_level))
+        cfg.log_level = parse_log_level(section.get("log_level", cfg.log_level))
         cfg.plugins = list(section.get("plugins", cfg.plugins))
         cfg.enable_input = _coerce_bool(section.get("enable_input"), cfg.enable_input)
         cfg.enable_stt = _coerce_bool(section.get("enable_stt"), cfg.enable_stt)
@@ -113,7 +113,9 @@ def load_config(
     cfg.data_dir = Path(os.environ.get("LECTURE_AGENT_DATA_DIR", cfg.data_dir))
     cfg.host = os.environ.get("LECTURE_AGENT_HOST", cfg.host)
     cfg.port = int(os.environ.get("LECTURE_AGENT_PORT", cfg.port))
-    cfg.log_level = LogLevel(os.environ.get("LECTURE_AGENT_LOG_LEVEL", cfg.log_level))
+    cfg.log_level = parse_log_level(
+        os.environ.get("LECTURE_AGENT_LOG_LEVEL", cfg.log_level)
+    )
     cfg.resolve()
     cfg.ensure_dirs()
     return cfg

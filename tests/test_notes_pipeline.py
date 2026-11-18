@@ -445,6 +445,9 @@ class ScriptedNoteAgent:
         with self.lock:
             del self.sessions[sid]
 
+    def can_resume(self, session_id):
+        return True, ""
+
 
 def note_result(message="done", error=None, review_status=ReviewStatus.NOT_REVIEWED):
     return SimpleNamespace(
@@ -1208,7 +1211,7 @@ def test_continuation_requires_saved_transcript(tmp_path):
         pipeline = env.pipeline
         with pipeline.condition:
             saved_writer(pipeline)
-            (tmp_path / "llm_runtime" / "writer.jsonl").unlink()
+            env.agent.can_resume = lambda session_id: (False, "transcript unavailable")
             result = pipeline.message(
                 {
                     "session_id": "lecture",
