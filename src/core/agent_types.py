@@ -71,6 +71,7 @@ class IpcMethod(StrEnum):
     GENERATE = "generate"
     CREATE_SESSION = "create_session"
     REOPEN_SESSION = "reopen_session"
+    SESSION_TRANSCRIPT = "session_transcript"
     RUN = "run"
     MESSAGE = "message"
     CANCEL = "cancel"

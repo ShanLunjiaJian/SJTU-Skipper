@@ -322,8 +322,59 @@ export class Runtime {
     return this.config;
   }
 
+  private async savedTranscriptPath(id: string) {
+    const pointer = path.join(this.root, `session-${id}.path`);
+    const saved = (await Bun.file(pointer).exists()) ? (await Bun.file(pointer).text()).trim() : "";
+    if (!saved) throw new Error(`Saved session transcript is unavailable: ${id}`);
+    let loaded;
+    try {
+      loaded = parseSessionContent(await readFile(saved, "utf8"));
+    } catch {
+      throw new Error(`Saved session transcript is unreadable: ${id}`);
+    }
+    if (
+      loaded.invalidHeader ||
+      loaded.malformedRecords ||
+      !loaded.entries.some((entry) => entry.type === "message")
+    )
+      throw new Error(`Saved session transcript is invalid: ${id}`);
+    return saved;
+  }
+
+  private async openSavedSession(id: string, saved: string, suppressBreadcrumb = false) {
+    const manager = await SessionManager.open(saved, path.join(this.root, "sessions"), undefined, {
+      initialCwd: path.join(this.root, "workspaces", id),
+      throwIfMissing: true,
+      suppressBreadcrumb,
+    });
+    if (
+      !manager
+        .getBranch()
+        .some((entry) => entry.type === "message" && entry.message.role === "user")
+    ) {
+      await manager.close();
+      throw new Error(`Saved session transcript has no conversation: ${id}`);
+    }
+    return manager;
+  }
+
+  private async sessionTranscript(id: string) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id) || this.sessions.has(id) || this.opening.has(id))
+      return { path: null };
+    try {
+      const saved = await this.savedTranscriptPath(id);
+      const manager = await this.openSavedSession(id, saved, true);
+      await manager.close();
+      return { path: manager.getSessionFile() ?? null };
+    } catch {
+      return { path: null };
+    }
+  }
+
   async dispatch(method: IpcMethod, params: Record<string, unknown>, emit: Emit): Promise<unknown> {
     if (method === IpcMethod.MESSAGE) return this.message(params);
+    if (method === IpcMethod.SESSION_TRANSCRIPT)
+      return this.sessionTranscript(String(params.session_id));
     if (method === IpcMethod.CANCEL || method === IpcMethod.CLOSE_SESSION) {
       const conversation = this.sessions.get(String(params.session_id));
       if (conversation?.run) void this.stopRun(conversation, conversation.run).catch(() => {});
@@ -439,26 +490,7 @@ export class Runtime {
         const sessionDir = path.join(this.root, "sessions");
         const pointer = path.join(this.root, `session-${id}.path`);
         const saved =
-          method === IpcMethod.REOPEN_SESSION && (await Bun.file(pointer).exists())
-            ? (await Bun.file(pointer).text()).trim()
-            : undefined;
-        if (method === IpcMethod.REOPEN_SESSION && !saved?.trim())
-          throw new Error(`Saved session transcript is unavailable: ${id}`);
-        if (method === IpcMethod.REOPEN_SESSION && saved) {
-          let loaded;
-          try {
-            loaded = parseSessionContent(await readFile(saved, "utf8"));
-          } catch {
-            throw new Error(`Saved session transcript is unreadable: ${id}`);
-          }
-          if (
-            loaded.invalidHeader ||
-            loaded.malformedRecords ||
-            !loaded.entries.length ||
-            !loaded.entries.some((entry) => entry.type === "message")
-          )
-            throw new Error(`Saved session transcript is invalid: ${id}`);
-        }
+          method === IpcMethod.REOPEN_SESSION ? await this.savedTranscriptPath(id) : undefined;
         const role = validate(agentRoleSchema, params.role ?? AgentRole.DEFAULT, "agent role");
         const resolved = this.resolve(config, role);
         const compact = this.resolve(config, AgentRole.COMPACTION);
@@ -591,18 +623,8 @@ export class Runtime {
           }));
         };
         const manager = saved
-          ? await SessionManager.open(saved, sessionDir, undefined, {
-              initialCwd: cwd,
-              throwIfMissing: true,
-            })
+          ? await this.openSavedSession(id, saved)
           : SessionManager.create(cwd, sessionDir);
-        if (
-          method === IpcMethod.REOPEN_SESSION &&
-          !manager
-            .getBranch()
-            .some((entry) => entry.type === "message" && entry.message.role === "user")
-        )
-          throw new Error(`Saved session transcript has no conversation: ${id}`);
         const result = await createAgentSession({
           cwd,
           agentId: id,

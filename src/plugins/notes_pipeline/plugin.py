@@ -403,8 +403,6 @@ class NotesPipelinePlugin(Plugin):
     def _writer_inputs(self, sid, writer):
         root = self._directory(sid)
         files = {name: root / relative for name, relative in writer["files"].items()}
-        if not self.agent.can_resume(writer["session_id"])[0]:
-            raise RuntimeError("主写作会话记录不可用")
         for path in files.values():
             path.read_text(encoding="utf-8")
         notes = self.ctx.data_dir / "sessions" / sid / "notes"
@@ -461,6 +459,8 @@ class NotesPipelinePlugin(Plugin):
                 ):
                     return reject("笔记任务尚未结束，请稍后发送")
                 try:
+                    if not self.agent.can_resume(writer["session_id"])[0]:
+                        return reject("主写作会话记录不可用")
                     self._writer_inputs(sid, writer)
                 except (OSError, ValueError, RuntimeError) as exc:
                     return reject(f"主写作会话记录不可用：{exc}")

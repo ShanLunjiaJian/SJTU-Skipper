@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shutil
 import threading
 
 import pytest
@@ -524,26 +526,45 @@ def test_reopen_uses_strict_native_operation(tmp_path):
 def test_can_resume_reads_saved_transcript_through_runtime(tmp_path):
     from agent_runtime.client import RuntimeClient
 
+    if shutil.which("bun") is None:
+        pytest.skip("Bun is required for the runtime")
     runtime, agent, _sdk, _ = _make_agent_runtime(tmp_path)
+    client = RuntimeClient(tmp_path)
     try:
         live = agent.create_session("writer")
-        client = RuntimeClient(tmp_path)
         agent._runtime = client
         assert agent.can_resume("") == (False, "agent session is unknown")
+        assert agent.can_resume(live.id) == (False, "agent session is still live")
         assert agent.can_resume("writer") == (
             False,
             "saved session transcript is unavailable",
         )
+        pointer = tmp_path / "session-writer.path"
         transcript = tmp_path / "writer.jsonl"
+        pointer.write_text(str(transcript), encoding="utf-8")
+        assert not agent.can_resume("writer")[0]
         transcript.write_text("{}\n", encoding="utf-8")
-        (tmp_path / "session-writer.path").write_text(str(transcript), encoding="utf-8")
+        assert not agent.can_resume("writer")[0]
+        header = {
+            "type": "session",
+            "version": 3,
+            "id": "writer",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "cwd": str(tmp_path),
+        }
+        entry = {
+            "type": "message",
+            "id": "prompt",
+            "parentId": None,
+            "timestamp": header["timestamp"],
+            "message": {"role": "user", "content": "Continue", "timestamp": 0},
+        }
+        transcript.write_text(json.dumps(header) + "\n", encoding="utf-8")
+        assert not agent.can_resume("writer")[0]
+        history = "\n".join(map(json.dumps, (header, entry))) + "\n"
+        transcript.write_text(history, encoding="utf-8")
         assert agent.can_resume("writer") == (True, "")
-        (tmp_path / "session-writer.path").write_text("", encoding="utf-8")
-        assert not agent.can_resume("writer")[0]
-        transcript.unlink()
-        (tmp_path / "session-writer.path").write_text(str(transcript), encoding="utf-8")
-        assert not agent.can_resume("writer")[0]
-        assert agent.can_resume(live.id) == (False, "agent session is still live")
-        assert client._process is None
+        assert transcript.read_text(encoding="utf-8") == history
     finally:
+        client.close()
         runtime.stop()
