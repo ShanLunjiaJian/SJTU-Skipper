@@ -1152,10 +1152,12 @@ class NotesPipelinePlugin(Plugin):
                         )
                     )
                 if event.type == AgentEventType.FILE:
-                    workspace = self.agent.session_workspace(session_id)
+                    workspace = (
+                        self.agent.session_workspace(session_id) if is_writer else None
+                    )
                     with self.condition:
                         self._check_running(sid)
-                        if is_writer and workspace is not None:
+                        if workspace is not None:
                             self._publish_lecture(sid, workspace, draft=True)
                             self.ctx.ui.refresh("notes.preview")
 

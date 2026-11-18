@@ -12,7 +12,7 @@ from typing import Any
 from core.coverage import Coverage, CoverageStore, skip_coverage
 from core.plugin import Plugin, PluginContext
 from core.media import MediaKind, ProcessingMode
-from core.streams import StreamKind, TextSource
+from core.streams import StreamKind, StreamSet, TextSource
 from core.ui import BlockType
 from core.settings_spec import SettingType, SettingsSpec
 
@@ -197,6 +197,7 @@ class STTPlugin(Plugin):
             "enable_punctuation",
             "chunk_seconds",
             "api_key",
+            "context",
         ):
             settings.reset("stt." + suffix)
         entries = (
@@ -209,7 +210,6 @@ class STTPlugin(Plugin):
                 "兼容 STT HTTP API 的服务地址",
             ),
             ("language", "语言", SettingType.STRING, "Chinese", "服务使用的转写语言"),
-            ("context", "转写提示", SettingType.TEXT, "", "留空使用无提示转写"),
             (
                 "timeout",
                 "请求超时（秒）",
@@ -364,10 +364,12 @@ class STTPlugin(Plugin):
             timeout=float(self._setting("stt.timeout", 60.0)),
         )
 
-    def _metadata(self) -> dict[str, str]:
+    def _metadata(self, session: StreamSet) -> dict[str, str]:
+        name = session.meta.get("course_name")
+        name = " ".join(name.split()) if isinstance(name, str) else ""
         return {
             "language": str(self._setting("stt.language", "Chinese")),
-            "context": str(self._setting("stt.context", "")),
+            "context": f"这是一堂{name}课程。" if name and len(name) <= 80 else "",
         }
 
     def _cancel_requests(self) -> None:
@@ -531,7 +533,7 @@ class STTPlugin(Plugin):
         stream = client.stream(
             offline=offline,
             concurrency=max(1, int(self._setting("stt.concurrency", 1))),
-            **self._metadata(),
+            **self._metadata(session),
         )
         state.model = str(stream.metadata.get("model", ""))
         state.language = str(stream.metadata.get("language", ""))
@@ -546,6 +548,12 @@ class STTPlugin(Plugin):
         # Offset and segment IDs belong only to this connection.
         try:
             stream.reset(round(start * 1000))
+            window = float(stream.metadata.get("max_audio_ms", 0)) / 1000
+            session.audio_gate.configure(
+                max(self._gate_limit(), 2 * window + 10),
+                released=session.audio_gate.released,
+                fail_closed=True,
+            )
         except BaseException:
             client.close_stream(stream)
             raise
@@ -752,7 +760,8 @@ class STTPlugin(Plugin):
             for begin, finish in session.audio.buffered_ranges(lo, hi):
                 for a, b in self._covered(session).gaps(begin, finish):
                     result = client.transcribe(
-                        session.audio.read_as_wav(a, b), **self._metadata()
+                        session.audio.read_as_wav(a, b),
+                        **self._metadata(session),
                     )
                     if self._stop.is_set() or self._ctx.streams.current is not session:
                         raise SttError("The STT request was cancelled.")

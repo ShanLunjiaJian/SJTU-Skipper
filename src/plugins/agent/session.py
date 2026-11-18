@@ -20,6 +20,7 @@ class AgentSession:
     workspace: FileWorkspace = field(default_factory=FileWorkspace)
     tools: tuple[AgentToolName, ...] = ()
     model: str = ""
+    step: int = 0
     created_at: float = field(default_factory=time.time)
     lock: threading.Lock = field(default_factory=threading.Lock)
     cancelled: threading.Event = field(default_factory=threading.Event)
@@ -43,6 +44,6 @@ class AgentSession:
             name=self.name,
             role=self.role,
             model=self.model,
-            step=int(self.meta.get("step", 0) or 0),
+            step=self.step,
             created_at=self.created_at,
         )

@@ -525,7 +525,9 @@ class UIManager:
             action = self._actions.get(action_id)
         return None if action is None else action.plugin_id or None
 
-    def unregister_action(self, action_id: str, *, plugin_id: str | None = None) -> None:
+    def unregister_action(
+        self, action_id: str, *, plugin_id: str | None = None
+    ) -> None:
         """Drop an action; ``plugin_id`` restricts it to its owner."""
 
         with self._lock:

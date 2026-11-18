@@ -47,4 +47,3 @@ class ContinuationStage(StrEnum):
 class NoteTaskKind(StrEnum):
     CHUNK = "chunk"
     FINAL = "final"
-

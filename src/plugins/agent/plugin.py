@@ -79,11 +79,12 @@ class AgentService:
                 raise KeyError(f"Agent profile {agent!r} is not registered")
         else:
             profile = agent
-        ws = (
-            workspace
-            if workspace is not None
-            else (files if isinstance(files, FileWorkspace) else FileWorkspace(files))
-        )
+        if workspace is not None:
+            ws = workspace.copy()
+        elif isinstance(files, FileWorkspace):
+            ws = files.copy()
+        else:
+            ws = FileWorkspace(files)
         declarations = (
             tools
             if tools is not None
@@ -136,7 +137,7 @@ class AgentService:
         session = AgentSession(
             id=session_id,
             name=name,
-            workspace=workspace,
+            workspace=workspace.copy(),
             system_prompt=system_prompt,
             role=AgentRole(role),
             tools=tuple(AgentToolName(tool) for tool in tools),
@@ -218,10 +219,10 @@ class AgentService:
         return None if session is None else session.to_info()
 
     def session_workspace(self, session_id: str) -> FileWorkspace | None:
-        """Return the authorized file map of a live session."""
+        """Return a copy of the authorized file map for a live session."""
 
         session = self._session(session_id)
-        return None if session is None else session.workspace
+        return None if session is None else session.workspace.copy()
 
     def _session(self, session_id: str) -> AgentSession | None:
         with self._lock:
@@ -277,6 +278,7 @@ class AgentService:
                 raise RuntimeError("Agent run cancelled")
             if not session.runtime_ready:
                 self._create_runtime_session(session)
+            session.step = 0
             self._emit(AgentEventType.RUN_STARTED, session, 0, on_event)
             completed = False
             for frame in self._runtime.stream(
@@ -299,6 +301,7 @@ class AgentService:
                         ),
                         review_passed=values.get("review_passed") is True,
                     )
+                    session.step = result.steps
                     completed = True
                     continue
                 if session.cancelled.is_set():
@@ -318,9 +321,11 @@ class AgentService:
                         data["event"] = AgentEventType(data["event"])
                         if data["event"] == AgentEventType.EXECUTION:
                             self._decode_execution(data)
-                step = int(data.pop("step", 0))
+                event_step = data.pop("step", None)
+                step = 0 if event_step is None else int(event_step)
+                if name != AgentEventType.REVIEWER and event_step is not None:
+                    session.step = step
                 data.pop("session_id", None)
-                session.meta["step"] = step
                 if name == AgentEventType.EXECUTION:
                     model = (data.get("metrics") or {}).get("model")
                     if model is not None:

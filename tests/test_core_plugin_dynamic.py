@@ -369,6 +369,12 @@ def test_ui_action_unregister_checks_owner(tmp_path: Path) -> None:
 
         def setup(self, ctx: PluginContext) -> None:
             ctx.register_service("thief", object())
+            with pytest.raises(PluginError, match="cannot register UI actions for"):
+                ctx.ui.register_action(
+                    "owner.extra", lambda payload: {}, plugin_id="owner"
+                )
+            with pytest.raises(PluginError, match="cannot unregister UI actions for"):
+                ctx.ui.unregister_action("owner.ping", plugin_id="owner")
             with pytest.raises(ValueError, match="belongs to 'owner'"):
                 ctx.ui.unregister_action("owner.ping")
             ctx.ui.unregister_action("thief.missing")
@@ -378,6 +384,7 @@ def test_ui_action_unregister_checks_owner(tmp_path: Path) -> None:
     try:
         assert runtime.ui.has_action("owner.ping")
         assert runtime.ui.action_owner("owner.ping") == "owner"
+        assert not runtime.ui.has_action("owner.extra")
         assert runtime.ui.action_owner("owner.absent") is None
     finally:
         runtime.stop()

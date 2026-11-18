@@ -11,7 +11,6 @@ Registered services
 from __future__ import annotations
 
 import base64
-import difflib
 import io
 import json
 import logging
@@ -39,10 +38,9 @@ from core.ui import BlockType
 from .fusion import fuse_frames
 from .prompts import (
     BLANK_BOARD_MARKER,
-    BOARD_RECOGNITION_PROMPT,
-    NO_CHANGE_MARKER,
-    build_image_content,
+    build_recognition_messages,
     collapse_repetitions,
+    deduplicate_transcription,
     is_trivial_board_text,
 )
 
@@ -57,9 +55,8 @@ VISUAL_LOG = "visual.jsonl"
 
 class WindowOutcome(StrEnum):
     EMPTY_RESPONSE = "模型返回空"
-    UNCHANGED = "与上一窗口无变化，已跳过"
     BLANK_BOARD = "未识别到板书（空白黑板或仅示意图）"
-    DUPLICATE = "与上一窗口重复，已跳过"
+    DUPLICATE = "与近期板书重复，已跳过"
     WRITTEN = "已写入板书"
 
 
@@ -151,7 +148,6 @@ class VlmPlugin(Plugin):
         self._cursor: float = 0.0  # seconds consumed in current session
         self._last_session: str = ""
         self._consecutive_errors = 0
-        self._last_visual_text: str = ""
         self._latest_image_path: str = ""
         self._last_error: str = ""
         self._last_window: dict[str, Any] = {}
@@ -295,11 +291,11 @@ class VlmPlugin(Plugin):
             ),
             SettingsSpec(
                 key="vlm.history_windows",
-                label="历史转录条数",
+                label="板书去重窗口数",
                 type=SettingType.INT,
                 default=3,
                 group="VLM",
-                description="把最近几次转录作为纯文本上下文，供模型输出增量",
+                description="只用最近写入的板书去重，不发送给模型．0 表示不跨窗口去重．",
             ),
             SettingsSpec(
                 key="vlm.fps",
@@ -340,26 +336,6 @@ class VlmPlugin(Plugin):
                 default=1,
                 group="VLM",
                 description="0 为顺序准备，1 为识别时准备下一个窗口",
-            ),
-            SettingsSpec(
-                key="vlm.dedupe_threshold",
-                label="去重阈值",
-                type=SettingType.FLOAT,
-                default=0.92,
-                group="VLM",
-                description="difflib.SequenceMatcher 相似度阈值，超过则跳过",
-            ),
-            SettingsSpec(
-                key="vlm.prompt",
-                label="板书识别提示词",
-                type=SettingType.TEXT,
-                default=BOARD_RECOGNITION_PROMPT,
-                group="VLM",
-                description=(
-                    "完整提示词，可编辑；`{timestamp}` 替换为时间范围，"
-                    "`{history_block}` / `{output_rule}` 替换为历史转录与增量要求"
-                    "（缺失时自动追加）。留空会报错。"
-                ),
             ),
         ]
         settings = self._ctx.service("settings")
@@ -562,8 +538,6 @@ class VlmPlugin(Plugin):
         self,
         image_bytes: bytes,
         timestamp: str,
-        *,
-        history: list[str] | None = None,
     ) -> dict[str, Any]:
         """Generate one board transcription from an encoded JPEG."""
 
@@ -571,23 +545,9 @@ class VlmPlugin(Plugin):
             return {"content": ""}
         ctx = self._ctx
         data_url = "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode()
-        prompt_text = str(self._setting("vlm.prompt", BOARD_RECOGNITION_PROMPT)).strip()
-        if not prompt_text:
-            raise ValueError("vlm.prompt 不能为空；请填写板书识别提示词")
-        # One user message with the prompt + image.  Previous transcriptions
-        # are passed as text (never as extra images) so the model can emit a
-        # delta instead of re-stating the whole board.
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "user",
-                "content": build_image_content(
-                    timestamp=timestamp,
-                    image_data_url=data_url,
-                    prompt_text=prompt_text,
-                    history=history or (),
-                ),
-            },
-        ]
+        messages = build_recognition_messages(
+            timestamp=timestamp, image_data_url=data_url
+        )
         session = self._processing_session or ctx.streams.current
         sid = session.session_id
         request_id = f"vlm_{sid}_{time.monotonic_ns()}"
@@ -768,7 +728,6 @@ class VlmPlugin(Plugin):
             if self._last_session != sid:
                 self._cursor = 0.0
                 self._last_session = sid
-                self._last_visual_text = ""
                 self._next_center = half
                 self._history.clear()
             center = self._next_center
@@ -881,11 +840,9 @@ class VlmPlugin(Plugin):
 
         return PreparedWindow(start, end, image_path, image_bytes)
 
-    def _recognize_window(
-        self, session, prepared: PreparedWindow, history: list[str]
-    ) -> dict:
+    def _recognize_window(self, prepared: PreparedWindow) -> dict[str, Any]:
         timestamp = f"{_fmt_time(prepared.start)} - {_fmt_time(prepared.end)}"
-        response = self._ask_image(prepared.image_bytes, timestamp, history=history)
+        response = self._ask_image(prepared.image_bytes, timestamp)
         return {
             "image_path": str(prepared.image_path),
             "text": response["content"],
@@ -932,7 +889,7 @@ class VlmPlugin(Plugin):
                 next_start,
                 next_end,
             )
-        return self._recognize_window(session, prepared, self._snapshot_history())
+        return self._recognize_window(prepared)
 
     def _prepare_next_window(self, session, start: float, end: float):
         while not self._stop_event.is_set():
@@ -966,6 +923,13 @@ class VlmPlugin(Plugin):
 
         text = str(result.get("text", "") or "")
         image_path = str(result.get("image_path", "") or "")
+        if not text:
+            note = WindowOutcome.EMPTY_RESPONSE
+        elif text == BLANK_BOARD_MARKER or is_trivial_board_text(text):
+            note = WindowOutcome.BLANK_BOARD
+        else:
+            text = deduplicate_transcription(text, self._snapshot_history())
+            note = WindowOutcome.WRITTEN if text else WindowOutcome.DUPLICATE
 
         # The window was processed; record it even when the board was empty.
         self._coverage(session).mark(MediaKind.VIDEO, start, end)
@@ -978,24 +942,6 @@ class VlmPlugin(Plugin):
             chars=len(text),
             role=AgentRole.BOARD_RECOGNITION,
         )
-
-        threshold = self._setting("vlm.dedupe_threshold", 0.92)
-        with self._lock:
-            last_text = self._last_visual_text
-
-        if not text:
-            note = WindowOutcome.EMPTY_RESPONSE
-        elif text.strip() == NO_CHANGE_MARKER:
-            note = WindowOutcome.UNCHANGED
-        elif text == BLANK_BOARD_MARKER or is_trivial_board_text(text):
-            note = WindowOutcome.BLANK_BOARD
-        elif (
-            last_text
-            and difflib.SequenceMatcher(None, last_text, text).ratio() >= threshold
-        ):
-            note = WindowOutcome.DUPLICATE
-        else:
-            note = WindowOutcome.WRITTEN
 
         with self._lock:
             self._last_window = {
@@ -1029,7 +975,6 @@ class VlmPlugin(Plugin):
             if item is not None:
                 self._persist_item(session.session_id, item)
             with self._lock:
-                self._last_visual_text = text
                 self._history.append(text)
 
         with self._lock:
@@ -1323,7 +1268,6 @@ class VlmPlugin(Plugin):
                 self._history = self._session_history.setdefault(
                     session.session_id, deque(maxlen=self._history_windows())
                 )
-                self._last_visual_text = self._history[-1] if self._history else ""
                 self._cursor = self._recording_cursor.get(session.session_id, 0.0)
                 self._next_center = self._cursor + self._window_seconds() / 2
                 self._last_session = session.session_id

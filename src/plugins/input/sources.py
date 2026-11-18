@@ -959,7 +959,9 @@ class SourceManager:
             current.audio_input_done = False
             current.video_input_done = False
             current.audio_gate.configure(
-                spec.audio_gate_limit,
+                max(spec.audio_gate_limit, current.audio_gate.limit)
+                if reuse
+                else spec.audio_gate_limit,
                 released=current.audio_gate.released if reuse else 0.0,
                 fail_closed=True,
             )
