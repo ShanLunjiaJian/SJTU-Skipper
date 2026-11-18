@@ -20,8 +20,6 @@ from core.agent_types import (
     ExecutionBlockKind,
     ExecutionBlockStatus,
     GenerationErrorCode,
-    ReviewerEventType,
-    ReviewStatus,
 )
 from core.file_access import publication_lock
 from core.events import Event
@@ -240,9 +238,7 @@ class NotesPipelinePlugin(Plugin):
             )
             restored = path.exists()
             state["phase"] = NotePhase(state["phase"])
-            state["review_status"] = ReviewStatus(
-                state.get("review_status", ReviewStatus.NOT_REVIEWED)
-            )
+            state.setdefault("review_passed", False)
             if state.get("writer"):
                 state["writer"]["role"] = AgentRole(state["writer"]["role"])
                 state["writer"]["tools"] = [
@@ -335,7 +331,7 @@ class NotesPipelinePlugin(Plugin):
             "finalize_requested",
             "phase",
             "error",
-            "review_status",
+            "review_passed",
             "deleted",
             "writer",
         )
@@ -473,7 +469,7 @@ class NotesPipelinePlugin(Plugin):
                 # Only initial publication keeps this request set after a failure.
                 state.update(
                     phase=NotePhase.WRITING,
-                    review_status=ReviewStatus.NOT_REVIEWED,
+                    review_passed=False,
                     error="",
                     finalize_requested=False,
                 )
@@ -546,7 +542,7 @@ class NotesPipelinePlugin(Plugin):
                 phase=NotePhase.DELETED,
                 error="",
                 errors=[],
-                review_status=ReviewStatus.NOT_REVIEWED,
+                review_passed=False,
                 deleted=True,
                 finalize_requested=False,
                 last_agent_tasks=[],
@@ -611,7 +607,7 @@ class NotesPipelinePlugin(Plugin):
                     c["state"] == ChunkState.RUNNING for c in state["chunks"]
                 ),
                 "published_end": state["published_end"],
-                "review_status": state["review_status"],
+                "review_passed": state["review_passed"],
                 "completed_chunks": sum(
                     c["state"] in (ChunkState.DONE, ChunkState.EMPTY)
                     for c in state["chunks"]
@@ -922,7 +918,7 @@ class NotesPipelinePlugin(Plugin):
             "role": ExecutionRole(role),
             "label": label,
             "status": ExecutionStatus.RUNNING,
-            "review_status": ReviewStatus.NOT_REVIEWED,
+            "review_passed": False,
             "model": model,
             "thinking": "",
             "context_tokens": 0,
@@ -985,6 +981,7 @@ class NotesPipelinePlugin(Plugin):
             reviewer = event.get("reviewer_id")
             key = reviewer or "main"
             name = event.get("event") if reviewer else event.type
+            finished = event.get("finished") if reviewer else None
             if key not in agents:
                 agents[key] = self._execution_agent(
                     key,
@@ -1002,32 +999,22 @@ class NotesPipelinePlugin(Plugin):
                     self._merge_execution_block(agent, event.get("block"))
             elif name == AgentEventType.FILE:
                 for child in agents.values():
-                    child["review_status"] = ReviewStatus.NOT_REVIEWED
-            elif name == ReviewerEventType.STARTED:
+                    child["review_passed"] = False
+            elif finished is False:
                 agent["status"] = ExecutionStatus.RUNNING
-            elif name == ReviewerEventType.FINISHED:
+                agent["review_passed"] = False
+            elif finished is True:
+                agent["status"] = ExecutionStatus.COMPLETED
+                agent["review_passed"] = False
                 try:
                     report = json.loads(event.get("content"))
                     if not isinstance(report["correct"], bool):
                         raise ValueError("Review correctness must be a boolean")
-                except (KeyError, ValueError, TypeError) as exc:
-                    agent["status"] = ExecutionStatus.FAILED
-                    agent["review_status"] = ReviewStatus.FAILED
-                    self._review_execution_block(
-                        agent,
-                        event,
-                        text=event.get("content"),
-                        error=f"Invalid review report: {exc}",
-                        status=ExecutionBlockStatus.FAILED,
-                    )
+                except (KeyError, ValueError, TypeError):
+                    pass
                 else:
-                    agent["status"] = ExecutionStatus.COMPLETED
-                    agent["review_status"] = (
-                        ReviewStatus.NOT_REVIEWED
-                        if event.get("stale")
-                        else ReviewStatus.PASSED
-                        if report["correct"]
-                        else ReviewStatus.FAILED
+                    agent["review_passed"] = report["correct"] and not event.get(
+                        "stale"
                     )
                     self._review_execution_block(
                         agent,
@@ -1036,21 +1023,10 @@ class NotesPipelinePlugin(Plugin):
                         report=report,
                         status=ExecutionBlockStatus.COMPLETED,
                     )
-            elif name == ReviewerEventType.FAILED:
-                agent["status"] = ExecutionStatus.FAILED
-                agent["review_status"] = ReviewStatus.FAILED
-                self._review_execution_block(
-                    agent,
-                    event,
-                    text=event.get("content", ""),
-                    error=str(event.get("error", "审阅失败")),
-                    status=ExecutionBlockStatus.FAILED,
-                )
-            refresh = now - task.get("last_refresh", 0) >= 1 or name in (
-                ReviewerEventType.STARTED,
-                ReviewerEventType.FINISHED,
-                ReviewerEventType.FAILED,
-                AgentEventType.FILE,
+            refresh = (
+                now - task.get("last_refresh", 0) >= 1
+                or finished is not None
+                or name == AgentEventType.FILE
             )
             if refresh:
                 task["last_refresh"] = now
@@ -1534,15 +1510,10 @@ class NotesPipelinePlugin(Plugin):
                 follow_ups=messages[1:] if messages is not None else (),
                 contextualize=messages is None,
             )
-            review_status = (
-                ReviewStatus(
-                    getattr(result, "review_status", ReviewStatus.NOT_REVIEWED)
-                )
-                if review_enabled
-                else ReviewStatus.PASSED
-            )
             if result.error:
                 raise RuntimeError(result.error)
+            if review_enabled and not result.review_passed:
+                raise RuntimeError("The saved notes do not have a passing review")
             self._validate_outputs(directory)
             self._publish_lecture(sid, workspace)
             with self.condition:
@@ -1550,7 +1521,7 @@ class NotesPipelinePlugin(Plugin):
                 state = self._state(sid)
                 state.update(
                     phase=NotePhase.PUBLISHED,
-                    review_status=review_status,
+                    review_passed=True,
                     finalize_requested=False,
                 )
                 self._save(state)

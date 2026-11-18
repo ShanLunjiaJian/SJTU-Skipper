@@ -13,12 +13,6 @@ enum ReviewOperationState {
   COMPLETED_DELIVERED = "completed-delivered",
 }
 
-export enum ReviewStatus {
-  PASSED = "passed",
-  FAILED = "failed",
-  NOT_REVIEWED = "not_reviewed",
-}
-
 enum ReviewNoteFile {
   KNOWLEDGE = "note_knowledge.md",
   GOSSIP = "note_gossip.md",
@@ -125,13 +119,6 @@ export class ReviewGate {
     return (
       accepted !== undefined && accepted === (await this.digest()) && accepted === this.accepted
     );
-  }
-  async status(): Promise<ReviewStatus> {
-    if (await this.satisfied()) return ReviewStatus.PASSED;
-    const delivery = this.operation?.delivery;
-    if (!delivery || delivery.stale || this.isStale(this.operation!))
-      return ReviewStatus.NOT_REVIEWED;
-    return ReviewStatus.FAILED;
   }
   hasPending(): boolean {
     return !!this.operation && this.operation.state !== ReviewOperationState.COMPLETED_DELIVERED;
@@ -275,7 +262,8 @@ export class ReviewGate {
                 delivery
                   ? {
                       ...delivery,
-                      passed: !delivery.stale && this.accepted === delivery.digest,
+                      passed:
+                        !!delivery.report && !delivery.stale && this.accepted === delivery.digest,
                     }
                   : { pending: true },
               ),

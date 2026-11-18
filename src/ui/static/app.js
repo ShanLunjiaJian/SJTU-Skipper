@@ -12,18 +12,6 @@
     RUNNING: "running",
   });
 
-  const REVIEW_STATUS = Object.freeze({
-    PASSED: "passed",
-    FAILED: "failed",
-    NOT_REVIEWED: "not_reviewed",
-  });
-
-  function reviewStatusLabel(status) {
-    if (status === REVIEW_STATUS.PASSED) return "Passed";
-    if (status === REVIEW_STATUS.FAILED) return "Failed";
-    return "Not reviewed";
-  }
-
   const BLOCK_TYPE = Object.freeze({
     AGENT_ACTIVITY: "agent_activity",
     TASK_QUEUE: "task_queue",
@@ -2082,7 +2070,7 @@
           (entry) => entry.base === label.base,
         ).length > 1;
       const text = label
-        ? `${label.base}${duplicates ? ` ${label.number}` : ""}${agent.role === EXECUTION_ROLE.REVIEWER ? ` (${reviewStatusLabel(agent.review_status)})` : ""}${agent.closed ? "（已关闭）" : ""}`
+        ? `${label.base}${duplicates ? ` ${label.number}` : ""}${agent.role === EXECUTION_ROLE.REVIEWER ? (agent.review_passed ? "（已通过）" : "（未通过）") : ""}${agent.closed ? "（已关闭）" : ""}`
         : "查看会话";
       let option = view.options.get(value);
       if (!option) {

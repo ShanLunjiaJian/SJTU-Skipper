@@ -7,12 +7,6 @@ from enum import StrEnum
 from typing import Any
 
 
-class ReviewStatus(StrEnum):
-    PASSED = "passed"
-    FAILED = "failed"
-    NOT_REVIEWED = "not_reviewed"
-
-
 class AgentRole(StrEnum):
     DEFAULT = "default"
     ASK_INSTANT = "ask_instant"
@@ -68,12 +62,6 @@ class AgentEventType(StrEnum):
     EXECUTION = "agent.execution"
     REVIEWER = "agent.reviewer"
     ERROR = "agent.error"
-
-
-class ReviewerEventType(StrEnum):
-    STARTED = "started"
-    FINISHED = "finished"
-    FAILED = "failed"
 
 
 class IpcMethod(StrEnum):
@@ -149,7 +137,7 @@ class AgentRunResult:
     finish_reason: FinishReason = FinishReason.STOP
     error: str | None = None
     total_tokens: int = 0
-    review_status: ReviewStatus = ReviewStatus.NOT_REVIEWED
+    review_passed: bool = False
 
 
 __all__ = [
@@ -167,7 +155,5 @@ __all__ = [
     "FinishReason",
     "GenerationErrorCode",
     "IpcMethod",
-    "ReviewStatus",
-    "ReviewerEventType",
     "RuntimeFrameType",
 ]

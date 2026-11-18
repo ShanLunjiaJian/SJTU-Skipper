@@ -5,7 +5,13 @@ import threading
 import pytest
 
 from config import load_config
-from core.agent_types import AgentProfile, AgentRole, AgentTool, IpcMethod, ReviewStatus
+from core.agent_types import (
+    AgentEventType,
+    AgentProfile,
+    AgentRole,
+    AgentTool,
+    IpcMethod,
+)
 from core.plugin import Plugin
 from core.runtime import build_runtime
 from core.workspace import FileWorkspace
@@ -86,13 +92,13 @@ def _make_agent_runtime(tmp_path, script=None, settings=None):
     return runtime, runtime.services.require("agent"), llm, settings
 
 
-def test_ordered_followups_and_review_status(tmp_path):
+def test_ordered_followups_and_review_approval(tmp_path):
     def script(sdk, params):
         yield {
             "type": "result",
             "result": {
                 "final_message": "Stopped",
-                "review_status": "passed",
+                "review_passed": True,
             },
         }
 
@@ -102,7 +108,7 @@ def test_ordered_followups_and_review_status(tmp_path):
         result = agent.run(session.id, "Stop reviewing", follow_ups=["Keep the notes"])
         assert sdk.runs[0]["instruction"] == "Stop reviewing"
         assert sdk.runs[0]["follow_ups"] == ["Keep the notes"]
-        assert result.review_status is ReviewStatus.PASSED
+        assert result.review_passed is True
     finally:
         runtime.stop()
 
@@ -160,16 +166,22 @@ def test_runs_keep_sdk_history_and_forward_events(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "event", ["started", "agent.run.ready", "agent.delta", "finished"]
+    "payload",
+    [
+        {"finished": False},
+        {"event": AgentEventType.RUN_READY},
+        {"event": AgentEventType.DELTA},
+        {"finished": True},
+    ],
 )
-def test_reviewer_events_preserve_run(tmp_path, event):
+def test_reviewer_events_preserve_run(tmp_path, payload):
     def script(sdk, params):
         yield {
             "type": "event",
             "name": "agent.reviewer",
             "data": {
                 "role": "note_review",
-                "event": event,
+                **payload,
                 "reviewer_id": "writer-review",
                 "text": "Review text",
             },
@@ -184,7 +196,8 @@ def test_reviewer_events_preserve_run(tmp_path, event):
         assert result.error is None
         assert result.final_message == "Notes complete"
         forwarded = next(item for item in observed if item.type == "agent.reviewer")
-        assert forwarded.data["event"] == event
+        for name, value in payload.items():
+            assert forwarded.data[name] is value
         assert forwarded.data["reviewer_id"] == "writer-review"
     finally:
         runtime.stop()

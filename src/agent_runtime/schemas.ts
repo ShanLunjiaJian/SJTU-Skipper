@@ -47,9 +47,6 @@ export enum RuntimeEvent {
   LLM_ATTEMPT = "llm.attempt",
   LLM_DELTA = "llm.delta",
   LLM_REASONING = "llm.reasoning",
-  REVIEW_STARTED = "started",
-  REVIEW_FINISHED = "finished",
-  REVIEW_FAILED = "failed",
 }
 
 export enum WorkspaceTool {
