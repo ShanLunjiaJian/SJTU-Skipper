@@ -13,7 +13,7 @@ logger = logging.getLogger("lecture_agent.plugins.input.download")
 
 ProgressFn = Callable[[int, int], Any]
 
-_PARALLEL_CONNECTIONS = 4
+_PARALLEL_CONNECTIONS = 8
 
 
 @dataclass(slots=True)

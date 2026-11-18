@@ -8,7 +8,7 @@ import secrets
 import threading
 from pathlib import Path
 
-BLOCK_SIZE = 2 * 1024 * 1024
+BLOCK_SIZE = 8 * 1024 * 1024
 IO_SIZE = 64 * 1024
 
 
@@ -74,7 +74,8 @@ class MediaCache:
             if self.ranged:
                 self.downloader.acquire_connection(self, True)
                 try:
-                    self.fetch(0)
+                    with self.downloader._make_client() as client:
+                        self.fetch(0, client)
                 finally:
                     self.downloader.release_connection()
             target = self.range_worker if self.ranged else self.stream_worker
@@ -103,7 +104,7 @@ class MediaCache:
             self.condition.notify_all()
             self.done.set()
 
-    def fetch(self, index):
+    def fetch(self, index, client):
         start = index * BLOCK_SIZE
         end = min(self.total, start + BLOCK_SIZE) - 1
         temporary = self.part.with_name(self.part.name + f".chunk{index}")
@@ -114,31 +115,31 @@ class MediaCache:
                     headers = {"Range": f"bytes={start}-{end}"}
                     if self.validator:
                         headers["If-Range"] = self.validator
-                    with self.downloader._make_client() as client:
-                        with client.stream(
-                            "GET", self.url, headers=headers
-                        ) as response:
-                            expected = f"bytes {start}-{end}/{self.total}"
-                            if (
-                                response.status_code != 206
-                                or response.headers.get("content-range") != expected
-                            ):
-                                raise OSError("Source range or resource changed")
-                            validator = response.headers.get(
-                                "etag"
-                            ) or response.headers.get("last-modified")
-                            if self.validator and validator != self.validator:
-                                raise OSError("Source resource changed")
-                            size = 0
-                            with temporary.open("wb") as output:
-                                for data in response.iter_bytes(IO_SIZE):
-                                    self.check()
-                                    size += len(data)
-                                    if size > end - start + 1:
-                                        raise OSError("Oversized range response")
-                                    output.write(data)
-                            if size != end - start + 1:
-                                raise OSError("Truncated range response")
+                    # The caller supplies a client that lives as long as its
+                    # worker thread, so consecutive blocks reuse one keep-alive
+                    # connection instead of paying TCP+TLS setup per block.
+                    with client.stream("GET", self.url, headers=headers) as response:
+                        expected = f"bytes {start}-{end}/{self.total}"
+                        if (
+                            response.status_code != 206
+                            or response.headers.get("content-range") != expected
+                        ):
+                            raise OSError("Source range or resource changed")
+                        validator = response.headers.get(
+                            "etag"
+                        ) or response.headers.get("last-modified")
+                        if self.validator and validator != self.validator:
+                            raise OSError("Source resource changed")
+                        size = 0
+                        with temporary.open("wb") as output:
+                            for data in response.iter_bytes(IO_SIZE):
+                                self.check()
+                                size += len(data)
+                                if size > end - start + 1:
+                                    raise OSError("Oversized range response")
+                                output.write(data)
+                        if size != end - start + 1:
+                            raise OSError("Truncated range response")
                     with temporary.open("rb") as source:
                         offset = start
                         while data := source.read(IO_SIZE):
@@ -166,6 +167,9 @@ class MediaCache:
         self.progress.finish()
 
     def range_worker(self):
+        # One client per worker: its connection pool keeps a single keep-alive
+        # connection for every block this thread fetches.
+        client = self.downloader._make_client()
         try:
             while True:
                 with self.condition:
@@ -207,12 +211,14 @@ class MediaCache:
                             index = urgent
                             self.active.add(index)
                             self.demand.remove(index)
-                    self.fetch(index)
+                    self.fetch(index, client)
                 finally:
                     self.downloader.release_connection()
         except Exception as exc:
             if not self.done.is_set():
                 self.fail(exc)
+        finally:
+            client.close()
 
     def stream_worker(self):
         acquired = False
