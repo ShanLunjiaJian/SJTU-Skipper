@@ -141,15 +141,12 @@
       else if (k === "text") node.textContent = v;
       else if (k === "html") node.innerHTML = v;
       else if (k === "dataset") Object.assign(node.dataset, v);
-      else if (k.startsWith("on") && typeof v === "function")
-        node.addEventListener(k.slice(2), v);
+      else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2), v);
       else node.setAttribute(k, v);
     }
     for (const child of [].concat(children)) {
       if (child === null || child === undefined) continue;
-      node.appendChild(
-        typeof child === "string" ? document.createTextNode(child) : child,
-      );
+      node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
     }
     return node;
   }
@@ -347,13 +344,7 @@
     }
   }
 
-  function actionButton(
-    label,
-    action,
-    value = undefined,
-    cls = "btn btn-sm",
-    disabled = false,
-  ) {
+  function actionButton(label, action, value = undefined, cls = "btn btn-sm", disabled = false) {
     const attrs = { class: cls, dataset: { action } };
     if (value !== undefined) attrs.dataset.value = JSON.stringify(value);
     attrs.type = FIELD_INPUT.BUTTON;
@@ -371,9 +362,7 @@
       } else {
         pre.appendChild(
           el("span", { class: "log-line" }, [
-            line.time
-              ? el("span", { class: "ts", text: String(line.time) })
-              : null,
+            line.time ? el("span", { class: "ts", text: String(line.time) }) : null,
             document.createTextNode(String(line.text ?? line.message ?? "")),
           ]),
         );
@@ -387,12 +376,9 @@
     const table = el("table", { class: "data-table" });
     const columns = Array.isArray(block.columns) ? block.columns : [];
     const rows = Array.isArray(block.rows) ? block.rows : [];
-    const rowActions = Array.isArray(block.row_actions)
-      ? block.row_actions
-      : [];
+    const rowActions = Array.isArray(block.row_actions) ? block.row_actions : [];
 
-    const colLabel = (c) =>
-      typeof c === "string" ? c : (c.label ?? c.key ?? "");
+    const colLabel = (c) => (typeof c === "string" ? c : (c.label ?? c.key ?? ""));
     const colKey = (c, i) => (typeof c === "string" ? c : (c.key ?? i));
     const thead = el("thead");
     const tr = el("tr");
@@ -411,8 +397,7 @@
         const c = columns[i];
         const key = colKey(c, i);
         let value = Array.isArray(row) ? row[i] : rowObj[key];
-        if (typeof value === "object" && value !== null)
-          value = JSON.stringify(value);
+        if (typeof value === "object" && value !== null) value = JSON.stringify(value);
         tr.appendChild(el("td", { text: value ?? "" }));
       }
       if (rowActions.length) {
@@ -439,8 +424,7 @@
     }
     table.appendChild(tbody);
     wrap.appendChild(table);
-    if (!rows.length)
-      wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    if (!rows.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
     return wrap;
   }
 
@@ -479,13 +463,9 @@
       if (canExpand) runNodeAction(node.toggle);
     });
     row.appendChild(caret);
-    if (node.icon)
-      row.appendChild(el("span", { class: "tree-icon", text: node.icon }));
-    row.appendChild(
-      el("span", { class: "tree-label", text: node.label || node.id || "" }),
-    );
-    if (node.subtitle)
-      row.appendChild(el("span", { class: "tree-sub", text: node.subtitle }));
+    if (node.icon) row.appendChild(el("span", { class: "tree-icon", text: node.icon }));
+    row.appendChild(el("span", { class: "tree-label", text: node.label || node.id || "" }));
+    if (node.subtitle) row.appendChild(el("span", { class: "tree-sub", text: node.subtitle }));
     if (node.badge) {
       row.appendChild(
         el("span", {
@@ -520,34 +500,24 @@
       });
       const main = el("div", { class: "row-main" }, [
         el("div", { class: "row-title", text: item.title || item.text || "" }),
-        item.subtitle
-          ? el("div", { class: "row-sub", text: item.subtitle })
-          : null,
+        item.subtitle ? el("div", { class: "row-sub", text: item.subtitle }) : null,
         item.meta ? el("div", { class: "row-meta", text: item.meta }) : null,
       ]);
       row.appendChild(main);
       if (item.action) {
         row.appendChild(
-          actionButton(
-            item.label || "打开",
-            item.action,
-            item.value,
-            item.class || "btn btn-sm",
-          ),
+          actionButton(item.label || "打开", item.action, item.value, item.class || "btn btn-sm"),
         );
       }
       wrap.appendChild(row);
     }
-    if (!wrap.children.length)
-      wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    if (!wrap.children.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
     return wrap;
   }
 
   function renderCards(block, existing = null) {
     const wrap = existing || el("div", { class: "cards" });
-    const previous = new Map(
-      Array.from(wrap.children, (card) => [card._cardKey, card]),
-    );
+    const previous = new Map(Array.from(wrap.children, (card) => [card._cardKey, card]));
     const wanted = new Set();
     (block.items || []).forEach((item, index) => {
       const key = item.id || item.key || `card:${index}`;
@@ -558,20 +528,14 @@
       }
       const [head, body, actions] = card.children;
       head.replaceChildren();
-      if (item.title)
-        head.appendChild(el("div", { class: "card-title", text: item.title }));
-      if (item.subtitle)
-        head.appendChild(el("div", { class: "card-sub", text: item.subtitle }));
+      if (item.title) head.appendChild(el("div", { class: "card-title", text: item.title }));
+      if (item.subtitle) head.appendChild(el("div", { class: "card-sub", text: item.subtitle }));
       if (item.meta) {
         const meta = el("div", { class: "card-meta" });
-        for (const entry of Array.isArray(item.meta)
-          ? item.meta
-          : Object.entries(item.meta))
+        for (const entry of Array.isArray(item.meta) ? item.meta : Object.entries(item.meta))
           meta.appendChild(
             el("span", {
-              text: Array.isArray(entry)
-                ? `${entry[0]}: ${entry[1]}`
-                : String(entry),
+              text: Array.isArray(entry) ? `${entry[0]}: ${entry[1]}` : String(entry),
             }),
           );
         head.appendChild(meta);
@@ -597,13 +561,9 @@
         destroyPlayers(card);
         card.remove();
       }
-    if (!wrap.children.length)
-      wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    if (!wrap.children.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
     wrap._deferred = Array.from(wrap.children).some(
-      (card) =>
-        !wanted.has(card) ||
-        composingWithin(card) ||
-        card.children[1]?._deferred,
+      (card) => !wanted.has(card) || composingWithin(card) || card.children[1]?._deferred,
     );
     return wrap;
   }
@@ -618,10 +578,7 @@
       const id = `f-${Math.random().toString(36).slice(2)}`;
       const fieldName = field.name || field.key;
       row.appendChild(el("label", { for: id, text: field.label || fieldName }));
-      if (
-        field.type === SETTING_TYPE.ACTION ||
-        field.input === FIELD_INPUT.BUTTON
-      ) {
+      if (field.type === SETTING_TYPE.ACTION || field.input === FIELD_INPUT.BUTTON) {
         row.appendChild(
           actionButton(
             field.button_label || field.label || "执行",
@@ -631,16 +588,12 @@
           ),
         );
         if (field.description)
-          row.appendChild(
-            el("div", { class: "hint", text: field.description }),
-          );
+          row.appendChild(el("div", { class: "hint", text: field.description }));
         form.appendChild(row);
         continue;
       }
-      const rawType =
-        field.type || (field.secret ? SETTING_TYPE.SECRET : SETTING_TYPE.TEXT);
-      const type =
-        field.input || (field.secret ? FIELD_INPUT.PASSWORD : rawType);
+      const rawType = field.type || (field.secret ? SETTING_TYPE.SECRET : SETTING_TYPE.TEXT);
+      const type = field.input || (field.secret ? FIELD_INPUT.PASSWORD : rawType);
       let input;
       if (type === FIELD_INPUT.TEXTAREA) {
         input = el("textarea", {
@@ -655,22 +608,15 @@
         const options = field.option_items || field.options || [];
         for (const option of options) {
           const value = typeof option === "object" ? option.value : option;
-          const label =
-            typeof option === "object"
-              ? (option.label ?? option.value)
-              : option;
+          const label = typeof option === "object" ? (option.label ?? option.value) : option;
           const opt = el("option", {
             value: String(value),
             text: String(label),
           });
-          if (String(value) === String(field.value ?? field.default ?? ""))
-            opt.selected = true;
+          if (String(value) === String(field.value ?? field.default ?? "")) opt.selected = true;
           input.appendChild(opt);
         }
-      } else if (
-        type === FIELD_INPUT.CHECKBOX ||
-        rawType === SETTING_TYPE.BOOL
-      ) {
+      } else if (type === FIELD_INPUT.CHECKBOX || rawType === SETTING_TYPE.BOOL) {
         input = el("input", {
           type: FIELD_INPUT.CHECKBOX,
           id,
@@ -694,11 +640,7 @@
                 ? FIELD_INPUT.NUMBER
                 : FIELD_INPUT.TEXT,
         });
-        if (
-          !field.secret &&
-          field.value !== undefined &&
-          field.value !== null
-        ) {
+        if (!field.secret && field.value !== undefined && field.value !== null) {
           input.value = field.value;
         }
         if (field.secret) {
@@ -708,8 +650,7 @@
         } else if (field.placeholder) {
           input.placeholder = field.placeholder;
         }
-        if (rawType === SETTING_TYPE.INT || type === FIELD_INPUT.NUMBER)
-          input.step = "1";
+        if (rawType === SETTING_TYPE.INT || type === FIELD_INPUT.NUMBER) input.step = "1";
         if (rawType === SETTING_TYPE.FLOAT) input.step = "any";
       }
       input.dataset.fieldType = rawType;
@@ -738,8 +679,7 @@
         }
         row.appendChild(line);
       }
-      if (field.description)
-        row.appendChild(el("div", { class: "hint", text: field.description }));
+      if (field.description) row.appendChild(el("div", { class: "hint", text: field.description }));
       form.appendChild(row);
     }
     const actions = el("div", { class: "form-actions" });
@@ -768,11 +708,8 @@
     const data = wrap._tabState;
     const tabs = block.tabs || [];
     const key =
-      block.id ||
-      block.key ||
-      `tabs:${tabs.map((tab) => tab.title || "").join("\u0001")}`;
-    const tabKey = (tab, index) =>
-      tab.id || tab.key || tab.title || `tab:${index}`;
+      block.id || block.key || `tabs:${tabs.map((tab) => tab.title || "").join("\u0001")}`;
+    const tabKey = (tab, index) => tab.id || tab.key || tab.title || `tab:${index}`;
     const navigation = state.ui?.navigation;
     const requested = tabs.find(
       (tab) =>
@@ -781,22 +718,17 @@
         tab.meta?.page_id === navigation.page,
     );
     const remembered = tabs.find((tab) => tab.title === state.blockTabs[key]);
-    const selected =
-      requested || remembered || tabs.find((tab) => tab.active) || tabs[0];
+    const selected = requested || remembered || tabs.find((tab) => tab.active) || tabs[0];
     let active = selected ? tabKey(selected, tabs.indexOf(selected)) : null;
     const focusedView = Array.from(agentViews.values()).find(
       (view) => wrap.contains(view.root) && agentDraft(view).composing,
     );
     if (focusedView && data.active !== active) active = data.active;
     const show = (target, remember = true) => {
-      const index = tabs.findIndex(
-        (tab, index) => tabKey(tab, index) === target,
-      );
+      const index = tabs.findIndex((tab, index) => tabKey(tab, index) === target);
       if (index < 0) return;
       if (
-        Array.from(data.panels.values()).some(
-          (panel) => !panel.hidden && composingWithin(panel),
-        )
+        Array.from(data.panels.values()).some((panel) => !panel.hidden && composingWithin(panel))
       ) {
         data.deferredTarget = target;
         return;
@@ -810,15 +742,10 @@
       data.active = target;
       if (remember) state.blockTabs[key] = tabs[index].title || "";
       for (const [id, panel] of data.panels) panel.hidden = id !== target;
-      for (const [id, button] of data.buttons)
-        button.classList.toggle("active", id === target);
+      for (const [id, button] of data.buttons) button.classList.toggle("active", id === target);
       const panel = data.panels.get(target);
       for (const view of agentViews.values())
-        if (
-          changed &&
-          panel.contains(view.root) &&
-          view.input.getClientRects().length
-        ) {
+        if (changed && panel.contains(view.root) && view.input.getClientRects().length) {
           restoreAgentEditor(view, remember && Boolean(view.restoreFocus));
           if (remember) view.restoreFocus = false;
         }
@@ -883,8 +810,7 @@
       }
     if (!focusedView) show(active, false);
     wrap._deferred =
-      Boolean(focusedView) ||
-      Array.from(data.panels.values()).some((panel) => panel._deferred);
+      Boolean(focusedView) || Array.from(data.panels.values()).some((panel) => panel._deferred);
     return wrap;
   }
 
@@ -898,11 +824,7 @@
     // Relay every media URL through this server: the browser may be on a VPN
     // that cannot reach live.sjtu.edu.cn, while the server can.
     const src = relayedMediaUrl(rawSrc);
-    if (
-      rawSrc.includes(".flv") &&
-      window.mpegts &&
-      window.mpegts.isSupported()
-    ) {
+    if (rawSrc.includes(".flv") && window.mpegts && window.mpegts.isSupported()) {
       const player = window.mpegts.createPlayer({
         type: "flv",
         isLive: true,
@@ -1021,13 +943,7 @@
     const toggle = el("button", {
       class: "btn btn-sm btn-primary",
       type: FIELD_INPUT.BUTTON,
-      text: finished
-        ? "已结束"
-        : block.queued
-          ? "提前处理"
-          : processing
-            ? "暂停处理"
-            : "继续处理",
+      text: finished ? "已结束" : block.queued ? "提前处理" : processing ? "暂停处理" : "继续处理",
     });
     toggle.disabled = finished;
 
@@ -1105,8 +1021,7 @@
       postAction(block.action, { enabled: input.checked });
     });
     wrap.appendChild(label);
-    if (block.hint)
-      wrap.appendChild(el("div", { class: "hint", text: block.hint }));
+    if (block.hint) wrap.appendChild(el("div", { class: "hint", text: block.hint }));
     return wrap;
   }
 
@@ -1201,15 +1116,11 @@
     });
     head.appendChild(toggle);
     head.appendChild(el("span", { class: "qa-badge qa-badge-q", text: "问" }));
-    head.appendChild(
-      el("span", { class: "qa-summary", text: qaPreview(block.question) }),
-    );
+    head.appendChild(el("span", { class: "qa-summary", text: qaPreview(block.question) }));
     const level = qaLevelLabel(block.intensity);
     if (level) head.appendChild(el("span", { class: "qa-level", text: level }));
-    if (block.ts)
-      head.appendChild(el("span", { class: "qa-time", text: block.ts }));
-    if (pending)
-      head.appendChild(el("span", { class: "qa-pending", text: "回答中…" }));
+    if (block.ts) head.appendChild(el("span", { class: "qa-time", text: block.ts }));
+    if (pending) head.appendChild(el("span", { class: "qa-pending", text: "回答中…" }));
     head.appendChild(
       actionButton(
         "删除",
@@ -1246,8 +1157,7 @@
   function qaNode(path, id) {
     return (
       $$(".qa").find(
-        (node) =>
-          node.dataset.qaId === id && (!path || node.dataset.qaPath === path),
+        (node) => node.dataset.qaId === id && (!path || node.dataset.qaPath === path),
       ) || null
     );
   }
@@ -1270,23 +1180,17 @@
     node.dataset.qaStatus = payload.status || QA_STATUS.DONE;
     const answerBox = node.querySelector(".qa-answer");
     const activity = node.querySelector(".agent-workflow");
-    const view = Array.from(agentViews.values()).find(
-      (item) => item.root === activity,
-    );
+    const view = Array.from(agentViews.values()).find((item) => item.root === activity);
     const retained = retainAgentView(view);
     if (answerBox) {
       answerBox.classList.remove("pending");
-      answerBox.classList.toggle(
-        "qa-failed",
-        payload.status === QA_STATUS.ERROR,
-      );
+      answerBox.classList.toggle("qa-failed", payload.status === QA_STATUS.ERROR);
       let answer = answerBox.querySelector(".qa-text");
       if (!answer) {
         answer = el("div", { class: "qa-text markdown" });
         answerBox.appendChild(answer);
       }
-      const html =
-        payload.answer_html || escapeHtml(payload.answer || "（无内容）");
+      const html = payload.answer_html || escapeHtml(payload.answer || "（无内容）");
       if (answer._answerHtml !== html) {
         answer.innerHTML = html;
         answer._answerHtml = html;
@@ -1318,23 +1222,16 @@
       if (finished) {
         const activityId = payload.activity?.id || `qa-${payload.id}`;
         for (const viewKey of agentViews.keys()) {
-          if (
-            JSON.parse(viewKey)[1] === activityId &&
-            !retainAgentView(agentViews.get(viewKey))
-          )
+          if (JSON.parse(viewKey)[1] === activityId && !retainAgentView(agentViews.get(viewKey)))
             disposeAgentView(viewKey);
         }
         if (node) finishQaBlock(node, payload);
-      } else if (
-        payload.activity &&
-        node?.dataset.qaStatus === QA_STATUS.PENDING
-      ) {
+      } else if (payload.activity && node?.dataset.qaStatus === QA_STATUS.PENDING) {
         const answerBox = node.querySelector(".qa-answer");
         if (answerBox) {
           const activity = renderAgentActivity(payload.activity);
           activityView(payload.activity).qa = key;
-          if (activity.parentNode !== answerBox)
-            answerBox.appendChild(activity);
+          if (activity.parentNode !== answerBox) answerBox.appendChild(activity);
         }
       }
     };
@@ -1370,19 +1267,15 @@
 
   function moveActivityNode(parent, node, before) {
     const focused = Array.from(agentViews.values()).find(
-      (view) =>
-        node.contains(view.input) && document.activeElement === view.input,
+      (view) => node.contains(view.input) && document.activeElement === view.input,
     );
     if (focused) saveAgentEditor(focused);
     parent.insertBefore(node, before);
-    if (focused && !agentDraft(focused).composing)
-      restoreAgentEditor(focused, true);
+    if (focused && !agentDraft(focused).composing) restoreAgentEditor(focused, true);
   }
 
   function updateBlocks(parent, blocks) {
-    const previous = new Map(
-      Array.from(parent.children, (node) => [node._blockKey, node]),
-    );
+    const previous = new Map(Array.from(parent.children, (node) => [node._blockKey, node]));
     const wanted = new Set();
     let deferred = false;
     (blocks || []).forEach((block, index) => {
@@ -1390,19 +1283,15 @@
       let node = previous.get(key);
       const signature = JSON.stringify(block);
       if (node) {
-        if (block.type === BLOCK_TYPE.AGENT_ACTIVITY)
-          renderAgentActivity(block);
+        if (block.type === BLOCK_TYPE.AGENT_ACTIVITY) renderAgentActivity(block);
         else if (block.type === BLOCK_TYPE.QA) renderQA(block, node);
-        else if (block.type === BLOCK_TYPE.TABS)
-          renderTabs(block, node.firstElementChild);
-        else if (block.type === BLOCK_TYPE.CARDS)
-          renderCards(block, node.firstElementChild);
+        else if (block.type === BLOCK_TYPE.TABS) renderTabs(block, node.firstElementChild);
+        else if (block.type === BLOCK_TYPE.CARDS) renderCards(block, node.firstElementChild);
         else if (node._blockSignature !== signature) {
           const focused = document.activeElement;
-          if (!(
-            node.contains(focused) &&
-            ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName)
-          )) {
+          if (
+            !(node.contains(focused) && ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName))
+          ) {
             destroyPlayers(node);
             const replacement = renderBlock(block);
             if (replacement) {
@@ -1420,8 +1309,7 @@
       wanted.add(node);
       const current = parent.children[index];
       if (current !== node) {
-        if (composingWithin(node) || (current && composingWithin(current)))
-          deferred = true;
+        if (composingWithin(node) || (current && composingWithin(current))) deferred = true;
         else moveActivityNode(parent, node, current || null);
       }
     });
@@ -1478,11 +1366,7 @@
   }
 
   function saveAgentEditor(view) {
-    if (
-      view.target === undefined ||
-      view.editorSuspended ||
-      !view.input.getClientRects().length
-    )
+    if (view.target === undefined || view.editorSuspended || !view.input.getClientRects().length)
       return;
     const draft = agentDraft(view);
     const input = view.input;
@@ -1597,8 +1481,7 @@
     const view = agentViews.get(key);
     view?.dispose();
     if (view)
-      for (const target of view.targets.keys())
-        agentDrafts.delete(JSON.stringify([key, target]));
+      for (const target of view.targets.keys()) agentDrafts.delete(JSON.stringify([key, target]));
     agentViews.delete(key);
     agentSelections.delete(key);
   }
@@ -1619,8 +1502,7 @@
           qaKeys.add(key);
           const cached = qaLiveCache.get(key);
           const retained = retainedQaActivity(block, page);
-          if (block.status !== QA_STATUS.PENDING && !retained)
-            qaLiveCache.delete(key);
+          if (block.status !== QA_STATUS.PENDING && !retained) qaLiveCache.delete(key);
           if (
             retained ||
             (block.status === QA_STATUS.PENDING &&
@@ -1634,19 +1516,13 @@
           for (const item of block.items || []) collect(item.blocks, page);
       }
     };
-    for (const [page, blocks] of Object.entries(state.ui.page_content || {}))
-      collect(blocks, page);
+    for (const [page, blocks] of Object.entries(state.ui.page_content || {})) collect(blocks, page);
     for (const page of pageSurfaces.keys())
       if (!pages.has(page) || !openPages.has(page)) pageSurfaces.delete(page);
-    for (const key of qaLiveCache.keys())
-      if (!qaKeys.has(key)) qaLiveCache.delete(key);
+    for (const key of qaLiveCache.keys()) if (!qaKeys.has(key)) qaLiveCache.delete(key);
     for (const [key, view] of agentViews) {
       const [page] = JSON.parse(key);
-      if (
-        !pages.has(page) ||
-        !openPages.has(page) ||
-        (page === active && !activeKeys.has(key))
-      ) {
+      if (!pages.has(page) || !openPages.has(page) || (page === active && !activeKeys.has(key))) {
         disposeAgentView(key);
       } else if (page !== active) view.close();
     }
@@ -1672,17 +1548,14 @@
   }
 
   function executionTokens(value) {
-    return value >= 1000000
-      ? `${(value / 1000000).toFixed(1)}M`
-      : `${(value / 1000).toFixed(1)}K`;
+    return value >= 1000000 ? `${(value / 1000000).toFixed(1)}M` : `${(value / 1000).toFixed(1)}K`;
   }
 
   function executionToolTitle(block, args) {
     const name = (block.name || "tool").split(/[.:/]/).at(-1);
     const path = args.path || args.file_path || args.file || "";
     if (name === "read") {
-      const range =
-        args.offset !== undefined ? ` from line ${args.offset}` : "";
+      const range = args.offset !== undefined ? ` from line ${args.offset}` : "";
       const count = args.limit !== undefined ? `, ${args.limit} lines` : "";
       const details = block.result?.details;
       const lines = details?.lineCount ?? details?.totalLines;
@@ -1722,23 +1595,17 @@
             : `${block.kind === EXECUTION_BLOCK_KIND.USER ? "User" : "Text"}${text ? `: ${text.trim().split("\n")[0]}` : ""}`;
     row.className = `execution-block execution-${block.kind || EXECUTION_BLOCK_KIND.TEXT}`;
     row.dataset.status = block.status || EXECUTION_BLOCK_STATUS.COMPLETED;
-    const header = el(
-      isRead ? "div" : "summary",
-      { class: "execution-header" },
-      [
-        el("span", { class: "execution-title", text: title }),
-        el("span", {
-          class: "execution-status",
-          text: block.status || EXECUTION_BLOCK_STATUS.COMPLETED,
-        }),
-        el("span", {
-          class: "execution-seconds",
-          text: executionNumber(block.seconds)
-            ? `${block.seconds.toFixed(1)}s`
-            : "",
-        }),
-      ],
-    );
+    const header = el(isRead ? "div" : "summary", { class: "execution-header" }, [
+      el("span", { class: "execution-title", text: title }),
+      el("span", {
+        class: "execution-status",
+        text: block.status || EXECUTION_BLOCK_STATUS.COMPLETED,
+      }),
+      el("span", {
+        class: "execution-seconds",
+        text: executionNumber(block.seconds) ? `${block.seconds.toFixed(1)}s` : "",
+      }),
+    ]);
     if (isRead) {
       row.replaceChildren(header);
       return;
@@ -1750,10 +1617,7 @@
         el("pre", { text: executionText(block.arguments) || "Unavailable" }),
       );
       if (block.result !== undefined)
-        body.append(
-          el("h4", { text: "Result" }),
-          el("pre", { text: executionText(block.result) }),
-        );
+        body.append(el("h4", { text: "Result" }), el("pre", { text: executionText(block.result) }));
     } else if (block.kind === EXECUTION_BLOCK_KIND.REVIEW) {
       const report = executionArgs(block.report);
       const verdict = report.correct;
@@ -1766,8 +1630,7 @@
         );
       if (block.error) body.appendChild(el("p", { text: block.error }));
       if (typeof verdict === "boolean") {
-        if (report.explanation)
-          body.appendChild(el("p", { text: report.explanation }));
+        if (report.explanation) body.appendChild(el("p", { text: report.explanation }));
       } else if (text) body.appendChild(el("pre", { text }));
       for (const finding of report.findings || []) {
         body.appendChild(
@@ -1799,22 +1662,14 @@
                 .map((part) => part.text || "")
                 .join("\n")
             : result);
-        preview.textContent = executionText(output)
-          .split("\n")
-          .slice(0, 6)
-          .join("\n");
+        preview.textContent = executionText(output).split("\n").slice(0, 6).join("\n");
       } else if (
         ["write", "edit", "apply_patch"].includes(name) ||
-        [
-          EXECUTION_BLOCK_STATUS.STREAMING,
-          EXECUTION_BLOCK_STATUS.RUNNING,
-        ].includes(block.status)
+        [EXECUTION_BLOCK_STATUS.STREAMING, EXECUTION_BLOCK_STATUS.RUNNING].includes(block.status)
       ) {
         const writing = ["write", "edit", "apply_patch"].includes(name);
         const content = executionText(
-          writing
-            ? (args.content ?? args.input ?? args.patch ?? block.arguments)
-            : block.arguments,
+          writing ? (args.content ?? args.input ?? args.patch ?? block.arguments) : block.arguments,
         );
         preview.textContent = writing
           ? content.split("\n").slice(-5).join("\n")
@@ -1914,9 +1769,7 @@
         menu.style.top = `${rect.bottom + 4}px`;
         menu.hidden = false;
         select.setAttribute("aria-expanded", "true");
-        (
-          menu.querySelector('[aria-selected="true"]') || menu.firstElementChild
-        )?.focus();
+        (menu.querySelector('[aria-selected="true"]') || menu.firstElementChild)?.focus();
       });
       menu.addEventListener("click", (event) => {
         const option = event.target.closest("[data-target]");
@@ -1937,29 +1790,19 @@
         if (event.key === "Escape") {
           close();
           select.focus();
-        } else if (
-          ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)
-        ) {
+        } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
           event.preventDefault();
           const next =
             event.key === "Home"
               ? 0
               : event.key === "End"
                 ? options.length - 1
-                : (index +
-                    (event.key === "ArrowDown" ? 1 : -1) +
-                    options.length) %
-                  options.length;
+                : (index + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
           options[next]?.focus();
         }
       });
       const onPointerDown = (event) => {
-        if (
-          !menu.hidden &&
-          !menu.contains(event.target) &&
-          !select.contains(event.target)
-        )
-          close();
+        if (!menu.hidden && !menu.contains(event.target) && !select.contains(event.target)) close();
       };
       document.addEventListener("pointerdown", onPointerDown);
       view.dispose = () => {
@@ -1970,8 +1813,7 @@
         view.revision = (view.revision || 0) + 1;
       };
       log.addEventListener("scroll", () => {
-        if (!view.updating)
-          view.positions.set(view.target, executionPosition(view));
+        if (!view.updating) view.positions.set(view.target, executionPosition(view));
       });
       for (const type of ["input", "select", "keyup", "scroll"])
         input.addEventListener(type, () => {
@@ -2046,18 +1888,13 @@
               : agent.role) ||
           "Agent";
         const number =
-          Array.from(view.labels.values()).filter(
-            (entry) => entry.base === label,
-          ).length + 1;
+          Array.from(view.labels.values()).filter((entry) => entry.base === label).length + 1;
         view.labels.set(target, { base: label, number });
       }
     });
     for (const [target, agent] of view.targets) {
       const draft = agentDraft(view, target);
-      if (
-        !targets.has(target) &&
-        (target === view.target || draft.value.length || draft.pending)
-      )
+      if (!targets.has(target) && (target === view.target || draft.value.length || draft.pending))
         targets.set(target, { ...agent, closed: true });
     }
     if (!targets.size) targets.set("legacy:unavailable", {});
@@ -2066,9 +1903,7 @@
       const label = view.labels.get(value);
       const duplicates =
         label &&
-        Array.from(view.labels.values()).filter(
-          (entry) => entry.base === label.base,
-        ).length > 1;
+        Array.from(view.labels.values()).filter((entry) => entry.base === label.base).length > 1;
       const text = label
         ? `${label.base}${duplicates ? ` ${label.number}` : ""}${agent.role === EXECUTION_ROLE.REVIEWER ? (agent.review_passed ? "（已通过）" : "（未通过）") : ""}${agent.closed ? "（已关闭）" : ""}`
         : "查看会话";
@@ -2103,9 +1938,8 @@
     const preferred = agentSelections.get(key) ?? view.target;
     const target = view.targets.has(preferred)
       ? preferred
-      : Array.from(view.targets).find(
-          ([, agent]) => agent.role === EXECUTION_ROLE.WRITER,
-        )?.[0] || view.targets.keys().next().value;
+      : Array.from(view.targets).find(([, agent]) => agent.role === EXECUTION_ROLE.WRITER)?.[0] ||
+        view.targets.keys().next().value;
     if (view.target !== target) {
       saveAgentEditor(view);
       view.target = target;
@@ -2126,8 +1960,7 @@
       latest.context_window > 0
         ? `${((100 * latest.context_tokens) / latest.context_window).toFixed(1)}%/${executionTokens(latest.context_window)}`
         : "unavailable";
-    const seconds = (value) =>
-      executionNumber(value) ? `${value.toFixed(1)}s` : "unavailable";
+    const seconds = (value) => (executionNumber(value) ? `${value.toFixed(1)}s` : "unavailable");
     metrics.replaceChildren(
       ...[
         `${latest.model || "unavailable"}:${latest.thinking || "unavailable"}`,
@@ -2169,11 +2002,9 @@
           text: "Waiting for execution blocks",
         }),
       );
-    for (const child of Array.from(log.children))
-      if (!rows.includes(child)) child.remove();
+    for (const child of Array.from(log.children)) if (!rows.includes(child)) child.remove();
     rows.forEach((row, index) => {
-      if (log.children[index] !== row)
-        log.insertBefore(row, log.children[index] || null);
+      if (log.children[index] !== row) log.insertBefore(row, log.children[index] || null);
     });
     const position = view.positions.get(target);
     const restore = () => {
@@ -2209,16 +2040,12 @@
         el("ul", { class: "task-list", "aria-label": "任务队列" }),
       ]);
     const tasks = state.ui.tasks || [];
-    const pending = tasks.filter(
-      (task) => task.state === TASK_STATE.PENDING,
-    ).length;
+    const pending = tasks.filter((task) => task.state === TASK_STATE.PENDING).length;
     $(".task-summary", root).textContent =
       `等待中 ${pending} 个，运行中 ${tasks.length - pending} 个`;
     $(".task-empty", root).hidden = tasks.length > 0;
     const list = $(".task-list", root);
-    const rows = new Map(
-      Array.from(list.children, (row) => [row.dataset.taskId, row]),
-    );
+    const rows = new Map(Array.from(list.children, (row) => [row.dataset.taskId, row]));
     tasks.forEach((task, index) => {
       const key = String(task.id ?? index);
       let row = rows.get(key);
@@ -2255,16 +2082,11 @@
       const session = $(".task-session", row);
       session.textContent = task.session_id ? `会话：${task.session_id}` : "";
       session.hidden = !task.session_id;
-      $(".task-state", row).textContent =
-        task.state === TASK_STATE.PENDING ? "等待中" : "运行中";
+      $(".task-state", row).textContent = task.state === TASK_STATE.PENDING ? "等待中" : "运行中";
       const button = $(".task-cancel", row);
       button.hidden = !task.cancel?.action;
-      button.setAttribute(
-        "aria-label",
-        `停止任务：${task.label || task.id || "任务"}`,
-      );
-      if (list.children[index] !== row)
-        list.insertBefore(row, list.children[index] || null);
+      button.setAttribute("aria-label", `停止任务：${task.label || task.id || "任务"}`);
+      if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null);
     });
     for (const row of rows.values()) row.remove();
     return root;
@@ -2275,20 +2097,16 @@
     const type = block.type || BLOCK_TYPE.TEXT;
     if (type === BLOCK_TYPE.AGENT_ACTIVITY) return renderAgentActivity(block);
     if (type === BLOCK_TYPE.TASK_QUEUE) return renderTaskQueue();
-    if (type === BLOCK_TYPE.HTML)
-      return el("div", { class: "block", html: block.html || "" });
+    if (type === BLOCK_TYPE.HTML) return el("div", { class: "block", html: block.html || "" });
     if (type === BLOCK_TYPE.MARKDOWN) {
       return el("div", {
         class: "block markdown",
         html: block.html || escapeHtml(block.text || ""),
       });
     }
-    if (type === BLOCK_TYPE.TEXT)
-      return el("pre", { class: "block pre", text: block.text ?? "" });
+    if (type === BLOCK_TYPE.TEXT) return el("pre", { class: "block pre", text: block.text ?? "" });
     if (type === BLOCK_TYPE.KEYVALUE) {
-      const items = Array.isArray(block.items)
-        ? block.items
-        : Object.entries(block.items || {});
+      const items = Array.isArray(block.items) ? block.items : Object.entries(block.items || {});
       const grid = el("div", { class: "kv-grid" });
       for (const [k, v] of items) {
         grid.appendChild(el("div", { class: "k", text: k }));
@@ -2300,18 +2118,14 @@
       }
       return el("div", { class: "block" }, [grid]);
     }
-    if (type === BLOCK_TYPE.TABLE)
-      return el("div", { class: "block" }, [renderTable(block)]);
-    if (type === BLOCK_TYPE.CARDS)
-      return el("div", { class: "block" }, [renderCards(block)]);
+    if (type === BLOCK_TYPE.TABLE) return el("div", { class: "block" }, [renderTable(block)]);
+    if (type === BLOCK_TYPE.CARDS) return el("div", { class: "block" }, [renderCards(block)]);
     if (type === BLOCK_TYPE.ROWS) return renderRows(block);
-    if (type === BLOCK_TYPE.TREE)
-      return el("div", { class: "block" }, [renderTree(block)]);
+    if (type === BLOCK_TYPE.TREE) return el("div", { class: "block" }, [renderTree(block)]);
     if (type === BLOCK_TYPE.LIST) {
       const list = el("div", { class: "block btn-row" });
       for (const item of block.items || []) {
-        if (typeof item === "string")
-          list.appendChild(el("div", { text: item }));
+        if (typeof item === "string") list.appendChild(el("div", { text: item }));
         else if (item.action)
           list.appendChild(
             actionButton(
@@ -2321,10 +2135,7 @@
               item.class || "btn btn-sm",
             ),
           );
-        else
-          list.appendChild(
-            el("div", { text: item.text || JSON.stringify(item) }),
-          );
+        else list.appendChild(el("div", { text: item.text || JSON.stringify(item) }));
       }
       return list;
     }
@@ -2343,10 +2154,8 @@
       }
       return row;
     }
-    if (type === BLOCK_TYPE.FORM)
-      return el("div", { class: "block" }, [renderForm(block)]);
-    if (type === BLOCK_TYPE.LOG)
-      return el("div", { class: "block" }, [renderLog(block)]);
+    if (type === BLOCK_TYPE.FORM) return el("div", { class: "block" }, [renderForm(block)]);
+    if (type === BLOCK_TYPE.LOG) return el("div", { class: "block" }, [renderLog(block)]);
     if (type === BLOCK_TYPE.IMAGE) {
       return el("div", { class: "block" }, [
         el("img", { class: "image", src: block.src, alt: block.alt || "" }),
@@ -2356,8 +2165,7 @@
       const video = el("video", { controls: "controls", src: block.src });
       return el("div", { class: "block" }, [video]);
     }
-    if (type === BLOCK_TYPE.TABS)
-      return el("div", { class: "block" }, [renderTabs(block)]);
+    if (type === BLOCK_TYPE.TABS) return el("div", { class: "block" }, [renderTabs(block)]);
     if (type === BLOCK_TYPE.PLAYER) return renderPlayer(block);
     if (type === BLOCK_TYPE.SWITCH) return renderSwitch(block);
     if (type === BLOCK_TYPE.QA) return renderQA(block);
@@ -2445,18 +2253,12 @@
         btn.classList.add("open");
         const drop = el("div", { class: "menu-drop" });
         for (const cmd of items) {
-          const item = el(
-            "button",
-            { class: "menu-item", type: FIELD_INPUT.BUTTON },
-            [
-              el("span", {
-                text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}`,
-              }),
-              cmd.subtitle
-                ? el("span", { class: "sub", text: cmd.subtitle })
-                : null,
-            ],
-          );
+          const item = el("button", { class: "menu-item", type: FIELD_INPUT.BUTTON }, [
+            el("span", {
+              text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}`,
+            }),
+            cmd.subtitle ? el("span", { class: "sub", text: cmd.subtitle }) : null,
+          ]);
           item.addEventListener("click", (event) => {
             event.stopPropagation();
             runCommand(cmd);
@@ -2491,9 +2293,7 @@
     state.paletteItems = items;
     if (state.paletteIndex >= items.length) state.paletteIndex = 0;
     if (!items.length) {
-      list.appendChild(
-        el("div", { class: "palette-empty", text: "没有匹配的命令" }),
-      );
+      list.appendChild(el("div", { class: "palette-empty", text: "没有匹配的命令" }));
       return;
     }
     items.forEach((cmd, index) => {
@@ -2504,13 +2304,9 @@
           type: FIELD_INPUT.BUTTON,
         },
         [
-          cmd.category
-            ? el("span", { class: "cat", text: cmd.category })
-            : null,
+          cmd.category ? el("span", { class: "cat", text: cmd.category }) : null,
           el("span", { text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}` }),
-          cmd.subtitle
-            ? el("span", { class: "sub", text: cmd.subtitle })
-            : null,
+          cmd.subtitle ? el("span", { class: "sub", text: cmd.subtitle }) : null,
         ],
       );
       row.addEventListener("click", () => runCommand(cmd));
@@ -2605,19 +2401,12 @@
 
   function sidebarWidth(side) {
     const fallback = side === SIDEBAR_SIDE.LEFT ? 280 : 320;
-    const stored = Number(
-      localStorage.getItem(`lecture-agent.sidebar.${side}.w`),
-    );
-    return Number.isFinite(stored) && stored > 0
-      ? clampWidth(stored)
-      : fallback;
+    const stored = Number(localStorage.getItem(`lecture-agent.sidebar.${side}.w`));
+    return Number.isFinite(stored) && stored > 0 ? clampWidth(stored) : fallback;
   }
 
   function clampWidth(value) {
-    const hardMax = Math.min(
-      SIDEBAR_MAX,
-      Math.max(280, window.innerWidth * 0.45),
-    );
+    const hardMax = Math.min(SIDEBAR_MAX, Math.max(280, window.innerWidth * 0.45));
     return Math.round(Math.min(hardMax, Math.max(SIDEBAR_MIN, value)));
   }
 
@@ -2625,13 +2414,9 @@
     const app = $("#app");
     if (!app) return;
     for (const side of Object.values(SIDEBAR_SIDE)) {
-      const collapsed =
-        localStorage.getItem(`lecture-agent.sidebar.${side}`) === "true";
+      const collapsed = localStorage.getItem(`lecture-agent.sidebar.${side}`) === "true";
       app.classList.toggle(`${side}-collapsed`, collapsed);
-      app.style.setProperty(
-        `--${side}-col`,
-        collapsed ? "0px" : `${sidebarWidth(side)}px`,
-      );
+      app.style.setProperty(`--${side}-col`, collapsed ? "0px" : `${sidebarWidth(side)}px`);
     }
   }
 
@@ -2639,10 +2424,7 @@
     const app = $("#app");
     if (!app) return;
     app.classList.toggle(`${side}-collapsed`, collapsed);
-    app.style.setProperty(
-      `--${side}-col`,
-      collapsed ? "0px" : `${sidebarWidth(side)}px`,
-    );
+    app.style.setProperty(`--${side}-col`, collapsed ? "0px" : `${sidebarWidth(side)}px`);
     localStorage.setItem(`lecture-agent.sidebar.${side}`, String(collapsed));
   }
 
@@ -2671,9 +2453,7 @@
         document.body.classList.add("resizing");
         const move = (ev) => {
           const width =
-            side === SIDEBAR_SIDE.LEFT
-              ? ev.clientX - rect.left
-              : rect.right - ev.clientX;
+            side === SIDEBAR_SIDE.LEFT ? ev.clientX - rect.left : rect.right - ev.clientX;
           const value = `${clampWidth(width)}px`;
           app.style.setProperty(`--${side}-col`, value);
         };
@@ -2683,14 +2463,9 @@
           handle.removeEventListener("pointermove", move);
           handle.removeEventListener("pointerup", stop);
           handle.removeEventListener("pointercancel", stop);
-          const value = parseFloat(
-            getComputedStyle(app).getPropertyValue(`--${side}-col`),
-          );
+          const value = parseFloat(getComputedStyle(app).getPropertyValue(`--${side}-col`));
           if (Number.isFinite(value) && value > 0) {
-            localStorage.setItem(
-              `lecture-agent.sidebar.${side}.w`,
-              String(Math.round(value)),
-            );
+            localStorage.setItem(`lecture-agent.sidebar.${side}.w`, String(Math.round(value)));
           }
         };
         handle.addEventListener("pointermove", move);
@@ -2700,10 +2475,7 @@
       handle.addEventListener("dblclick", () => {
         localStorage.removeItem(`lecture-agent.sidebar.${side}.w`);
         if (!$("#app").classList.contains(`${side}-collapsed`)) {
-          $("#app").style.setProperty(
-            `--${side}-col`,
-            `${sidebarWidth(side)}px`,
-          );
+          $("#app").style.setProperty(`--${side}-col`, `${sidebarWidth(side)}px`);
         }
       });
     }
@@ -2748,8 +2520,7 @@
     const page = $("#page-content");
     if (!menu || !page) return;
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || sel.rangeCount === 0)
-      return hideSelectionMenu();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return hideSelectionMenu();
     const text = String(sel).trim();
     if (text.length < 2) return hideSelectionMenu();
     const node = sel.anchorNode;
@@ -2789,8 +2560,7 @@
       Math.max(10, rect.left + rect.width / 2 - width / 2),
     );
     let top = rect.top - height - 8;
-    if (top < 8)
-      top = Math.min(window.innerHeight - height - 10, rect.bottom + 8);
+    if (top < 8) top = Math.min(window.innerHeight - height - 10, rect.bottom + 8);
     menu.style.left = `${Math.round(left)}px`;
     menu.style.top = `${Math.round(top)}px`;
   }
@@ -2802,8 +2572,7 @@
     const modal = $("#ask");
     if (!modal) return;
     const preview = $("#ask-selection");
-    preview.textContent =
-      selection.length > 800 ? `${selection.slice(0, 800)}…` : selection;
+    preview.textContent = selection.length > 800 ? `${selection.slice(0, 800)}…` : selection;
     const levels = $("#ask-intensity");
     if (levels) {
       levels.replaceChildren();
@@ -2816,11 +2585,8 @@
             ];
       for (const option of options) {
         const value = typeof option === "object" ? option.value : option;
-        const label =
-          typeof option === "object" ? (option.label ?? option.value) : option;
-        levels.appendChild(
-          el("option", { value: String(value), text: String(label) }),
-        );
+        const label = typeof option === "object" ? (option.label ?? option.value) : option;
+        levels.appendChild(el("option", { value: String(value), text: String(label) }));
       }
     }
     const input = $("#ask-input");
@@ -2844,8 +2610,7 @@
       return;
     }
     const { item, ctx, selection } = askContext;
-    const intensity =
-      ($("#ask-intensity") || {}).value || ASK_INTENSITY.INSTANT;
+    const intensity = ($("#ask-intensity") || {}).value || ASK_INTENSITY.INSTANT;
     closeAskDialog();
     await postAction(item.action, {
       ...(item.value || {}),
@@ -2928,16 +2693,13 @@
       el("div", { class: "context-sub" }, [
         context.state ? el("span", { class: `dot ${context.state}` }) : null,
         el("span", { text: context.subtitle || "" }),
-        context.recent
-          ? el("span", { class: "context-tag", text: "最近一节" })
-          : null,
+        context.recent ? el("span", { class: "context-tag", text: "最近一节" }) : null,
       ]),
     );
   }
 
   function renderSidebar(side) {
-    const tabs =
-      side === SIDEBAR_SIDE.LEFT ? state.ui.left_tabs : state.ui.right_tabs;
+    const tabs = side === SIDEBAR_SIDE.LEFT ? state.ui.left_tabs : state.ui.right_tabs;
     const tabsEl = $(`#${side}-tabs`);
     const toolboxEl = $(`#${side}-toolbox`);
     const sidebarKey = JSON.stringify([
@@ -2950,10 +2712,7 @@
     toolboxEl.dataset.renderKey = sidebarKey;
     const sidebarScroll = toolboxEl.scrollTop;
     if (side === SIDEBAR_SIDE.RIGHT) renderSidebarContext();
-    const contextKnown = Object.prototype.hasOwnProperty.call(
-      state.ui,
-      "context",
-    );
+    const contextKnown = Object.prototype.hasOwnProperty.call(state.ui, "context");
     const context = side === SIDEBAR_SIDE.RIGHT ? state.ui.context : null;
     if (side === SIDEBAR_SIDE.RIGHT && contextKnown && !context) {
       tabsEl.replaceChildren();
@@ -2998,9 +2757,7 @@
     toolboxEl.replaceChildren();
     const current = (tabs || []).find((t) => t.id === active);
     if (!current || !(current.toolbox || []).length) {
-      toolboxEl.appendChild(
-        el("div", { class: "empty", text: "这个 tab 还没有工具" }),
-      );
+      toolboxEl.appendChild(el("div", { class: "empty", text: "这个 tab 还没有工具" }));
       return;
     }
     for (const item of current.toolbox) {
@@ -3011,9 +2768,7 @@
       if (item.title || item.description) {
         const head = el("div", { class: "toolbox-head" }, [
           el("div", { class: "toolbox-title", text: item.title || item.id }),
-          item.description
-            ? el("div", { class: "toolbox-desc", text: item.description })
-            : null,
+          item.description ? el("div", { class: "toolbox-desc", text: item.description }) : null,
         ]);
         if (pageId) {
           const open = actionButton(
@@ -3030,11 +2785,7 @@
       const body = el("div", { class: "toolbox-body" });
       if (item.blocks && item.blocks.length) {
         body.appendChild(
-          renderBlocks(
-            item.blocks.filter(
-              (block) => block.type !== BLOCK_TYPE.AGENT_ACTIVITY,
-            ),
-          ),
+          renderBlocks(item.blocks.filter((block) => block.type !== BLOCK_TYPE.AGENT_ACTIVITY)),
         );
       } else {
         body.appendChild(
@@ -3105,8 +2856,7 @@
     if (!samePage && composingWithin(container)) return false;
     const focused = document.activeElement;
     const activityPage =
-      blocks?.some(hasActivityBlock) ||
-      container.querySelector(".agent-workflow");
+      blocks?.some(hasActivityBlock) || container.querySelector(".agent-workflow");
     if (
       samePage &&
       !activityPage &&
@@ -3133,10 +2883,7 @@
         view.editorSuspended = true;
         view.close();
       }
-      if (
-        previousPage !== undefined &&
-        (state.ui.open_pages || []).includes(previousPage)
-      )
+      if (previousPage !== undefined && (state.ui.open_pages || []).includes(previousPage))
         pageSurfaces.set(previousPage, {
           nodes: Array.from(container.childNodes),
           scrollTop,
@@ -3160,9 +2907,7 @@
         );
     } else complete = updateBlocks(container, blocks);
     state.pageKey = complete ? key : null;
-    container.scrollTop = samePage
-      ? scrollTop
-      : pageSurfaces.get(active)?.scrollTop || 0;
+    container.scrollTop = samePage ? scrollTop : pageSurfaces.get(active)?.scrollTop || 0;
     if (!samePage) {
       for (const view of agentViews.values()) {
         if (!container.contains(view.root)) continue;
@@ -3175,9 +2920,7 @@
     }
     let adjust = 0;
     for (const node of $$(".qa", container)) {
-      const before = qaBefore.get(
-        qaKey(node.dataset.qaPath, node.dataset.qaId),
-      );
+      const before = qaBefore.get(qaKey(node.dataset.qaPath, node.dataset.qaId));
       if (before?.above) adjust += node.offsetHeight - before.height;
     }
     if (adjust) container.scrollTop += adjust;
@@ -3189,13 +2932,9 @@
       block.type === BLOCK_TYPE.AGENT_ACTIVITY ||
       block.type === BLOCK_TYPE.QA ||
       (block.type === BLOCK_TYPE.TABS &&
-        (block.tabs || []).some((tab) =>
-          (tab.blocks || []).some(hasActivityBlock),
-        )) ||
+        (block.tabs || []).some((tab) => (tab.blocks || []).some(hasActivityBlock))) ||
       (block.type === BLOCK_TYPE.CARDS &&
-        (block.items || []).some((item) =>
-          (item.blocks || []).some(hasActivityBlock),
-        ))
+        (block.items || []).some((item) => (item.blocks || []).some(hasActivityBlock)))
     );
   }
 
@@ -3217,16 +2956,10 @@
     bar.appendChild(item("音频", fmtSeconds(session.audio_seconds)));
     bar.appendChild(item("视频", fmtSeconds(session.video_seconds)));
     bar.appendChild(
-      item(
-        "转写",
-        `${session.transcript_chars ?? 0} 字 / ${session.transcript_items ?? 0} 段`,
-      ),
+      item("转写", `${session.transcript_chars ?? 0} 字 / ${session.transcript_items ?? 0} 段`),
     );
     bar.appendChild(
-      item(
-        "板书",
-        `${session.visual_chars ?? 0} 字 / ${session.visual_items ?? 0} 段`,
-      ),
+      item("板书", `${session.visual_chars ?? 0} 字 / ${session.visual_items ?? 0} 段`),
     );
     bar.appendChild(
       item(
@@ -3290,11 +3023,7 @@
   function formValues(form) {
     const values = {};
     for (const field of Array.from(form.elements)) {
-      if (
-        !field.name ||
-        field.type === FIELD_INPUT.SUBMIT ||
-        field.type === FIELD_INPUT.BUTTON
-      )
+      if (!field.name || field.type === FIELD_INPUT.SUBMIT || field.type === FIELD_INPUT.BUTTON)
         continue;
       if (field.type === FIELD_INPUT.CHECKBOX) {
         values[field.name] = field.checked;
@@ -3308,11 +3037,9 @@
         field.dataset.fieldType === SETTING_TYPE.INT ||
         field.dataset.fieldType === FIELD_INPUT.NUMBER
       ) {
-        values[field.name] =
-          field.value === "" ? null : Number.parseInt(field.value, 10);
+        values[field.name] = field.value === "" ? null : Number.parseInt(field.value, 10);
       } else if (field.dataset.fieldType === SETTING_TYPE.FLOAT) {
-        values[field.name] =
-          field.value === "" ? null : Number.parseFloat(field.value);
+        values[field.name] = field.value === "" ? null : Number.parseFloat(field.value);
       } else {
         values[field.name] = field.value;
       }
@@ -3338,22 +3065,17 @@
             item_id: itemId || null,
           }),
         });
-        if (result.message)
-          toast(result.message, result.ok ? TOAST_KIND.OK : TOAST_KIND.ERR);
+        if (result.message) toast(result.message, result.ok ? TOAST_KIND.OK : TOAST_KIND.ERR);
         if (result.open_page) {
-          await api(
-            `/api/ui/pages/${encodeURIComponent(result.open_page)}/open`,
-            {
-              method: "POST",
-            },
-          );
+          await api(`/api/ui/pages/${encodeURIComponent(result.open_page)}/open`, {
+            method: "POST",
+          });
         }
         return result;
       };
       if (!independent) return await changeNavigation(request);
       const result = await request();
-      if (result?.refresh !== false || result?.open_page)
-        await loadState({ quiet: true });
+      if (result?.refresh !== false || result?.open_page) await loadState({ quiet: true });
       return result;
     } catch (err) {
       toast(`操作失败：${err.message}`, TOAST_KIND.ERR);
@@ -3379,12 +3101,7 @@
     }
     const form = btn.closest("form");
     if (form) values = { ...formValues(form), ...values };
-    postAction(
-      action,
-      values,
-      btn.dataset.pageId || null,
-      btn.dataset.itemId || null,
-    );
+    postAction(action, values, btn.dataset.pageId || null, btn.dataset.itemId || null);
   });
 
   document.addEventListener("submit", (event) => {
@@ -3414,10 +3131,7 @@
       try {
         const data = JSON.parse(event.data);
         if (data.type === WS_MESSAGE_TYPE.REFRESH) scheduleRefresh();
-        else if (
-          data.type === WS_MESSAGE_TYPE.NOTIFY &&
-          data.topic === "qa.live"
-        ) {
+        else if (data.type === WS_MESSAGE_TYPE.NOTIFY && data.topic === "qa.live") {
           applyQaLive(data.payload || {});
         }
       } catch (_) {}

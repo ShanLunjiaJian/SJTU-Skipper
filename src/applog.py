@@ -24,7 +24,9 @@ def parse_log_level(value: LogLevel | str) -> LogLevel:
         return LogLevel(str(value).strip().upper())
     except ValueError as exc:
         names = ", ".join(level.value.lower() for level in LogLevel)
-        raise ValueError(f"unknown log level {value!r}; expected one of {names}") from exc
+        raise ValueError(
+            f"unknown log level {value!r}; expected one of {names}"
+        ) from exc
 
 
 _CONFIGURED = False

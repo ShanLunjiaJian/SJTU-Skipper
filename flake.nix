@@ -14,7 +14,6 @@
           ruff-format.enable = true;
           nixfmt.enable = true;
           taplo.enable = true;
-          prettier.enable = true;
           shfmt.enable = true;
         };
         settings.global.excludes = [
@@ -53,26 +52,25 @@
             "--no-errors-on-unmatched"
           ];
           includes = [
+            "*.js"
+            "*.jsx"
+            "*.mjs"
+            "*.cjs"
             "*.ts"
             "*.tsx"
             "*.mts"
             "*.cts"
+            "*.css"
+            "*.scss"
+            "*.html"
+            "*.htm"
+            "*.json"
+            "*.jsonc"
+            "*.md"
+            "*.yaml"
+            "*.yml"
           ];
         };
-        settings.formatter.prettier.excludes = [
-          "*.ts"
-          "*.tsx"
-          "*.mts"
-          "*.cts"
-        ];
-        settings.formatter.prettier.options = [
-          "--prose-wrap"
-          "never"
-          "--embedded-language-formatting"
-          "off"
-          "--tab-width"
-          "2"
-        ];
         settings.formatter.shfmt.options = [
           "-i"
           "2"

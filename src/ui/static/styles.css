@@ -26,14 +26,9 @@ body {
 }
 body {
   margin: 0;
-  background: radial-gradient(
-    1200px 700px at 20% -10%,
-    #16233a 0%,
-    var(--bg) 55%
-  );
+  background: radial-gradient(1200px 700px at 20% -10%, #16233a 0%, var(--bg) 55%);
   color: var(--text);
-  font-family:
-    "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   font-size: 14px;
   overflow: hidden;
 }
@@ -536,7 +531,7 @@ code {
   margin-left: auto;
   white-space: nowrap;
   color: var(--text);
-  font: 11px/1.5 var(--font-mono, monospace);
+  font: 11px / 1.5 var(--font-mono, monospace);
   font-variant-numeric: tabular-nums;
 }
 .execution-log {
@@ -594,7 +589,7 @@ code {
   position: relative;
   cursor: auto;
   list-style: none;
-  font: 12px/1.6 var(--font-mono, monospace);
+  font: 12px / 1.6 var(--font-mono, monospace);
 }
 summary.execution-header {
   cursor: pointer;
@@ -641,7 +636,7 @@ summary.execution-header:hover {
   overflow: hidden;
   white-space: pre-wrap;
   color: var(--muted);
-  font: 11px/1.6 var(--font-mono, monospace);
+  font: 11px / 1.6 var(--font-mono, monospace);
 }
 .execution-preview:empty,
 .execution-block[open] .execution-preview {
@@ -661,7 +656,7 @@ summary.execution-header:hover {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font: 12px/1.7 var(--font-mono, monospace);
+  font: 12px / 1.7 var(--font-mono, monospace);
 }
 .execution-body h4 {
   margin: 12px 0 5px;
@@ -1910,8 +1905,7 @@ kbd {
 body {
   background: #f8f9fa;
   font-family:
-    "Google Sans", "Roboto", "Helvetica Neue", Arial, "PingFang SC",
-    "Microsoft YaHei", sans-serif;
+    "Google Sans", "Roboto", "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 .topbar {

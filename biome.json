@@ -1,7 +1,29 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.6.5/schema.json",
   "files": {
-    "includes": ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
+    "includes": [
+      "**/*.js",
+      "**/*.jsx",
+      "**/*.mjs",
+      "**/*.cjs",
+      "**/*.ts",
+      "**/*.tsx",
+      "**/*.mts",
+      "**/*.cts",
+      "**/*.css",
+      "**/*.scss",
+      "**/*.html",
+      "**/*.htm",
+      "**/*.json",
+      "**/*.jsonc",
+      "**/*.md",
+      "**/*.yaml",
+      "**/*.yml",
+      "!!data",
+      "!!node_modules",
+      "!!src/ui/static/vendor",
+      "!**/*.min.js",
+      "!**/*.min.css"
+    ]
   },
   "formatter": {
     "enabled": true,
@@ -14,6 +36,7 @@
   },
   "linter": {
     "enabled": true,
+    "includes": ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"],
     "rules": {
       "preset": "recommended",
       "suspicious": {
@@ -23,6 +46,7 @@
   },
   "assist": {
     "enabled": true,
+    "includes": ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"],
     "actions": {
       "preset": "recommended"
     }
@@ -43,6 +67,17 @@
     "formatter": {
       "quoteStyle": "double",
       "lineWidth": 100
+    }
+  },
+  "html": {
+    "experimentalFullSupportEnabled": true,
+    "formatter": {
+      "enabled": true
+    }
+  },
+  "markdown": {
+    "formatter": {
+      "formatEmbeds": false
     }
   }
 }

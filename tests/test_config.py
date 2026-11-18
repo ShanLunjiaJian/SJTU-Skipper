@@ -51,7 +51,13 @@ def test_log_level_accepts_lowercase(tmp_path: Path, monkeypatch) -> None:
 
     config_file = tmp_path / "agent.toml"
     config_file.write_text(
-        "\n".join(["[agent]", f'data_dir = "{tmp_path / "toml-levels"}"', 'log_level = "warning"']),
+        "\n".join(
+            [
+                "[agent]",
+                f'data_dir = "{tmp_path / "toml-levels"}"',
+                'log_level = "warning"',
+            ]
+        ),
         encoding="utf-8",
     )
     monkeypatch.delenv("LECTURE_AGENT_LOG_LEVEL")
