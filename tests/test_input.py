@@ -484,7 +484,7 @@ class TestSourceManager:
 
         assert mgr.state is SourceState.IDLE
 
-    def test_continue_session_reuses_stream_session(self, monkeypatch):
+    def test_continue_session(self, monkeypatch):
         import plugins.input.sources as sources_mod
 
         class DummySource:
@@ -511,6 +511,7 @@ class TestSourceManager:
         hub.start_session(meta={"course_name": "高等数学"})
         sid = hub.current.session_id
 
+        hub.current.audio_gate.configure(1930.0, fail_closed=True)
         hub.current.audio_gate.release(90.0)
         hub.current.video_gate.release(75.0)
         enabled = lambda: False
@@ -525,6 +526,9 @@ class TestSourceManager:
             )
         )
         assert hub.current.audio_gate.released == 90.0
+        assert hub.current.audio_gate.limit == 1930.0
+        # A continuous STT window must fit after the next part starts.
+        assert hub.current.audio_gate.wait(90.0 + 960.0)
         assert hub.current.video_gate.released == 75.0
         assert mgr._current.audio_enabled is enabled
         assert hub.current.session_id == sid, "next period must reuse the session"
@@ -532,6 +536,7 @@ class TestSourceManager:
         mgr.start(SourceSpec(kind=SourceKind.RECORDING, url="y"))
         assert hub.current.session_id != sid, "a new class starts a new session"
         assert hub.current.audio_gate.released == 0.0
+        assert hub.current.audio_gate.limit == 0.0
         assert hub.current.video_gate.released == 0.0
         mgr.stop()
 
