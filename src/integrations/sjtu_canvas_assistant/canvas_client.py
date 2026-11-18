@@ -1,5 +1,3 @@
-"""Thin Canvas API client for SJTU Canvas."""
-
 from __future__ import annotations
 
 import json

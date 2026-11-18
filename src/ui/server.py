@@ -1,11 +1,10 @@
-"""FastAPI web adapter for the declarative UI and runtime."""
-
 from __future__ import annotations
 
 import asyncio
 import logging
 import threading
 from contextlib import asynccontextmanager
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
@@ -51,6 +50,11 @@ def _allowed_media_url(src: str) -> str:
     return src
 
 
+class WebSocketMessageType(StrEnum):
+    REFRESH = "refresh"
+    NOTIFY = "notify"
+
+
 class ActionRequest(BaseModel):
     action: str
     values: dict[str, Any] = Field(default_factory=dict)
@@ -65,8 +69,6 @@ class NavigationRequest(BaseModel):
 
 
 class _Broadcaster:
-    """Send UI refresh notifications to connected WebSockets."""
-
     def __init__(self) -> None:
         self._clients: set[WebSocket] = set()
         self._lock = threading.Lock()
@@ -84,10 +86,9 @@ class _Broadcaster:
             self._clients.discard(ws)
 
     def broadcast(self, reason: str = "") -> None:
-        self.send({"type": "refresh", "reason": reason})
+        self.send({"type": WebSocketMessageType.REFRESH, "reason": reason})
 
     def send(self, payload: dict[str, Any]) -> None:
-        """Send one JSON payload to every connected client."""
         if self._loop is None:
             return
         with self._lock:
@@ -169,7 +170,7 @@ def create_app(runtime: Runtime) -> FastAPI:
             "ui.notify",
             lambda event: broadcaster.send(
                 {
-                    "type": "notify",
+                    "type": WebSocketMessageType.NOTIFY,
                     "topic": event.get("topic", ""),
                     "payload": event.get("payload") or {},
                 }
@@ -186,7 +187,6 @@ def create_app(runtime: Runtime) -> FastAPI:
         finally:
             subscription.cancel()
             notify_subscription.cancel()
-            # Any subscription this adapter registered under "server" goes too.
             runtime.bus.remove_plugin("server")
             client: httpx2.AsyncClient | None = getattr(app.state, "media_client", None)
             if client is not None:
@@ -380,15 +380,15 @@ def create_app(runtime: Runtime) -> FastAPI:
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket) -> None:
         if auth_store.check(ws.cookies.get(AUTH_COOKIE, "")) is None:
-            # Same gate as the HTTP routes: no session, no socket.
             await ws.close(code=4401)
             return
         await ws.accept()
         broadcaster.add(ws)
         try:
-            await ws.send_json({"type": "refresh", "reason": "connected"})
+            await ws.send_json(
+                {"type": WebSocketMessageType.REFRESH, "reason": "connected"}
+            )
             while True:
-                # Keep the connection alive; clients may send pings.
                 await ws.receive_text()
         except WebSocketDisconnect:
             pass

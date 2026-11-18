@@ -1,6 +1,8 @@
-"""Tests for the VLM plugin: fusion, prompts, deduplication, worker, UI."""
-
 from __future__ import annotations
+
+from core.media import MediaKind, ProcessingMode
+from core.streams import TextSource
+from core.agent_types import AgentRole, FinishReason, GenerationErrorCode, IpcMethod
 
 import base64
 import json
@@ -39,10 +41,6 @@ from plugins.vlm.prompts import (
 from tests.support import FakeLLM, FakeSettings
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 JPEG_QUALITY = 95
 
 WIDTH = 640
@@ -50,15 +48,12 @@ HEIGHT = 360
 
 
 def _synthetic_frame(lines: bool = True, black: bool = False) -> np.ndarray:
-    """Create a synthetic grayscale frame (black background with white lines)."""
     if black:
         return np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
     arr = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
     if lines:
-        # White horizontal lines
         arr[100, 50:200] = 220
         arr[200, 100:300] = 200
-        # White diagonal
         for i in range(50):
             y = 150 + i
             x = 400 + i
@@ -68,7 +63,6 @@ def _synthetic_frame(lines: bool = True, black: bool = False) -> np.ndarray:
 
 
 def _to_jpeg(arr: np.ndarray) -> bytes:
-    """Encode a grayscale numpy array as JPEG bytes."""
     img = Image.fromarray(arr)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=JPEG_QUALITY)
@@ -85,7 +79,6 @@ def _make_frames(
     offset_px: int = 0,
     fade: float = 0.0,
 ) -> list[VideoFrame]:
-    """Create n synthetic frames with optional shifting and fading."""
     frames: list[VideoFrame] = []
     for i in range(n):
         arr = _synthetic_frame(lines=True)
@@ -100,11 +93,6 @@ def _make_frames(
         jpeg = _to_jpeg(arr)
         frames.append(_make_video_frame(jpeg, float(i), float(i + 1)))
     return frames
-
-
-# ---------------------------------------------------------------------------
-# Fusion tests
-# ---------------------------------------------------------------------------
 
 
 class TestFusion:
@@ -126,7 +114,7 @@ class TestFusion:
         assert isinstance(result, np.ndarray)
         assert result.size > 0
         assert result.ndim == 2
-        assert result.max() > 0  # white lines should survive
+        assert result.max() > 0
 
     def test_empty_frames_raises(self):
         with pytest.raises(ValueError, match="at least 3 frames"):
@@ -149,12 +137,11 @@ class TestFusion:
         assert result.shape[1] == WIDTH
 
     def test_black_frames_yield_dark_output(self):
-        """All-black frames should produce a dark fused result."""
         arr = _synthetic_frame(lines=False, black=True)
         jpeg = _to_jpeg(arr)
         frames = [_make_video_frame(jpeg, float(i), float(i + 1)) for i in range(10)]
         result = fuse_frames(frames)
-        assert np.mean(result) < 30  # mostly dark
+        assert np.mean(result) < 30
 
     def test_corrupt_frame_raises(self):
         """Corrupt JPEGs must surface an error, not fall back silently."""
@@ -167,11 +154,6 @@ class TestFusion:
         ]
         with pytest.raises(Exception):
             fuse_frames(frames)
-
-
-# ---------------------------------------------------------------------------
-# Prompt tests
-# ---------------------------------------------------------------------------
 
 
 class TestPrompts:
@@ -224,7 +206,6 @@ class TestPrompts:
 
 class TestTrivialBoardText:
     def test_blank_board_marker_is_not_trivial(self):
-        """The explicit blank marker itself should not be classified as trivial."""
         # It is handled separately (== comparison); is_trivial_board_text
         # is for hallucinated placeholder-only outputs.
         assert not is_trivial_board_text(BLANK_BOARD_MARKER)
@@ -256,14 +237,8 @@ class TestTrivialBoardText:
         assert is_trivial_board_text("   \n  ")
 
 
-# ---------------------------------------------------------------------------
-# Plugin / Worker tests
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture
 def vlm_ctx(tmp_path: Path) -> PluginContext:
-    """Build a minimal PluginContext with fake settings, LLM, and streams."""
     bus = EventBus()
     bus.start()
     hub = StreamHub(
@@ -303,6 +278,199 @@ def vlm_plugin(vlm_ctx: PluginContext) -> VlmPlugin:
     vlm_ctx.events.stop()
 
 
+def test_loop_gap_continues_recording(vlm_plugin, vlm_ctx):
+    from plugins.vlm.plugin import VLMRecognitionError
+
+    settings = vlm_ctx.service("settings")
+    settings.set("vlm.window_seconds", 5.0)
+    settings.set("vlm.cadence_recording_seconds", 5.0)
+    session = vlm_ctx.streams.current
+    session.meta["mode"] = ProcessingMode.FAST
+    for _ in range(10):
+        session.video.append_frame(_to_jpeg(_synthetic_frame()), duration=1.0)
+    session.input_done = True
+
+    def recognize(start, end, frames):
+        if start == 0:
+            raise VLMRecognitionError(
+                "Repeated board", code=GenerationErrorCode.THINKING_LOOP, attempts=3
+            )
+        return {"text": "后续板书 $x=2$"}
+
+    vlm_plugin._run_window = recognize
+    vlm_plugin._run_recording_session()
+    assert [item.start for item in session.visual] == [5.0]
+    assert not vlm_plugin._coverage(session).covers(MediaKind.VIDEO, 0, 5)
+    assert session.visual_progress.final
+    assert session.video_gate.released == 10
+    rows = [
+        json.loads(line) for line in vlm_plugin.visual_path().read_text().splitlines()
+    ]
+    assert rows[0]["error"]["code"] == GenerationErrorCode.THINKING_LOOP
+    assert "text" not in rows[0]
+    assert list(vlm_plugin._history) == ["后续板书 $x=2$"]
+
+
+def test_recording_eof_after_idle_finishes_tail(vlm_plugin, vlm_ctx):
+    settings = vlm_ctx.service("settings")
+    settings.set("vlm.window_seconds", 5.0)
+    settings.set("vlm.cadence_recording_seconds", 5.0)
+    session = vlm_ctx.streams.current
+    session.meta["mode"] = ProcessingMode.FAST
+    for _ in range(8):
+        session.video.append_frame(_to_jpeg(_synthetic_frame()), duration=1.0)
+    vlm_plugin._run_window = lambda start, end, frames: {"text": f"Board {start}"}
+    vlm_plugin._run_recording_session()
+    assert not session.visual_progress.final
+    session.input_done = True
+    vlm_plugin._run_recording_session()
+    assert session.visual_progress.final
+    assert session.visual_progress.before == 8.0
+    assert [item.end for item in session.visual] == [5.0, 8.0]
+
+
+@pytest.mark.parametrize(
+    "code,attempts,max_attempts,recoverable",
+    [
+        (GenerationErrorCode.THINKING_LOOP, 3, 3, True),
+        (GenerationErrorCode.THINKING_LOOP, 2, 3, False),
+        (GenerationErrorCode.THINKING_LOOP, 2, 2, True),
+        ("provider_error", 3, 3, False),
+    ],
+)
+def test_structured_error_classification(
+    vlm_plugin, vlm_ctx, code, attempts, max_attempts, recoverable
+):
+    from plugins.vlm.plugin import VLMRecognitionError
+
+    vlm_ctx.service("settings").set("vlm.loop_max_attempts", max_attempts)
+
+    vlm_ctx.service("llm").script = [
+        {
+            "content": "Failed partial board",
+            "finish_reason": FinishReason.ERROR,
+            "error": {
+                "code": code,
+                "attempts": attempts,
+                "message": "Recognition failed",
+            },
+        }
+    ]
+    with pytest.raises(RuntimeError, match="Recognition failed") as caught:
+        vlm_plugin._ask_image(b"jpeg", "00:00")
+    assert isinstance(caught.value, VLMRecognitionError) is recoverable
+    if recoverable:
+        assert caught.value.code is code
+        assert caught.value.attempts == attempts
+    assert not vlm_plugin._history
+    assert not vlm_ctx.streams.current.visual.items_since(0)
+
+
+def test_cancelled_loop_window_has_no_gap(vlm_plugin, vlm_ctx, monkeypatch):
+    session = vlm_ctx.streams.current
+    vlm_ctx.service("settings").set("vlm.fusion", False)
+
+    def generate(method, **params):
+        params["on_sent"]()
+        vlm_plugin.cancel(session.session_id)
+        return {
+            "content": "Failed partial board",
+            "finish_reason": FinishReason.ERROR,
+            "error": {
+                "code": GenerationErrorCode.THINKING_LOOP,
+                "attempts": 3,
+                "message": "Repeated board",
+            },
+        }
+
+    monkeypatch.setattr(vlm_ctx.service("llm"), "call", generate)
+    with pytest.raises(RuntimeError, match="VLM session cancelled"):
+        vlm_plugin.process_window(0.0, 3.0, _make_frames(3))
+    assert not vlm_plugin.visual_path().exists()
+    assert not session.visual.items_since(0)
+    assert not vlm_plugin._coverage(session).covers(MediaKind.VIDEO, 0.0, 3.0)
+    assert not vlm_plugin._history
+
+
+def test_gap_persistence_failure_propagates(vlm_plugin, vlm_ctx, monkeypatch):
+    from plugins.vlm.plugin import VLMRecognitionError
+
+    session = vlm_ctx.streams.current
+    path = vlm_plugin.visual_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.mkdir()
+
+    def recognize(start, end, frames):
+        raise VLMRecognitionError(
+            "Repeated board", code=GenerationErrorCode.THINKING_LOOP, attempts=3
+        )
+
+    monkeypatch.setattr(vlm_plugin, "_run_window", recognize)
+    with pytest.raises(IsADirectoryError):
+        vlm_plugin.process_window(0.0, 3.0, _make_frames(3))
+    assert not session.visual.items_since(0)
+    assert session.video_gate.released == 0.0
+    assert vlm_plugin.status()["cursor"] == 0.0
+    assert not vlm_plugin._coverage(session).covers(MediaKind.VIDEO, 0.0, 3.0)
+
+
+def test_live_gap_continues_to_success(vlm_plugin, vlm_ctx):
+    settings = vlm_ctx.service("settings")
+    settings.set("vlm.window_seconds", 5.0)
+    settings.set("vlm.cadence_live_seconds", 5.0)
+    settings.set("vlm.fusion", False)
+    settings.set("vlm.dedupe_threshold", 0.0)
+    session = vlm_ctx.streams.current
+    session.video_gate.configure(60.0)
+    for _ in range(10):
+        session.video.append_frame(_to_jpeg(_synthetic_frame()), duration=1.0)
+    vlm_ctx.service("llm").script = [
+        {
+            "content": "Failed partial board",
+            "finish_reason": FinishReason.ERROR,
+            "error": {
+                "code": GenerationErrorCode.THINKING_LOOP,
+                "message": "Repeated board",
+                "attempts": 3,
+            },
+        },
+        {"content": "Complete next board", "finish_reason": FinishReason.STOP},
+    ]
+    failures = []
+    segments = []
+    vlm_ctx.events.on("input.error", lambda event: failures.append(dict(event.payload)))
+    vlm_ctx.events.on("vlm.segment", lambda event: segments.append(dict(event.payload)))
+    vlm_plugin._process_next_window()
+    assert vlm_plugin.status()["cursor"] == 5.0
+    assert session.video_gate.released == 5.0
+    assert not session.visual.items_since(0)
+    assert not vlm_plugin._history
+    assert not vlm_plugin._coverage(session).covers(MediaKind.VIDEO, 0.0, 5.0)
+    vlm_plugin._process_next_window()
+    session.input_done = True
+    vlm_plugin._process_next_window()
+    vlm_ctx.events.flush(timeout=2.0)
+    assert [item.start for item in session.visual] == [5.0]
+    assert session.visual_progress.final
+    assert session.video_gate.released == 10.0
+    assert list(vlm_plugin._history) == ["Complete next board"]
+    assert failures == []
+    assert [segment["start"] for segment in segments] == [5.0]
+    rows = [
+        json.loads(line) for line in vlm_plugin.visual_path().read_text().splitlines()
+    ]
+    assert rows[0] == {
+        "start": 0.0,
+        "end": 5.0,
+        "error": {
+            "code": GenerationErrorCode.THINKING_LOOP,
+            "message": "Repeated board",
+            "attempts": 3,
+        },
+    }
+    assert rows[1]["text"] == "Complete next board"
+
+
 class TestVlmPlugin:
     def test_recording_session_commits_windows_in_order(
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
@@ -315,7 +483,7 @@ class TestVlmPlugin:
         settings.set("vlm.fusion", False)
 
         session = vlm_ctx.streams.current
-        session.meta["mode"] = "fast"
+        session.meta["mode"] = ProcessingMode.FAST
         session.video_gate.configure(60.0)
         for index in range(10):
             session.video.append_frame(_to_jpeg(_synthetic_frame()), duration=1.0)
@@ -351,7 +519,7 @@ class TestVlmPlugin:
         settings.set("vlm.fusion", False)
 
         session = vlm_ctx.streams.current
-        session.meta["mode"] = "fast"
+        session.meta["mode"] = ProcessingMode.FAST
         jpeg = _to_jpeg(_synthetic_frame())
         for _ in range(1300):
             session.video.append_frame(jpeg, duration=1.0)
@@ -389,8 +557,9 @@ class TestVlmPlugin:
         plugin = VlmPlugin()
         plugin.setup(vlm_ctx)
         session = vlm_ctx.streams.current
-        session.meta["mode"] = "fast"
+        session.meta["mode"] = ProcessingMode.FAST
         session.ended_at = 1.0
+        session.visual_progress.final = True
         plugin._recording_sessions.add(session.session_id)
 
         entered = threading.Event()
@@ -418,20 +587,17 @@ class TestVlmPlugin:
     def test_process_window_with_fake_llm(
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
     ):
-        """process_window should call LLM, emit vlm.segment, and append visual."""
-        # Setup settings
         settings = vlm_ctx.service("settings")
         settings.set("vlm.enabled", True)
         settings.set("vlm.model", "deepseek-flash")
-        settings.set("vlm.dedupe_threshold", 0.0)  # disable dedup for test
-        settings.set("vlm.fusion", False)  # skip fusion for simplicity
+        settings.set("vlm.dedupe_threshold", 0.0)
+        settings.set("vlm.fusion", False)
 
-        # Inject scripted LLM response
         fake_llm = vlm_ctx.service("llm")
         fake_llm.script = [
             {
                 "content": "定理 1：设 $f$ 在 $D$ 上全纯。",
-                "finish_reason": "stop",
+                "finish_reason": FinishReason.STOP,
                 "model": "board-model",
                 "usage": {
                     "prompt_tokens": 10,
@@ -441,12 +607,10 @@ class TestVlmPlugin:
             }
         ]
 
-        # Create synthetic frame
         arr = _synthetic_frame()
         jpeg = _to_jpeg(arr)
         frames = [_make_video_frame(jpeg, 10.0, 11.0)]
 
-        # Listen for vlm.segment
         segments: list[dict] = []
 
         def on_segment(event):
@@ -458,7 +622,6 @@ class TestVlmPlugin:
         vlm_ctx.events.flush(timeout=2.0)
 
         assert result.get("ok") is True
-        # Check a visual item was appended
         visual = vlm_ctx.streams.current.visual
         assert len(visual) >= 1
         item = visual[-1]
@@ -482,12 +645,11 @@ class TestVlmPlugin:
         assert "定理 1" in records[-1]["text"]
 
         method, last_call = fake_llm.calls[-1]
-        assert method == "generate"
-        assert last_call["role"] == "board_recognition"
+        assert method == IpcMethod.GENERATE
+        assert last_call["role"] == AgentRole.BOARD_RECOGNITION
         assert "model" not in last_call
         assert "extra" not in last_call
 
-        # Check vlm.segment event
         assert len(segments) >= 1
         seg = segments[0]
         assert seg["start"] == 10.0
@@ -511,13 +673,11 @@ class TestVlmPlugin:
         result = vlm_plugin.process_window(5.0, 6.0, frames)
 
         assert result.get("ok") is True
-        # No new visual items for blank board
         assert len(vlm_ctx.streams.current.visual) == visual_before
 
     def test_process_window_skips_placeholder_only(
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
     ):
-        """Output consisting solely of ![...]() placeholders must be skipped."""
         settings = vlm_ctx.service("settings")
         settings.set("vlm.dedupe_threshold", 0.0)
         settings.set("vlm.fusion", False)
@@ -539,7 +699,7 @@ class TestVlmPlugin:
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
     ):
         settings = vlm_ctx.service("settings")
-        settings.set("vlm.dedupe_threshold", 0.5)  # low threshold to catch
+        settings.set("vlm.dedupe_threshold", 0.5)
         settings.set("vlm.fusion", False)
 
         same_text = "定理 2.1 设 $G$ 是一个群。"
@@ -549,17 +709,13 @@ class TestVlmPlugin:
         arr = _synthetic_frame()
         jpeg = _to_jpeg(arr)
 
-        # First window
         frames1 = [_make_video_frame(jpeg, 0.0, 1.0)]
         vlm_plugin.process_window(0.0, 1.0, frames1)
 
-        # Second window with identical text
         frames2 = [_make_video_frame(jpeg, 1.0, 2.0)]
         result2 = vlm_plugin.process_window(1.0, 2.0, frames2)
 
-        # Second should be skipped
         assert result2.get("skipped") is True
-        # Only one visual item
         visual = vlm_ctx.streams.current.visual
         assert len(visual) == 1
 
@@ -587,13 +743,15 @@ class TestVlmPlugin:
         settings = vlm_ctx.service("settings")
         settings.set("vlm.fusion", False)
         fake_llm = vlm_ctx.service("llm")
-        fake_llm.script = [{"content": "Incomplete formula", "finish_reason": "length"}]
+        fake_llm.script = [
+            {"content": "Incomplete formula", "finish_reason": FinishReason.LENGTH}
+        ]
         session = vlm_ctx.streams.current
         frames = _make_frames(3)
         with pytest.raises(RuntimeError, match="transcription is incomplete"):
             vlm_plugin.process_window(0.0, 3.0, frames)
         assert not session.visual.items_since(0)
-        assert not vlm_plugin._coverage(session).covers("video", 0.0, 3.0)
+        assert not vlm_plugin._coverage(session).covers(MediaKind.VIDEO, 0.0, 3.0)
 
     @pytest.mark.parametrize("cancel_before_sent", [False, True])
     def test_cancel_during_submission(
@@ -605,7 +763,7 @@ class TestVlmPlugin:
         monkeypatch.setattr(fake_llm, "cancel", cancelled.append)
 
         def generate(method, **params):
-            assert method == "generate"
+            assert method == IpcMethod.GENERATE
             if cancel_before_sent:
                 vlm_plugin.cancel(session.session_id)
                 assert not cancelled
@@ -613,7 +771,7 @@ class TestVlmPlugin:
             if not cancel_before_sent:
                 vlm_plugin.cancel(session.session_id)
             assert cancelled == [params["session_id"]]
-            return {"content": "Cancelled board", "finish_reason": "stop"}
+            return {"content": "Cancelled board", "finish_reason": FinishReason.STOP}
 
         monkeypatch.setattr(fake_llm, "call", generate)
         with pytest.raises(RuntimeError, match="VLM session cancelled"):
@@ -648,7 +806,6 @@ class TestVlmPlugin:
         settings.set("vlm.dedupe_threshold", 0.0)
         settings.set("vlm.fusion", False)
 
-        # Make the FakeLLM raise
         fake_llm = vlm_ctx.service("llm")
 
         def _fail(_kw):
@@ -691,7 +848,7 @@ class TestVlmPlugin:
         assert not vlm_plugin._cancelled_sessions
 
     def test_worker_failure_releases_input(self, vlm_plugin, vlm_ctx):
-        session = vlm_ctx.streams.start_session(meta={"mode": "fast"})
+        session = vlm_ctx.streams.start_session(meta={"mode": ProcessingMode.FAST})
         session.input_done = True
         session.video_gate.configure(1.0)
         failures = []
@@ -713,11 +870,6 @@ class TestVlmPlugin:
         assert "model unavailable" in failures[0]["message"]
 
 
-# ---------------------------------------------------------------------------
-# UI state tests
-# ---------------------------------------------------------------------------
-
-
 class TestUiState:
     def test_render_with_visual_items(
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
@@ -727,20 +879,14 @@ class TestUiState:
             "定理 1：测试内容。",
             start=0.0,
             end=10.0,
-            source="vlm",
+            source=TextSource.VLM,
             meta={"image_path": "/tmp/test.jpg", "model": "test"},
         )
         page = vlm_ctx.ui._pages.get("vlm:board")
         blocks = vlm_ctx.ui._render(page.render, "test")
-        # Should contain markdown with the theorem text
         markdown_blocks = [b for b in blocks if b.get("type") == "markdown"]
         assert len(markdown_blocks) >= 1
         assert "定理 1" in markdown_blocks[0]["text"]
-
-
-# ---------------------------------------------------------------------------
-# Helper tests
-# ---------------------------------------------------------------------------
 
 
 class TestHelpers:
@@ -759,7 +905,7 @@ def test_prepare_overlaps_recognition(vlm_plugin, vlm_ctx, monkeypatch):
     settings.set("vlm.window_seconds", 5.0)
     settings.set("vlm.cadence_recording_seconds", 5.0)
     session = vlm_ctx.streams.current
-    session.meta["mode"] = "fast"
+    session.meta["mode"] = ProcessingMode.FAST
     session.video_gate.configure(0)
     for _ in range(10):
         session.video.append_frame(_to_jpeg(_synthetic_frame()), duration=1)
@@ -811,7 +957,7 @@ def test_prepare_overlaps_recognition(vlm_plugin, vlm_ctx, monkeypatch):
 def test_idle_session_does_not_block_recording():
     hub = StreamHub()
     old = hub.current
-    current = hub.start_session(meta={"mode": "recording"})
+    current = hub.start_session(meta={"mode": ProcessingMode.FAST})
     plugin = VlmPlugin()
     plugin._ctx = SimpleNamespace(streams=hub)
     plugin._sessions = {old.session_id: old, current.session_id: current}

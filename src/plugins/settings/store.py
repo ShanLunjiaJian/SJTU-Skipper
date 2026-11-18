@@ -43,9 +43,6 @@ class SettingsStore:
         self._values: dict[str, Any] = {}
         self._load()
 
-    # ------------------------------------------------------------------
-    # Reading
-    # ------------------------------------------------------------------
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
             if key in self._values:
@@ -71,11 +68,7 @@ class SettingsStore:
         with self._lock:
             return len(self._values)
 
-    # ------------------------------------------------------------------
-    # Writing
-    # ------------------------------------------------------------------
     def set(self, key: str, value: Any) -> Any:
-        """Persist one value and return it."""
 
         with self._lock:
             if key in self._values and self._values[key] == value:
@@ -108,9 +101,6 @@ class SettingsStore:
             self._values = updated
             return True
 
-    # ------------------------------------------------------------------
-    # Loading / saving
-    # ------------------------------------------------------------------
     def _load(self) -> None:
         if not self.path.exists():
             self._values = {}
@@ -207,9 +197,6 @@ class SettingsService:
         self._lock = threading.RLock()
         self._sections: dict[str, tuple[str, Callable[[], list[dict[str, Any]]]]] = {}
 
-    # ------------------------------------------------------------------
-    # Introspection
-    # ------------------------------------------------------------------
     def specs(self) -> list[SettingsSpec]:
         with self._lock:
             return sorted(self._specs.values(), key=lambda s: (s.group, s.order, s.key))
@@ -243,9 +230,6 @@ class SettingsService:
         with self._lock:
             return list(self._sections.values())
 
-    # ------------------------------------------------------------------
-    # Listener plumbing (plugin-internal: UI refresh, toolbox sync, ...)
-    # ------------------------------------------------------------------
     def _add_listener(self, listener: Listener) -> Listener:
         with self._lock:
             self._listeners.append(listener)
@@ -273,9 +257,6 @@ class SettingsService:
         except Exception:  # noqa: BLE001 - bus must not break saving
             self._logger.exception("failed to emit %s", CHANGED_EVENT)
 
-    # ------------------------------------------------------------------
-    # Registration
-    # ------------------------------------------------------------------
     def register(self, spec: SettingsSpec, *, plugin_id: str = "") -> SettingsSpec:
         """Declare a setting (idempotent per key) and return the spec.
 
@@ -344,9 +325,6 @@ class SettingsService:
             self._notify("unregister:" + ",".join(removed))
         return removed
 
-    # ------------------------------------------------------------------
-    # Values
-    # ------------------------------------------------------------------
     def get(self, key: str, default: Any = None) -> Any:
         """Return the effective value (stored > spec default > ``default``)."""
 
@@ -415,7 +393,6 @@ class SettingsService:
         return dict(pending)
 
     def reset(self, key: str) -> Any:
-        """Remove the stored value (back to the spec default) and announce it."""
 
         old = self.get(key)
         existed = self._store.delete(key)
@@ -426,7 +403,6 @@ class SettingsService:
         return new
 
     def all(self, *, public: bool = False) -> dict[str, Any]:
-        """Return every declared or stored setting as a plain dict."""
 
         out: dict[str, Any] = {}
         for key in self._all_keys():

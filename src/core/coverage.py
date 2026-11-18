@@ -15,8 +15,10 @@ import threading
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .media import MediaKind
+
 Interval = tuple[float, float]
-KINDS = ("audio", "video")
+KINDS = tuple(MediaKind)
 
 _EPS = 1e-6
 
@@ -129,10 +131,9 @@ class CoverageStore:
         self.session_id = str(session_id)
         self.path = Path(data_dir) / "sessions" / self.session_id / "coverage.json"
         self._lock = threading.RLock()
-        self._data: dict[str, Coverage] = {}
+        self._data: dict[MediaKind, Coverage] = {}
         self._load()
 
-    # -- io ------------------------------------------------------------
     def _load(self) -> None:
         try:
             raw = json.loads(self.path.read_text("utf-8"))
@@ -140,10 +141,10 @@ class CoverageStore:
             raw = {}
         if not isinstance(raw, dict):
             raw = {}
-        self._data = {kind: Coverage.from_any(raw.get(kind)) for kind in KINDS}
+        self._data = {kind: Coverage.from_any(raw.get(kind.value)) for kind in KINDS}
 
     def _save(self) -> None:
-        payload = {kind: self._data[kind].to_list() for kind in KINDS}
+        payload = {kind.value: self._data[kind].to_list() for kind in KINDS}
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".json.tmp")
@@ -153,12 +154,11 @@ class CoverageStore:
             # Coverage is an optimisation; never break the pipeline over it.
             pass
 
-    # -- api -----------------------------------------------------------
-    def mark(self, kind: str, start: float, end: float) -> None:
+    def mark(self, kind: MediaKind, start: float, end: float) -> None:
         """Record that ``[start, end)`` of *kind* has been processed."""
 
-        if kind not in self._data:
-            return
+        if not isinstance(kind, MediaKind):
+            raise TypeError("kind must be a MediaKind")
         if float(end) <= float(start):
             return
         with self._lock:
@@ -167,26 +167,34 @@ class CoverageStore:
             if self._data[kind].total() > before + _EPS:
                 self._save()
 
-    def coverage(self, kind: str) -> Coverage:
+    def coverage(self, kind: MediaKind) -> Coverage:
+        if not isinstance(kind, MediaKind):
+            raise TypeError("kind must be a MediaKind")
         with self._lock:
             return Coverage(self._data[kind].intervals)
 
-    def covered_seconds(self, kind: str) -> float:
+    def covered_seconds(self, kind: MediaKind) -> float:
+        if not isinstance(kind, MediaKind):
+            raise TypeError("kind must be a MediaKind")
         with self._lock:
             return self._data[kind].total()
 
-    def gaps(self, kind: str, start: float, end: float) -> list[Interval]:
+    def gaps(self, kind: MediaKind, start: float, end: float) -> list[Interval]:
+        if not isinstance(kind, MediaKind):
+            raise TypeError("kind must be a MediaKind")
         with self._lock:
             return self._data[kind].gaps(start, end)
 
-    def covers(self, kind: str, start: float, end: float) -> bool:
+    def covers(self, kind: MediaKind, start: float, end: float) -> bool:
+        if not isinstance(kind, MediaKind):
+            raise TypeError("kind must be a MediaKind")
         with self._lock:
             return self._data[kind].covers(start, end)
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         with self._lock:
             return {
-                kind: {
+                kind.value: {
                     "intervals": self._data[kind].to_list(),
                     "seconds": self._data[kind].total(),
                 }
@@ -203,7 +211,7 @@ __all__ = [
 ]
 
 
-def skip_coverage(meta: Mapping[str, Any] | None, kind: str) -> Coverage:
+def skip_coverage(meta: Mapping[str, Any] | None, kind: MediaKind) -> Coverage:
     """Ranges a *fill* session must not process again.
 
     The input plugin puts them on the session meta when it starts a
@@ -211,7 +219,9 @@ def skip_coverage(meta: Mapping[str, Any] | None, kind: str) -> Coverage:
     recording's media seconds.
     """
 
+    if not isinstance(kind, MediaKind):
+        raise TypeError("kind must be a MediaKind")
     raw = (meta or {}).get("skip_ranges")
     if not isinstance(raw, Mapping):
         return Coverage()
-    return Coverage.from_any(raw.get(kind))
+    return Coverage.from_any(raw.get(kind.value))

@@ -1,5 +1,3 @@
-"""The built-in ``settings`` plugin: store, service, form UI."""
-
 from __future__ import annotations
 
 import json
@@ -8,7 +6,8 @@ import threading
 from typing import Any, Mapping
 
 from core.plugin import Plugin, PluginContext
-from core.settings_spec import SECRET_MASK, SettingsSpec
+from core.settings_spec import SECRET_MASK, SettingType, SettingsSpec
+from core.ui import BlockType, FormInputType
 from .store import SettingsService, SettingsStore
 
 logger = logging.getLogger("lecture_agent.plugins.settings")
@@ -18,22 +17,20 @@ PAGE_ID = "settings:main"
 SAVE_ACTION = "settings.save"
 CLEAR_SECRET_ACTION = "settings.clear_secret"
 
-_INPUT_KIND = {
-    "string": "text",
-    "text": "textarea",
-    "int": "number",
-    "float": "number",
-    "bool": "checkbox",
-    "select": "select",
-    "secret": "password",
-    "json": "textarea",
-    "action": "button",
+_INPUT_KIND: dict[SettingType, FormInputType] = {
+    SettingType.STRING: FormInputType.TEXT,
+    SettingType.TEXT: FormInputType.TEXTAREA,
+    SettingType.INT: FormInputType.NUMBER,
+    SettingType.FLOAT: FormInputType.NUMBER,
+    SettingType.BOOL: FormInputType.CHECKBOX,
+    SettingType.SELECT: FormInputType.SELECT,
+    SettingType.SECRET: FormInputType.PASSWORD,
+    SettingType.JSON: FormInputType.TEXTAREA,
+    SettingType.ACTION: FormInputType.BUTTON,
 }
 
 
 class SettingsPlugin(Plugin):
-    """Registers the ``settings`` service and renders the settings UI."""
-
     id = "settings"
     requires: tuple[str, ...] = ()
     provides: tuple[str, ...] = ("settings",)
@@ -51,9 +48,6 @@ class SettingsPlugin(Plugin):
         self._clear_action_added = False
         self._command_added = False
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
         self.store = SettingsStore(ctx.data_dir / "settings.json", logger_=ctx.logger)
@@ -130,9 +124,6 @@ class SettingsPlugin(Plugin):
         with self._lock:
             self._items.clear()
 
-    # ------------------------------------------------------------------
-    # Toolbox / grouping
-    # ------------------------------------------------------------------
     def _on_settings_changed(self, reason: str) -> None:
         ctx = self.ctx
         if ctx is not None:
@@ -161,16 +152,13 @@ class SettingsPlugin(Plugin):
             grouped.setdefault(spec.group, []).append(spec)
         return list(grouped.items())
 
-    # ------------------------------------------------------------------
-    # Rendering
-    # ------------------------------------------------------------------
     def _render_page(self) -> list[dict[str, Any]]:
         groups = self._grouped_specs()
         sections = self.service.sections() if self.service is not None else []
         if not groups and not sections:
             return [
                 {
-                    "type": "markdown",
+                    "type": BlockType.MARKDOWN,
                     "text": ("### 设置\n\n暂无设置项。"),
                 }
             ]
@@ -179,7 +167,7 @@ class SettingsPlugin(Plugin):
             blocks: list[dict[str, Any]] = []
             note = next((spec.group_note for spec in specs if spec.group_note), "")
             if note:
-                blocks.append({"type": "markdown", "text": note})
+                blocks.append({"type": BlockType.MARKDOWN, "text": note})
             blocks.extend(self._form_blocks(specs, group))
             tabs.append({"title": group or "General", "blocks": blocks})
         for title, render in sections:
@@ -187,16 +175,18 @@ class SettingsPlugin(Plugin):
                 blocks = render()
             except Exception:
                 logger.exception("failed to render settings section %s", title)
-                blocks = [{"type": "markdown", "text": "配置读取失败．请刷新后重试．"}]
+                blocks = [
+                    {"type": BlockType.MARKDOWN, "text": "配置读取失败．请刷新后重试．"}
+                ]
             tabs.append({"title": title, "blocks": blocks})
-        return [{"type": "tabs", "id": "settings.groups", "tabs": tabs}]
+        return [{"type": BlockType.TABS, "id": "settings.groups", "tabs": tabs}]
 
     def _form_blocks(
         self, specs: list[SettingsSpec], group: str
     ) -> list[dict[str, Any]]:
         return [
             {
-                "type": "form",
+                "type": BlockType.FORM,
                 "title": group or "General",
                 "fields": [self._field(spec) for spec in specs],
                 "submit": {"label": "保存", "action": SAVE_ACTION},
@@ -213,7 +203,7 @@ class SettingsPlugin(Plugin):
             "key": spec.key,
             "label": spec.label,
             "type": spec.type,
-            "input": _INPUT_KIND.get(spec.type, "text"),
+            "input": _INPUT_KIND[spec.type],
             # Secrets are write-only: never send the real value or a fake
             # six-character mask to the browser.
             "value": "" if spec.secret else value,
@@ -230,7 +220,7 @@ class SettingsPlugin(Plugin):
             "readonly": bool(spec.readonly),
             "order": spec.order,
         }
-        if spec.type == "action":
+        if spec.type == SettingType.ACTION:
             base.update(
                 {
                     "action": spec.action,
@@ -246,22 +236,18 @@ class SettingsPlugin(Plugin):
 
         if spec.secret:
             return ""
-        if spec.type == "json":
+        if spec.type == SettingType.JSON:
             if raw is None:
                 return ""
             try:
                 return json.dumps(raw, ensure_ascii=False, indent=2)
             except (TypeError, ValueError):  # pragma: no cover - defensive
                 return str(raw)
-        if spec.type == "bool":
+        if spec.type == SettingType.BOOL:
             return bool(raw)
         return raw if raw is not None else ""
 
-    # ------------------------------------------------------------------
-    # Actions
-    # ------------------------------------------------------------------
     def _handle_clear_secret(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Explicitly remove one configured secret."""
 
         service = self.service
         if service is None:
@@ -311,7 +297,7 @@ class SettingsPlugin(Plugin):
                 errors.append("模型配置必须通过「保存配置」保存")
                 continue
             spec = service.get_spec(key)
-            if spec is not None and (spec.readonly or spec.type == "action"):
+            if spec is not None and (spec.readonly or spec.type == SettingType.ACTION):
                 continue
             if spec is not None and spec.secret:
                 # Secrets are write-only and empty means "keep existing".

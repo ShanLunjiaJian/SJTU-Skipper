@@ -3,10 +3,6 @@
 Given a list of JPEG-encoded video frames, produces a single fused
 grayscale image that suppresses teacher occlusion, camera PTZ drift
 ghosting, and transient eraser lines while preserving persistent chalk.
-
-The original algorithm lives in ``legacy/blackboard_lecture_agent.py``
-(:func:`extract_registered_persistence_fusion`).  This module adapts it
-to accept decoded frames and exposes tuneable parameters.
 """
 
 from __future__ import annotations
@@ -49,8 +45,7 @@ def fuse_frames(
         the middle frame before fusion.
     min_persistence:
         Minimum number of frames a chalk pixel must appear in to be
-        considered persistent.  Defaults to 5, matching the original
-        picture_parser pipeline.
+        considered persistent.
 
     Returns
     -------
@@ -74,11 +69,6 @@ def fuse_frames(
     )
 
 
-# ---------------------------------------------------------------------------
-# Implementation
-# ---------------------------------------------------------------------------
-
-
 def _fuse_impl(
     frames: Sequence[VideoFrame],
     *,
@@ -87,7 +77,6 @@ def _fuse_impl(
     align: bool,
     min_persistence: int | None,
 ) -> np.ndarray:
-    # Decode
     decoded = [_decode_jpeg(f.data) for f in frames]
     decoded = [_apply_crop(d, crop) for d in decoded]
     decoded = [_resize_width(d, max_width) for d in decoded]
@@ -95,14 +84,11 @@ def _fuse_impl(
     bh, bw = decoded[0].shape
     board_frames = np.stack(decoded, axis=0).astype(np.float32)
 
-    # --- 1. Optional FFT alignment ---
     if align:
         board_frames = _fft_align(board_frames)
 
-    # --- 2. Background (30th percentile) ---
     bg = np.percentile(board_frames, 30, axis=0).astype(np.float32)
 
-    # --- 3. Temporal activity ---
     temp_diff = np.abs(board_frames[1:] - board_frames[:-1])
     temp_diff = np.pad(temp_diff, ((1, 0), (0, 0), (0, 0)), mode="edge")
     d_pad = np.pad(temp_diff, ((2, 2), (0, 0), (0, 0)), mode="edge")
@@ -111,17 +97,14 @@ def _fuse_impl(
     ) / 5.0
     is_static = mov_activity < 12.0
 
-    # --- 4. Spatial gradient ---
     grad_y = np.abs(board_frames[:, 1:, :] - board_frames[:, :-1, :])
     grad_y = np.pad(grad_y, ((0, 0), (1, 0), (0, 0)))
     grad_x = np.abs(board_frames[:, :, 1:] - board_frames[:, :, :-1])
     grad_x = np.pad(grad_x, ((0, 0), (0, 0), (1, 0)))
     spatial_grad = grad_y + grad_x
 
-    # --- 5. Chalk candidate mask ---
     is_chalk = (board_frames - bg > 22.0) & (spatial_grad > 14.0) & is_static
 
-    # --- 6. Temporal persistence & monotonic edge ---
     persistence = min_persistence if min_persistence is not None else 5
     total_count = np.sum(is_chalk, axis=0)
     cond_persistent = total_count >= persistence
@@ -129,7 +112,6 @@ def _fuse_impl(
     cond_fresh_erase = is_chalk[0] & is_chalk[1] & is_chalk[2]
     valid_chalk = cond_persistent | cond_fresh_write | cond_fresh_erase
 
-    # --- 7. robust median fusion ---
     # np.nanmedian is very slow on full-resolution stacks; sorting once and
     # taking the two middle valid values gives exactly the same result.
     counts = np.sum(is_chalk, axis=0)
@@ -147,13 +129,7 @@ def _fuse_impl(
     return fused
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _decode_jpeg(data: bytes) -> np.ndarray:
-    """Decode JPEG bytes to a grayscale numpy array."""
     img = Image.open(io_bytes(data))
     if img.mode != "L":
         img = img.convert("L")
@@ -222,9 +198,7 @@ def _fft_align(frames: np.ndarray, *, estimate_width: int = 640) -> np.ndarray:
     return aligned
 
 
-# ---------------------------------------------------------------------------
 # Small BytesIO wrapper (avoids top-level PIL import side-effects)
-# ---------------------------------------------------------------------------
 import io as _io
 
 

@@ -1,5 +1,87 @@
 import { Effort, type, type Type } from "@oh-my-pi/pi-ai";
 
+export enum AgentRole {
+  DEFAULT = "default",
+  BOARD_RECOGNITION = "board_recognition",
+  NOTE_CHUNK = "note_chunk",
+  NOTE_WRITER = "note_writer",
+  NOTE_REVIEW = "note_review",
+  NOTE_REVISION = "note_revision",
+  ASK_INSTANT = "ask_instant",
+  ASK_RESEARCH = "ask_research",
+  COMPACTION = "compaction",
+}
+
+export enum IpcMethod {
+  PING = "ping",
+  INFO = "info",
+  CONFIGURE = "configure",
+  GENERATE = "generate",
+  CREATE_SESSION = "create_session",
+  REOPEN_SESSION = "reopen_session",
+  RUN = "run",
+  MESSAGE = "message",
+  CANCEL = "cancel",
+  CLOSE_SESSION = "close_session",
+  LOGOUT = "logout",
+  CREDENTIALS = "credentials",
+  IMPORT_CREDENTIALS = "import_credentials",
+}
+
+export enum IpcResponseType {
+  ERROR = "error",
+  EVENT = "event",
+  RESULT = "result",
+}
+
+export enum RuntimeEvent {
+  EXECUTION = "agent.execution",
+  REVIEWER = "agent.reviewer",
+  FILE = "agent.file",
+  DELTA = "agent.delta",
+  REASONING = "agent.reasoning",
+  TOOL_CALL = "agent.tool_call",
+  TOOL_RESULT = "agent.tool_result",
+  RUN_READY = "agent.run.ready",
+  MESSAGE = "agent.message",
+  LLM_ATTEMPT = "llm.attempt",
+  LLM_DELTA = "llm.delta",
+  LLM_REASONING = "llm.reasoning",
+  REVIEW_STARTED = "started",
+  REVIEW_FINISHED = "finished",
+  REVIEW_FAILED = "failed",
+}
+
+export enum WorkspaceTool {
+  READ = "read",
+  GREP = "grep",
+  GLOB = "glob",
+  EDIT = "edit",
+  WRITE = "write",
+  REVIEW_NOTES = "review_notes",
+}
+
+export enum ReasoningMode {
+  OFF = "off",
+  AUTO = "auto",
+}
+
+export enum ImageDetail {
+  AUTO = "auto",
+  LOW = "low",
+  HIGH = "high",
+}
+
+export enum ProviderSource {
+  CONFIG = "config",
+  PROJECT = "project",
+}
+
+export type Emit = (name: RuntimeEvent, data: Record<string, unknown>) => void;
+
+export const agentRoleSchema = type.enumerated(...Object.values(AgentRole));
+export const workspaceToolSchema = type.enumerated(...Object.values(WorkspaceTool));
+
 const nonemptyString = type("string").atLeastLength(1);
 const finiteNumber = type("number").narrow(Number.isFinite);
 const sessionId = nonemptyString.matching(/^[A-Za-z0-9_-]+$/);
@@ -21,7 +103,7 @@ export const imagePartSchema = type({
   image_url: {
     "+": "reject",
     url: imageDataUrl,
-    "detail?": "'auto' | 'low' | 'high'",
+    "detail?": type.enumerated(...Object.values(ImageDetail)),
   },
 });
 const messageMetadata = {
@@ -45,14 +127,15 @@ const conversationMessageSchema = type({
 export const generateInputSchema = type({
   "+": "reject",
   messages: systemMessageSchema.or(conversationMessageSchema).array().atLeastLength(1),
-  "role?": nonemptyString,
+  "role?": agentRoleSchema,
   "session_id?": sessionId.or("null"),
   "system_prompt?": "string",
   "max_tokens?": type("number.integer > 0").or("null"),
   "temperature?": finiteNumber.atLeast(0).or("null"),
+  "loop_max_attempts?": "number.integer > 0",
   "reasoning?": type
     .enumerated(Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max)
-    .or("'off' | 'auto'"),
+    .or(type.enumerated(...Object.values(ReasoningMode))),
 });
 export type GenerateInput = typeof generateInputSchema.infer;
 
@@ -126,11 +209,11 @@ const configurationParams = type({
 export const createSessionInputSchema = type({
   "+": "reject",
   id: sessionId,
-  "role?": nonemptyString,
+  "role?": agentRoleSchema,
   "prompt?": "string",
   "files?": stringMap,
   "readonly?": "string[]",
-  "tools?": type("'read' | 'grep' | 'glob' | 'edit' | 'write'").array(),
+  "tools?": workspaceToolSchema.exclude(type.enumerated(WorkspaceTool.REVIEW_NOTES)).array(),
   "meta?": { "[string]": "unknown" },
 });
 const sessionParams = type({ "+": "reject", session_id: sessionId });
@@ -140,55 +223,66 @@ export const ipcRequestHeaderSchema = type({ id: nonemptyString });
 export const ipcRequestSchema = type({
   "+": "reject",
   id: nonemptyString,
-  method: "'ping' | 'info'",
+  method: type.enumerated(IpcMethod.PING, IpcMethod.INFO),
   params: emptyParams,
 })
   .or({
     "+": "reject",
     id: nonemptyString,
-    method: "'configure'",
+    method: type.enumerated(IpcMethod.CONFIGURE),
     params: configurationParams,
   })
   .or({
     "+": "reject",
     id: nonemptyString,
-    method: "'generate'",
+    method: type.enumerated(IpcMethod.GENERATE),
     params: generateInputSchema,
   })
   .or({
     "+": "reject",
     id: nonemptyString,
-    method: "'create_session'",
+    method: type.enumerated(IpcMethod.CREATE_SESSION, IpcMethod.REOPEN_SESSION),
     params: createSessionInputSchema,
   })
   .or({
     "+": "reject",
     id: nonemptyString,
-    method: "'run'",
-    params: type({ "+": "reject", session_id: sessionId, instruction: "string" }),
+    method: type.enumerated(IpcMethod.RUN),
+    params: type({
+      "+": "reject",
+      session_id: sessionId,
+      instruction: "string",
+      "follow_ups?": "string[]",
+    }),
   })
   .or({
     "+": "reject",
     id: nonemptyString,
-    method: "'cancel' | 'close_session' | 'reset'",
+    method: type.enumerated(IpcMethod.MESSAGE),
+    params: type({ "+": "reject", session_id: sessionId, message: "string" }),
+  })
+  .or({
+    "+": "reject",
+    id: nonemptyString,
+    method: type.enumerated(IpcMethod.CANCEL, IpcMethod.CLOSE_SESSION),
     params: sessionParams,
   })
   .or({
     "+": "reject",
     id: nonemptyString,
-    method: "'logout'",
+    method: type.enumerated(IpcMethod.LOGOUT),
     params: providerParams,
   })
   .or({
     "+": "reject",
     id: nonemptyString,
-    method: "'credentials'",
+    method: type.enumerated(IpcMethod.CREDENTIALS),
     params: providerParams.merge({ key: nonemptyString }),
   })
   .or({
     "+": "reject",
     id: nonemptyString,
-    method: "'import_credentials'",
+    method: type.enumerated(IpcMethod.IMPORT_CREDENTIALS),
     params: providerParams.merge({ credential: credentialSchema }),
   });
 export type IpcRequest = typeof ipcRequestSchema.infer;

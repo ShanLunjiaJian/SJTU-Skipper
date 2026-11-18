@@ -1,1 +1,0 @@
-"""Project-owned OMP runtime."""

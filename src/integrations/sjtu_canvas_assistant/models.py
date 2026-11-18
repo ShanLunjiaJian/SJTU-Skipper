@@ -1,7 +1,6 @@
-"""Canvas course and video response models."""
-
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -48,6 +47,12 @@ class Course(CanvasModel):
         return self.name or self.course_code or f"course-{self.id}"
 
 
+class VideoAuthSource(StrEnum):
+    NONE = ""
+    ENVIRONMENT = "environment"
+    CANVAS_SESSIONLESS_LTI = "canvas_sessionless_lti"
+
+
 class VideoAuth(CanvasModel):
     """Resolved SJTU video service auth for one Canvas course.
 
@@ -56,7 +61,7 @@ class VideoAuth(CanvasModel):
 
     video_token: str = ""
     video_course_id: str = ""
-    source: str = ""
+    source: VideoAuthSource = VideoAuthSource.NONE
 
 
 class CanvasVideo(CanvasModel):

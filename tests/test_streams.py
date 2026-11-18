@@ -7,7 +7,8 @@ import wave
 
 import pytest
 
-from core.streams import StreamHub, TextStream
+from core.media import MediaKind
+from core.streams import StreamHub, StreamKind, TextSource, TextStream
 
 
 def test_audio_append_read_and_len() -> None:
@@ -78,8 +79,8 @@ def test_video_frames() -> None:
 def test_text_stream_is_append_only_sequence() -> None:
     hub = StreamHub()
     text = hub.current.transcript
-    item0 = text.append("hello ", start=0, end=1, source="stt")
-    item1 = text.append("world", start=1, end=2, source="stt")
+    item0 = text.append("hello ", start=0, end=1, source=TextSource.STT)
+    item1 = text.append("world", start=1, end=2, source=TextSource.STT)
     assert item0 is not None and item1 is not None
     assert len(text) == 2
     assert text[0].text == "hello "
@@ -94,7 +95,7 @@ def test_text_stream_is_append_only_sequence() -> None:
 
 
 def test_text_metadata_is_immutable() -> None:
-    stream = TextStream("s", "transcript")
+    stream = TextStream("s", StreamKind.TRANSCRIPT)
     item = stream.append("x", meta={"a": 1})
     assert item is not None
     with pytest.raises(TypeError):
@@ -107,12 +108,14 @@ def test_stream_hub_events_are_coalesced() -> None:
         emit=lambda name, **payload: events.append({"name": name, **payload})
     )
     session = hub.start_session(meta={"course": "math"})
-    events.clear()  # drop boot/session event
+    events.clear()
     audio = session.audio
     for _ in range(5):
         audio.append(b"\x00\x00" * 1600)  # 0.1 s each
     new = [
-        e for e in events if e["name"] == "stream.appended" and e["stream"] == "audio"
+        e
+        for e in events
+        if e["name"] == "stream.appended" and e["stream"] is StreamKind.AUDIO
     ]
     assert len(new) == 1
     assert new[0]["start"] == 0.0
@@ -122,7 +125,7 @@ def test_stream_hub_events_are_coalesced() -> None:
     text_events = [
         e
         for e in events
-        if e["name"] == "stream.appended" and e["stream"] == "transcript"
+        if e["name"] == "stream.appended" and e["stream"] is StreamKind.TRANSCRIPT
     ]
     assert len(text_events) == 1
     assert text_events[0]["chars"] == 2
@@ -138,7 +141,7 @@ def test_session_switch_keeps_old_stream_readable() -> None:
     assert second.audio.duration == 0
     assert first.audio.duration == pytest.approx(1.0)
     assert first.transcript[0].text == "one"
-    assert len(hub.list_sessions()) >= 3  # boot + first + second
+    assert len(hub.list_sessions()) >= 3
 
 
 def test_stream_set_status() -> None:
@@ -165,9 +168,8 @@ class TestTrim:
 
         dropped = stream.trim(2.0)
         assert dropped == 2
-        assert stream.duration == pytest.approx(4.0)  # timeline unchanged
+        assert stream.duration == pytest.approx(4.0)
         assert stream.kept_seconds == pytest.approx(2.0)
-        # Reads after the trim still return the remaining data.
         assert len(stream.read(2.0, 4.0)) == 64000
         assert stream.read(0.0, 1.0) == b""
 
@@ -231,7 +233,7 @@ def test_gate_continuation_preserves_release_and_audio_timeout_stops(
     from core.streams import BacklogGate
 
     monkeypatch.setattr("core.streams.time.monotonic", lambda: 0.0)
-    gate = BacklogGate("audio", stall_timeout=1.0)
+    gate = BacklogGate(MediaKind.AUDIO, stall_timeout=1.0)
     gate.configure(10.0, released=120.0, fail_closed=True)
     assert gate.wait(130.0)
     monkeypatch.setattr("core.streams.time.monotonic", lambda: 2.0)
@@ -244,7 +246,7 @@ def test_video_gate_keeps_default_timeout_behavior(monkeypatch) -> None:
     from core.streams import BacklogGate
 
     monkeypatch.setattr("core.streams.time.monotonic", lambda: 0.0)
-    gate = BacklogGate("video", stall_timeout=1.0)
+    gate = BacklogGate(MediaKind.VIDEO, stall_timeout=1.0)
     gate.configure(10.0, released=120.0)
     monkeypatch.setattr("core.streams.time.monotonic", lambda: 2.0)
     assert gate.wait(131.0)
@@ -256,20 +258,84 @@ def test_text_progress_is_session_scoped() -> None:
     events = []
     hub = StreamHub(emit=lambda name, **data: events.append((name, data)))
     first = hub.start_session()
-    hub.seal_text(first.session_id, "transcript", 600, error={"start": 10, "end": 20})
+    hub.seal_text(
+        first.session_id, StreamKind.TRANSCRIPT, 600, error={"start": 10, "end": 20}
+    )
     second = hub.start_session()
-    hub.seal_text(first.session_id, "transcript", 100, final=True)
-    snapshot = hub.text_progress(first.session_id, "transcript")
+    hub.seal_text(first.session_id, StreamKind.TRANSCRIPT, 100, final=True)
+    snapshot = hub.text_progress(first.session_id, StreamKind.TRANSCRIPT)
     assert snapshot.before == 600 and snapshot.final
     snapshot.errors[0]["start"] = 99
-    assert hub.text_progress(first.session_id, "transcript").errors[0]["start"] == 10
-    assert hub.text_progress(second.session_id, "transcript").before == 0
-    hub.set_text_enabled(first.session_id, "visual", False)
-    state = hub.text_progress(first.session_id, "visual")
+    assert (
+        hub.text_progress(first.session_id, StreamKind.TRANSCRIPT).errors[0]["start"]
+        == 10
+    )
+    assert hub.text_progress(second.session_id, StreamKind.TRANSCRIPT).before == 0
+    hub.set_text_enabled(first.session_id, StreamKind.VISUAL, False)
+    state = hub.text_progress(first.session_id, StreamKind.VISUAL)
     assert not state.enabled and not state.final
     assert events[-1][0] == "stream.sealed"
     assert events[-1][1]["session_id"] == first.session_id
     with pytest.raises(ValueError):
-        hub.seal_text(first.session_id, "audio", 1)
+        hub.seal_text(first.session_id, StreamKind.AUDIO, 1)
     with pytest.raises(KeyError):
-        hub.text_progress("missing", "visual")
+        hub.text_progress("missing", StreamKind.VISUAL)
+
+
+def test_stream_lookup_requires_enum() -> None:
+    session = StreamHub().current
+    assert session.stream(StreamKind.AUDIO) is session.audio
+    assert session.stream(StreamKind.VIDEO) is session.video
+    assert session.stream(StreamKind.TRANSCRIPT) is session.transcript
+    assert session.stream(StreamKind.VISUAL) is session.visual
+    with pytest.raises(TypeError, match="StreamKind"):
+        session.stream("audio")  # type: ignore[arg-type]
+
+
+def test_text_progress_requires_enum() -> None:
+    hub = StreamHub()
+    session_id = hub.current.session_id
+    with pytest.raises(TypeError, match="StreamKind"):
+        hub.text_progress(session_id, "transcript")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="StreamKind"):
+        hub.seal_text(session_id, "transcript", 1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="StreamKind"):
+        hub.set_text_enabled(session_id, "visual", False)  # type: ignore[arg-type]
+
+
+def test_text_identifiers_are_extensible() -> None:
+    stream = TextStream("s")
+    assert stream.name == "text"
+    item = stream.append("custom", source="custom-producer")
+    assert item is not None
+    assert item.source == "custom-producer"
+
+
+def test_consumer_media_kinds() -> None:
+    hub = StreamHub()
+    hub.register_consumer(
+        "stt", MediaKind.AUDIO, cursor_fn=lambda: 12, gate_limit_fn=lambda: 30
+    )
+    hub.register_consumer("vlm", MediaKind.VIDEO, cursor_fn=lambda: 5)
+    assert hub.consumer_cursor(MediaKind.AUDIO) == 12
+    assert hub.consumer_cursor(MediaKind.VIDEO) == 5
+    assert hub.consumer_gate_limit(MediaKind.AUDIO) == 30
+    assert hub.consumers()[0]["kind"] is MediaKind.AUDIO
+    hub.unregister_consumer("stt", MediaKind.AUDIO)
+    assert hub.consumer_cursor(MediaKind.AUDIO) == 0
+    hub.remove_plugin("vlm")
+    assert hub.consumers() == []
+
+
+def test_consumer_kind_requires_enum() -> None:
+    hub = StreamHub()
+    with pytest.raises(TypeError, match="MediaKind"):
+        hub.register_consumer("stt", "audio")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="MediaKind"):
+        hub.unregister_consumer("stt", "audio")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="MediaKind"):
+        hub.consumer_cursor("audio")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="MediaKind"):
+        hub.consumer_gate_limit("audio")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="MediaKind"):
+        hub.register_consumer("stt", StreamKind.AUDIO)  # type: ignore[arg-type]

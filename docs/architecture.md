@@ -61,7 +61,7 @@ llm-agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 
 `FFmpegSource` 分别启动音频和视频 ffmpeg 进程．录播全速解码，直播按直播源摄取．音频转换为单声道 PCM，视频输出 JPEG 帧．两个 reader 均结束后才报告该段输入结束．
 
-远端录播通过可寻址的本地缓存供 ffmpeg 读取，下载与处理可以重叠．下载失败报告输入错误并停止源．连续节次通过 `next_source` 连接，预取后续录像，并将媒体时间接到同一会话．中间节次不结束整课识别．最后一段结束后，输入等待消费者完成，再结束会话．
+远端录播通过可寻址的本地缓存供 ffmpeg 读取，下载与处理可以重叠．下载失败报告输入错误并停止源．连续节次通过 `next_source` 连接，预取后续录像，并将媒体时间接到同一会话．中间节次不结束连续识别．最后一段结束后，输入等待消费者完成，再结束会话．
 
 下载进度汇总整次课的各段字节数．处理进度使用整次课的媒体时长，并跟随已启用消费者的处理位置．本地录像按 `input.keep_recordings` 保留，笔记独立保存．
 
@@ -89,9 +89,11 @@ llm-agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 
 应用管理一个常驻 Bun 子进程，多个 SDK 会话在进程内异步执行．依赖由项目 `package.json` 与 `bun.lock` 固定，运行环境要求 Bun >=1.4.4．
 
-Python 与 Bun 使用带请求 ID 的 JSON Lines 通信．stdout 传 IPC 消息，stderr 传日志．IPC 提供会话创建、执行、重置、关闭、取消及单次生成．
+Python 与 Bun 使用带请求 ID 的 JSON Lines 通信．stdout 传 IPC 消息，stderr 传日志．IPC 提供会话创建、恢复、执行、消息中断、关闭、取消及单次生成．
 
 `createAgentSession()` 管理模型历史、文件工具、会话存储和上下文压缩．Python 管理应用任务、授权文件和 UI 事件．同一会话禁止并发运行．取消会终止对应模型流与工具执行．运行时退出使受影响请求失败．
+
+`message` 只向已接纳消息的活动 run 提交输入．run 在同一所有者内中断 SDK prompt，等待工具安全退出，再提交按发送顺序合并的消息．`agent.run.ready` 表示运行时已建立消息接纳状态．完成验证后，运行时同步关闭消息接纳；关闭目标拒绝消息，不创建替代会话．
 
 ### 配置与授权
 
@@ -105,8 +107,8 @@ Python 与 Bun 使用带请求 ID 的 JSON Lines 通信．stdout 传 IPC 消息�
 
 - `models.yml` 使用 OMP `providers` 结构，声明提供方、模型、协议和能力．仅显式配置的模型可被调用．
 - `roles.yml` 使用 `provider/model:level` 或 `@role` 选择器．未填写角色继承 `default`．
-- `board_recognition` 选择板书模型，`note_chunk` 选择片段模型，`note_writer` 选择整课写作模型，`note_review` 选择独立审阅模型．
-- `ask_instant`、`ask_research`、`agent_chat` 和 `compaction` 分别选择问答、交互助手与上下文压缩模型．
+- `board_recognition` 选择板书模型，`note_chunk` 选择片段模型，`note_writer` 选择笔记写作模型，`note_review` 选择独立审阅模型．
+- `ask_instant`、`ask_research` 选择问答模型，`compaction` 选择上下文压缩模型．
 
 提供方凭据保存在项目 `AuthStorage` 的 `credentials.db`．设置页支持 API key 和 OpenCode 设备登录．OAuth 刷新与登出共用凭据存储．界面只显示凭据状态，不回显密钥．
 
@@ -114,19 +116,25 @@ Python 与 Bun 使用带请求 ID 的 JSON Lines 通信．stdout 传 IPC 消息�
 
 `notes-pipeline` 按 `notes.chunk_seconds` 划分核心区间，并使用 `notes.overlap_seconds` 提供左侧上下文．所有启用来源完成区间后，任务冻结来源并整理片段．`notes.concurrency` 限制笔记 agent 并发数．
 
-片段保存只读来源、上下文、板书历史和 3 份底稿．成功写入更新预览，连续完成的片段可发布为未审阅笔记．片段失败记录范围错误，完整来源仍交给整课写作者．
+片段保存只读来源、上下文、板书历史和 3 份底稿．成功写入更新预览，连续完成的片段可发布为未审阅笔记．片段失败记录范围错误，完整来源仍交给笔记写作者．
 
-来源终止后，整课写作者读取完整来源和成功底稿．写作与修订共用 SDK 会话．启用审阅时，写作者通过 `review_notes` 调用 1 个独立只读审阅者．审阅者读取来源和 3 份文稿的冻结副本，返回 findings、`overall_correctness`、`explanation` 和 `confidence`．
+来源终止后，笔记写作者读取完整来源和成功底稿．写作与修订共用 SDK 会话．启用审阅时，写作者通过 `review_notes` 调用独立只读审阅者．审阅者读取来源和 3 份文稿的冻结副本，返回 `correct` 布尔值、findings、explanation 和 confidence．
 
-只有 `overall_correctness=correct` 才通过．通过结果绑定文稿摘要，每次修改后必须复审．未通过时，运行时要求写作者继续处理．取消、执行错误或达到审阅轮数上限均不得发布成功结果．关闭审阅时，笔记标记为未审阅．
+审阅状态只有通过、未通过、未审阅．不需要审阅时直接通过．通过结果绑定文稿摘要，聊天消息不撤销通过．用户可调整或停止审阅流程，运行时不强制重复审阅．
+
+审阅 operation 独立于工具等待；异步报告只交付 1 次．报告与冻结文稿摘要绑定，文稿改变后旧报告不能批准新内容．停止父任务时取消并回收审阅子会话．
+
+已发布写作通过保存的 writer 描述恢复 SDK transcript．用户消息以原文传入，运行中使用 SDK 原生 steering．恢复任务进入 notes-pipeline 队列，并保留用户问答．启动和最终发布清理期间拒绝消息．
 
 发布锁保护文稿与来源快照．发布时保留用户问答块及顺序．任务状态与底稿保存在 `note_work/`．
 
-`summarize` 管理整课页面和课后策略：`direct` 请求生成，`fill` 请求录播补录，`skip` 不自动生成．手动生成等待来源终止．`instant-summarize` 管理片段预览与开关，关闭预览不停止来源日志保存．
+`summarize` 管理笔记页面和课后策略：`direct` 请求生成，`fill` 请求录播补录，`skip` 不自动生成．手动生成等待来源终止．`instant-summarize` 管理片段预览与开关，关闭预览不停止来源日志保存．
 
 ## UI 与文稿阅读
 
 `UIManager` 管理侧边栏、工具箱、页面、声明式 block 和 action．前端渲染 block 并回传 action．后台任务通过刷新事件和通知更新页面．笔记执行视图显示写作者、审阅者、模型输出与工具执行记录．
+
+`agent_activity` 通过 `send_action`、`send_values` 和各记录的 `session_id` 指定消息目标．共享编辑器按目标保存草稿、光标、选区和滚动位置．日志更新不替换输入节点；问答完成时，存在草稿或待响应提交的编辑器保留在最终答案旁．
 
 `reader.show` 接受文档列表，为每个笔记会话建立独立页面．reader 先解析整份 Markdown，再分离内联问答组件，保留跨段脚注引用．服务端使用 `markdown-it-py` 渲染，前端用 KaTeX 渲染数学公式．
 
@@ -151,9 +159,9 @@ HTTP 和 WebSocket 共用 `auth.json` 登录保护．登录页允许未登录访
 | `sessions/<sid>/coverage.json` | 音频与视频处理覆盖区间 |
 | `sessions/<sid>/transcript.jsonl`、`visual.jsonl` | 转写与板书记录 |
 | `sessions/<sid>/media/`、`vlm/` | 本地录像与融合图 |
-| `sessions/<sid>/note_work/` | 片段底稿、整课工作区与任务状态 |
+| `sessions/<sid>/note_work/` | 片段底稿、笔记工作区与任务状态 |
 | `sessions/<sid>/lecture_source.md` | 发布使用的完整来源 |
-| `sessions/<sid>/notes/note_{knowledge,gossip,notice}.md` | 整课知识、闲话与通知 |
+| `sessions/<sid>/notes/note_{knowledge,gossip,notice}.md` | 知识、闲话与通知笔记 |
 | `sessions/<sid>/notes/instant_note_{knowledge,gossip,notice}.md` | 片段预览 |
 
 媒体流保存在内存，文本日志与覆盖记录供补录和笔记生成使用．退出时先停止输入，再取消分析和笔记任务，关闭 SDK 会话与 Bun 子进程，最后停止时钟和事件总线．

@@ -1,5 +1,3 @@
-"""TTL cache regression for the input catalog."""
-
 from __future__ import annotations
 
 from plugins.input.catalog import Catalog

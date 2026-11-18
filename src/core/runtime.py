@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from config import AppConfig
+from .agent_types import IpcMethod
 from .events import Clock, EventBus
 from .meta import MetaRegistry
 from .plugin import Plugin, PluginContext, PluginManager, resolve_plugin_spec
@@ -34,10 +35,10 @@ class LLMProxy:
             )
         return service
 
-    def call(self, method: str, **params: Any) -> dict[str, Any]:
+    def call(self, method: IpcMethod, **params: Any) -> dict[str, Any]:
         return self._service().call(method, **params)
 
-    def stream(self, method: str, **params: Any):
+    def stream(self, method: IpcMethod, **params: Any):
         return self._service().stream(method, **params)
 
     def cancel(self, session_id: str):
@@ -52,8 +53,6 @@ class LLMProxy:
 
 
 class Runtime:
-    """Owns all long-lived components and the plugin DAG."""
-
     def __init__(
         self,
         *,
@@ -135,7 +134,6 @@ class Runtime:
         self.plugins.register(registered)
         return registered
 
-    # -- dynamic plugin management --------------------------------------
     def load_plugin(self, plugin_or_spec: Plugin | type[Plugin] | str) -> Plugin:
         """Load an external plugin into the running runtime."""
 

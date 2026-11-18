@@ -1,5 +1,3 @@
-"""Serve completed byte ranges while the recording downloads."""
-
 from __future__ import annotations
 
 import http.server

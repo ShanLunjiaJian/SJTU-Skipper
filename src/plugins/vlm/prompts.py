@@ -114,8 +114,7 @@ def collapse_repetitions(text: str, *, max_period: int = 8) -> str:
     """Collapse consecutive identical blocks in a VLM transcription.
 
     Long math transcriptions sometimes degenerate into repeating the same
-    display-math block dozens of times.  The model did not do this in the
-    legacy single-frame pipeline; with fused windows it occasionally does.
+    display-math block dozens of times.
     Keep one copy of every consecutive repeated block (display math blocks are
     treated as one unit).
     """
@@ -198,8 +197,6 @@ def is_trivial_board_text(text: str) -> bool:
     """
     if not text or not text.strip():
         return True
-    # Strip leading/trailing whitespace and check whether every non-empty
-    # "unit" is a placeholder.
     stripped = text.strip()
     if stripped == "【黑板暂无板书】":
         # The canonical marker is filtered explicitly by the plugin; keep
@@ -215,11 +212,7 @@ def is_trivial_board_text(text: str) -> bool:
         return True
     if _TRIVIAL_PLACEHOLDER_RE.match(stripped):
         return True
-    # Also catch cases where the model wraps the placeholder in a paragraph
-    # like "![...]()\n" or lines that are purely placeholders with no
-    # $/$$/chinese/english content.
     non_placeholder = _TRIVIAL_PLACEHOLDER_RE.sub("", stripped).strip()
     if not non_placeholder:
         return True
-    # If after removing all placeholders we only have whitespace, skip.
     return False

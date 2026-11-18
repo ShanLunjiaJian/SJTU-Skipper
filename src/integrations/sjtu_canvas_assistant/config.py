@@ -1,5 +1,3 @@
-"""Validate the Canvas base URL."""
-
 from __future__ import annotations
 
 from .exceptions import ConfigError

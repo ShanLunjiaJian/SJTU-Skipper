@@ -1,5 +1,3 @@
-"""Consumer contracts for final note controls and stop policy."""
-
 from types import SimpleNamespace
 from plugins.summarize.plugin import SummarizePlugin
 

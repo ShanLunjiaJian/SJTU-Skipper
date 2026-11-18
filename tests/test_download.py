@@ -1,5 +1,3 @@
-"""Tests for the recording downloader (local HTTP server, no network)."""
-
 from __future__ import annotations
 
 import http.server
@@ -59,7 +57,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(self.payload)
 
-    def log_message(self, *args: object) -> None:  # silence the test log
+    def log_message(self, *args: object) -> None:
         return
 
 

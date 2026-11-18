@@ -7,8 +7,9 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from hashlib import sha256
-from typing import Any, Callable, Iterable, Literal, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from html import escape as html_escape
 
@@ -21,7 +22,55 @@ logger = logging.getLogger("lecture_agent.ui")
 _CATEGORY_ORDER = {"课程": 0, "视图": 10, "调试": 90}
 _DEFAULT_CATEGORY_ORDER = 50
 
-Side = Literal["left", "right"]
+
+class Side(StrEnum):
+    LEFT = "left"
+    RIGHT = "right"
+
+
+class BlockType(StrEnum):
+    MARKDOWN = "markdown"
+    TEXT = "text"
+    HTML = "html"
+    TABS = "tabs"
+    FORM = "form"
+    TREE = "tree"
+    BUTTONS = "buttons"
+    KEYVALUE = "keyvalue"
+    ROWS = "rows"
+    PLAYER = "player"
+    PROGRESS = "progress"
+    SWITCH = "switch"
+    OAUTH = "oauth"
+    QA = "qa"
+    AGENT_ACTIVITY = "agent_activity"
+    IMAGE = "image"
+    TASK_QUEUE = "task_queue"
+    TABLE = "table"
+    CARDS = "cards"
+    LIST = "list"
+    LOG = "log"
+    VIDEO = "video"
+    BADGE = "badge"
+
+
+class FormInputType(StrEnum):
+    STRING = "string"
+    TEXT = "text"
+    TEXTAREA = "textarea"
+    NUMBER = "number"
+    CHECKBOX = "checkbox"
+    SELECT = "select"
+    PASSWORD = "password"
+    BUTTON = "button"
+    SUBMIT = "submit"
+
+
+class TaskState(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+
+
 Renderer = Callable[[], Any]
 ActionHandler = Callable[[dict[str, Any]], Any]
 
@@ -270,8 +319,6 @@ class UIManager:
         self._active_page: str | None = None
         self._version = 0
         self._last_refresh = 0.0
-        # Generic navigation action every plugin may reuse; the web adapter no
-        # longer has to fake ownership of it.
         self.register_action(
             "ui.open_page",
             lambda payload: {
@@ -283,7 +330,7 @@ class UIManager:
         self.add_page(
             "ui:tasks",
             "任务队列",
-            render=lambda: [{"type": "task_queue"}],
+            render=lambda: [{"type": BlockType.TASK_QUEUE}],
             plugin_id="core",
         )
         self.register_command(
@@ -295,9 +342,6 @@ class UIManager:
             plugin_id="core",
         )
 
-    # ------------------------------------------------------------------
-    # Contributions
-    # ------------------------------------------------------------------
     def add_tab(
         self,
         side: Side,
@@ -308,8 +352,8 @@ class UIManager:
         order: float = 0,
         plugin_id: str = "",
     ) -> TabHandle:
-        if side not in ("left", "right"):
-            raise ValueError("side must be 'left' or 'right'")
+        if not isinstance(side, Side):
+            raise TypeError("side must be a Side member")
         with self._lock:
             existing = self._tabs.get(id)
             if existing is not None:
@@ -464,9 +508,6 @@ class UIManager:
                 self._active_page = self._open_pages[-1] if self._open_pages else None
         self.refresh(f"page-closed:{id}")
 
-    # ------------------------------------------------------------------
-    # Actions
-    # ------------------------------------------------------------------
     def register_action(
         self, action_id: str, handler: ActionHandler, *, plugin_id: str = ""
     ) -> None:
@@ -481,9 +522,6 @@ class UIManager:
         with self._lock:
             self._actions.pop(action_id, None)
 
-    # ------------------------------------------------------------------
-    # Commands (command palette / menu bar)
-    # ------------------------------------------------------------------
     def register_command(
         self,
         command_id: str,
@@ -579,9 +617,6 @@ class UIManager:
             self.refresh(f"action:{action_id}")
         return result
 
-    # ------------------------------------------------------------------
-    # Rendering
-    # ------------------------------------------------------------------
     def refresh(self, reason: str = "") -> None:
         with self._lock:
             self._version += 1
@@ -660,7 +695,8 @@ class UIManager:
                 tasks.extend(
                     task
                     for task in (provider() or [])
-                    if task.get("state", "running") in {"pending", "running"}
+                    if task.get("state", TaskState.RUNNING)
+                    in {TaskState.PENDING, TaskState.RUNNING}
                 )
             except Exception:  # noqa: BLE001 - isolate task providers
                 logger.exception("UI task provider failed")
@@ -740,7 +776,7 @@ class UIManager:
             logger.exception("UI render failed: %s", label)
             return [
                 {
-                    "type": "html",
+                    "type": BlockType.HTML,
                     "html": f'<div class="ui-error">渲染失败：{_escape(str(exc))}</div>',
                 }
             ]
@@ -749,7 +785,13 @@ class UIManager:
         if value is None:
             return []
         if isinstance(value, str):
-            return [{"type": "markdown", "text": value, "html": render_markdown(value)}]
+            return [
+                {
+                    "type": BlockType.MARKDOWN,
+                    "text": value,
+                    "html": render_markdown(value),
+                }
+            ]
         if isinstance(value, dict):
             if "blocks" in value and "type" not in value:
                 return self._normalize(value["blocks"])
@@ -759,24 +801,24 @@ class UIManager:
             for item in value:
                 blocks.extend(self._normalize(item))
             return blocks
-        return [{"type": "text", "text": str(value)}]
+        return [{"type": BlockType.TEXT, "text": str(value)}]
 
     def _normalize_block(self, block: dict[str, Any]) -> list[dict[str, Any]]:
         block = dict(block)
-        btype = block.get("type")
-        if btype == "markdown":
+        btype: BlockType | None = block.get("type")
+        if btype == BlockType.MARKDOWN:
             text = str(block.get("text", ""))
             block.setdefault("html", render_markdown(text))
-        elif btype == "tabs":
+        elif btype == BlockType.TABS:
             tabs = []
             for tab in block.get("tabs", []):
                 tab = dict(tab)
                 tab["blocks"] = self._normalize(tab.get("blocks", []))
                 tabs.append(tab)
             block["tabs"] = tabs
-        elif btype == "form":
+        elif btype == BlockType.FORM:
             block.setdefault("fields", [])
-        elif btype == "tree":
+        elif btype == BlockType.TREE:
             block["nodes"] = _normalize_tree_nodes(block.get("nodes", []))
         return [block]
 
@@ -822,9 +864,7 @@ class UIManager:
             return out
 
         page_content: dict[str, list[dict[str, Any]]] = {}
-        # Only render the visible page.  Rendering every open page on each
-        # state poll made large board/notes pages expensive server-side and
-        # shipped hundreds of KB the browser did not need.
+        # Avoid rendering inactive documents on every state poll.
         for page in pages:
             if page.id == active:
                 page_content[page.id] = self._render(page.render, f"page:{page.id}")
@@ -848,8 +888,8 @@ class UIManager:
 
         return {
             "version": version,
-            "left_tabs": tab_payload("left"),
-            "right_tabs": tab_payload("right"),
+            "left_tabs": tab_payload(Side.LEFT),
+            "right_tabs": tab_payload(Side.RIGHT),
             "pages": [
                 {
                     "id": p.id,

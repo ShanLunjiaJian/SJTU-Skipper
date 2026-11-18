@@ -1,11 +1,10 @@
-"""End-to-end integration: settings -> agent -> summarize -> note files."""
-
 from __future__ import annotations
 
 import time
 from pathlib import Path
 
 from config import load_config
+from core.agent_types import AgentRole, IpcMethod
 from core.plugin import Plugin, PluginContext
 from core.runtime import build_runtime
 from plugins.agent import AgentPlugin
@@ -63,7 +62,7 @@ def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
             "note_gossip.md": "# 闲话\n\n" + "- 老师聊到 AI\n" * 3,
             "note_notice.md": "# 通知\n\n" + "- 作业 3.1\n" * 3,
         },
-        "note_chunk",
+        AgentRole.NOTE_CHUNK,
     )
     runtime = build_runtime(
         cfg,
@@ -112,7 +111,6 @@ def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
 
 
 def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
-    """Publish the three note files through the runtime bridge."""
     cfg = load_config(data_dir=tmp_path)
     outline = (
         "# 笔记：知识\n\n"
@@ -126,7 +124,7 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
             "note_gossip.md": "# 闲话与分享\n\n",
             "note_notice.md": "# 通知\n\n## 作业\n\n- 习题 3.1\n",
         },
-        "note_writer",
+        AgentRole.NOTE_WRITER,
     )
     runtime = build_runtime(
         cfg,
@@ -181,7 +179,6 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
 def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
     tmp_path: Path,
 ) -> None:
-    """The reader selection menu → ask.ask → deterministic note insert."""
 
     cfg = load_config(data_dir=tmp_path)
 
@@ -242,13 +239,13 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
         assert "这一段的定义是什么？" in content
 
         declaration = next(
-            params for method, params in llm.calls if method == "create_session"
+            params for method, params in llm.calls if method == IpcMethod.CREATE_SESSION
         )
         prompt = llm.runs[-1]["instruction"]
         assert "这是第一段笔记内容。" in prompt
         assert "第二段笔记内容。" in prompt
         assert "这一段的定义是什么？" in prompt
-        assert declaration["role"] == "ask_instant"
+        assert declaration["role"] == AgentRole.ASK_INSTANT
         assert declaration["tools"] == [], "instant asking must not expose tools"
     finally:
         runtime.stop()

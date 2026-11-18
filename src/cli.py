@@ -1,5 +1,3 @@
-"""Command line entry point."""
-
 from __future__ import annotations
 
 import argparse
@@ -9,7 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from config import SHUTDOWN_TIMEOUT, load_config
-from applog import setup_logging
+from applog import LogLevel, setup_logging
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -21,7 +19,13 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         "--port", type=int, default=None, help="bind port (default 8765)"
     )
     parser.add_argument("--config", type=Path, default=None, help="agent.toml path")
-    parser.add_argument("--log-level", default=None, help="DEBUG/INFO/WARNING/ERROR")
+    parser.add_argument(
+        "--log-level",
+        type=LogLevel,
+        choices=list(LogLevel),
+        default=None,
+        help="logging level",
+    )
 
 
 def _config_from_args(args: argparse.Namespace):
@@ -95,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    setup_logging(args.log_level or "INFO")
+    setup_logging(args.log_level or LogLevel.INFO)
     try:
         return int(args.func(args) or 0)
     except KeyboardInterrupt:

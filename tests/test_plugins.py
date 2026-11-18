@@ -5,6 +5,7 @@ import pytest
 from config import load_config
 from core.plugin import Plugin, PluginContext, PluginError
 from core.runtime import build_runtime
+from core.ui import Side
 
 
 class Recorder(Plugin):
@@ -143,3 +144,18 @@ def test_builtin_registers_both_summarizers(tmp_path) -> None:
     ids = [plugin.id for plugin in builtin_plugins(cfg)]
     assert "summarize" not in ids
     assert "instant-summarize" not in ids
+
+
+def test_scoped_tab_side(tmp_path) -> None:
+    class Tabs(Plugin):
+        id = "tabs"
+
+        def setup(self, ctx: PluginContext) -> None:
+            ctx.ui.add_tab(Side.RIGHT, "details", "Details")
+
+    runtime = build_runtime(load_config(data_dir=tmp_path), plugins=[Tabs()])
+    runtime.start()
+    try:
+        assert runtime.ui.snapshot()["tabs"]["details"] is Side.RIGHT
+    finally:
+        runtime.stop()

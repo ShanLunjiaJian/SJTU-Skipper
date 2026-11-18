@@ -21,13 +21,14 @@ from __future__ import annotations
 import threading
 from datetime import datetime
 from hashlib import sha256
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping
 
 from core.plugin import Plugin, PluginContext
 from core.file_access import path_lock, publication_lock
 from contextlib import ExitStack
-from core.ui import render_markdown
+from core.ui import BlockType, render_markdown
 
 from core import note_document as qa
 
@@ -37,7 +38,10 @@ OPEN_ACTION = "reader.open"
 DELETE_QA_ACTION = "reader.qa_delete"
 COLLAPSE_QA_ACTION = "reader.qa_collapse"
 
-_DEFAULT_SELECTION_KIND = "action"
+
+class SelectionKind(StrEnum):
+    ACTION = "action"
+    PROMPT = "prompt"
 
 
 class ReaderService:
@@ -52,7 +56,6 @@ class ReaderService:
     def __init__(self, plugin: "ReaderPlugin") -> None:
         self._plugin = plugin
 
-    # -- pages ---------------------------------------------------------
     def show(
         self,
         *,
@@ -80,7 +83,6 @@ class ReaderService:
         with self._plugin._lock:
             self._plugin._activity_providers.pop(owner, None)
 
-    # -- selection menu ------------------------------------------------
     def register_selection_action(
         self, page: str, item: dict[str, Any], *, owner: str = ""
     ) -> dict[str, Any]:
@@ -98,14 +100,13 @@ class ReaderService:
     def selection_actions(self, page: str, owner: str = "") -> list[dict[str, Any]]:
         return self._plugin.selection_actions(page, owner)
 
-    # -- inline Q&A blocks ---------------------------------------------
     def qa_begin(
         self,
         path: str | Path,
         *,
         question: str,
         selection: str = "",
-        intensity: str = "instant",
+        intensity: qa.AskIntensity = qa.AskIntensity.INSTANT,
     ) -> dict[str, Any]:
         return self._plugin.qa_begin(
             path,
@@ -120,7 +121,7 @@ class ReaderService:
         qa_id: str,
         *,
         answer: str,
-        status: str = "done",
+        status: qa.QaStatus = qa.QaStatus.DONE,
         collapsed: bool = True,
     ) -> dict[str, Any] | None:
         return self._plugin.qa_finish(
@@ -167,8 +168,6 @@ class ReaderService:
 
 
 class ReaderPlugin(Plugin):
-    """One reader page per notes session (plus a fallback ``reader:main``)."""
-
     id = "reader"
     requires: tuple[str, ...] = ()
     provides = ("reader",)
@@ -200,7 +199,6 @@ class ReaderPlugin(Plugin):
         )
 
     def teardown(self) -> None:
-        """Remove every page/action this plugin contributed."""
 
         ctx = getattr(self, "ctx", None)
         if ctx is None:
@@ -221,9 +219,6 @@ class ReaderPlugin(Plugin):
             except Exception:  # noqa: BLE001 - shutdown is best effort
                 pass
 
-    # ------------------------------------------------------------------
-    # Service API
-    # ------------------------------------------------------------------
     def show(
         self,
         *,
@@ -299,9 +294,6 @@ class ReaderPlugin(Plugin):
     def _page_id(self, page_key: str) -> str:
         return self.page_id_for(str(page_key or ""))
 
-    # ------------------------------------------------------------------
-    # Selection menu registry (per reader page)
-    # ------------------------------------------------------------------
     def register_selection_action(
         self,
         page: str,
@@ -328,7 +320,7 @@ class ReaderPlugin(Plugin):
             "label": str(item.get("label", "") or item_id),
             "icon": str(item.get("icon", "") or ""),
             "action": action,
-            "kind": str(item.get("kind", "") or _DEFAULT_SELECTION_KIND),
+            "kind": SelectionKind(item.get("kind") or SelectionKind.ACTION),
             "placeholder": str(item.get("placeholder", "") or ""),
             "order": float(item.get("order", 0) or 0),
             "value": dict(item.get("value", {}) or {}),
@@ -397,16 +389,14 @@ class ReaderPlugin(Plugin):
             return text
         return self._page_id(text)
 
-    # ------------------------------------------------------------------
     # Q&A blocks: the reader owns the on-disk format, plugins only ask
-    # ------------------------------------------------------------------
     def qa_begin(
         self,
         path: str | Path,
         *,
         question: str,
         selection: str = "",
-        intensity: str = "instant",
+        intensity: qa.AskIntensity = qa.AskIntensity.INSTANT,
     ) -> dict[str, Any]:
         """Insert a *pending* Q&A block below the selected paragraph.
 
@@ -420,14 +410,14 @@ class ReaderPlugin(Plugin):
         )
 
     def _qa_insert(
-        self, text: str, question: str, selection: str, intensity: str
+        self, text: str, question: str, selection: str, intensity: qa.AskIntensity
     ) -> tuple[str, dict[str, Any]]:
         qa_id = qa.new_id()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         block = qa.build_block(
             qa_id,
             ts,
-            status="pending",
+            status=qa.QaStatus.PENDING,
             question=question,
             answer="",
             intensity=intensity,
@@ -441,10 +431,9 @@ class ReaderPlugin(Plugin):
         qa_id: str,
         *,
         answer: str,
-        status: str = "done",
+        status: qa.QaStatus = qa.QaStatus.DONE,
         collapsed: bool = True,
     ) -> dict[str, Any] | None:
-        """Write the agent's answer into an existing pending block."""
 
         def mutate(text: str) -> tuple[str, dict[str, Any]]:
             block = None
@@ -473,7 +462,6 @@ class ReaderPlugin(Plugin):
     def qa_set_collapsed(
         self, path: str | Path, qa_id: str, collapsed: bool
     ) -> dict[str, Any] | None:
-        """Persist the fold state of one Q&A block in the note file."""
 
         def mutate(text: str) -> tuple[str, dict[str, Any]]:
             for existing in qa.parse_blocks(text):
@@ -505,7 +493,6 @@ class ReaderPlugin(Plugin):
         after_words: int = 500,
         history_words: int = 1000,
     ) -> dict[str, Any]:
-        """Collect the context the answering agent needs for one question."""
 
         resolved = self._known_path(path)
         if resolved is None:
@@ -555,9 +542,6 @@ class ReaderPlugin(Plugin):
             resolved.write_text(updated, "utf-8")
         return info
 
-    # ------------------------------------------------------------------
-    # Actions
-    # ------------------------------------------------------------------
     def _act_open(self, payload: dict[str, Any]) -> dict[str, Any]:
         docs = payload.get("docs")
         if not isinstance(docs, list) or not docs:
@@ -619,15 +603,12 @@ class ReaderPlugin(Plugin):
                     continue
         return None
 
-    # ------------------------------------------------------------------
-    # Render
-    # ------------------------------------------------------------------
     def _render_page(self, page_id: str) -> list[dict[str, Any]]:
         with self._lock:
             state = dict(self._states.get(page_id) or {})
             docs = [dict(doc) for doc in state.get("docs") or []]
         if not docs:
-            return [{"type": "text", "text": "没有可显示的文稿"}]
+            return [{"type": BlockType.TEXT, "text": "没有可显示的文稿"}]
 
         title = str(state.get("title") or "")
         active = str(state.get("active") or "")
@@ -647,7 +628,10 @@ class ReaderPlugin(Plugin):
             with self._lock:
                 providers = tuple(self._activity_providers.values())
             for block in blocks:
-                if block.get("type") == "qa" and block.get("status") == "pending":
+                if (
+                    block.get("type") == BlockType.QA
+                    and block.get("status") == qa.QaStatus.PENDING
+                ):
                     for provider in providers:
                         activity = provider(doc["path"], block["id"])
                         if activity is not None:
@@ -669,9 +653,9 @@ class ReaderPlugin(Plugin):
             )
 
         return [
-            *([{"type": "markdown", "text": f"### {title}"}] if title else []),
+            *([{"type": BlockType.MARKDOWN, "text": f"### {title}"}] if title else []),
             {
-                "type": "tabs",
+                "type": BlockType.TABS,
                 "id": f"{page_id}:{sequence}",
                 "tabs": tabs,
             },
@@ -682,30 +666,34 @@ def _document_blocks(text: str, path: str) -> list[dict[str, Any]]:
     """Parse the whole note before separating its Q&A components."""
 
     if not text.strip():
-        return [{"type": "text", "text": "（暂无内容）"}]
+        return [{"type": BlockType.TEXT, "text": "（暂无内容）"}]
 
     segments = qa.segments(text)
     prefix = f"<!--reader-qa-{sha256(text.encode()).hexdigest()}-"
     source = []
     for index, (kind, payload) in enumerate(segments):
-        source.append(str(payload) if kind == "markdown" else f"{prefix}{index}-->")
+        source.append(
+            str(payload) if kind == BlockType.MARKDOWN else f"{prefix}{index}-->"
+        )
     # Footnote definitions must remain visible to references across Q&A boundaries.
     remaining_html = render_markdown("\n\n".join(source), document_id=path)
     blocks: list[dict[str, Any]] = []
     markdown_text = ""
     for index, (kind, payload) in enumerate(segments):
-        if kind == "markdown":
+        if kind == BlockType.MARKDOWN:
             markdown_text += str(payload)
             continue
         html, _, remaining_html = remaining_html.partition(f"{prefix}{index}-->")
         if html.strip():
-            blocks.append({"type": "markdown", "text": markdown_text, "html": html})
+            blocks.append(
+                {"type": BlockType.MARKDOWN, "text": markdown_text, "html": html}
+            )
         markdown_text = ""
         block = payload
         assert isinstance(block, qa.QABlock)
         blocks.append(
             {
-                "type": "qa",
+                "type": BlockType.QA,
                 "id": block.id,
                 "path": path,
                 "ts": block.ts,
@@ -730,9 +718,9 @@ def _document_blocks(text: str, path: str) -> list[dict[str, Any]]:
         )
     if remaining_html.strip():
         blocks.append(
-            {"type": "markdown", "text": markdown_text, "html": remaining_html}
+            {"type": BlockType.MARKDOWN, "text": markdown_text, "html": remaining_html}
         )
-    return blocks or [{"type": "text", "text": "（暂无内容）"}]
+    return blocks or [{"type": BlockType.TEXT, "text": "（暂无内容）"}]
 
 
 def _read_text(path: str) -> str:

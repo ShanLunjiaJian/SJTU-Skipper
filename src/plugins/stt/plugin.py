@@ -1,5 +1,3 @@
-"""Session-bound HTTP uploads and continuous live transcription."""
-
 from __future__ import annotations
 
 import json
@@ -7,15 +5,27 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from core.coverage import Coverage, CoverageStore, skip_coverage
 from core.plugin import Plugin, PluginContext
-from core.settings_spec import SettingsSpec
+from core.media import MediaKind, ProcessingMode
+from core.streams import StreamKind, TextSource
+from core.ui import BlockType
+from core.settings_spec import SettingType, SettingsSpec
 
-from .client import STTClient, retryable
+from .client import STTClient, SttEventType, retryable
 from .errors import SttError
+
+
+class SttState(StrEnum):
+    DISABLED = "disabled"
+    ERROR = "error"
+    RUNNING = "running"
+    IDLE = "idle"
+
 
 PAGE_ID = "stt:transcript"
 TRANSCRIPT_LOG = "transcript.jsonl"
@@ -39,8 +49,6 @@ class SessionState:
 
 
 class STTService:
-    """Public transcription and lifecycle service."""
-
     __slots__ = ("_plugin",)
 
     def __init__(self, plugin: STTPlugin) -> None:
@@ -64,7 +72,6 @@ class STTService:
         return self._plugin.transcribe_range(start, end)
 
     def transcript_path(self, session_id: str = "") -> Path | None:
-        """Return the transcript log path for the specified or current session."""
         return self._plugin.transcript_path(session_id)
 
 
@@ -159,17 +166,13 @@ class STTPlugin(Plugin):
         if worker is None or not worker.is_alive():
             self._ctx = None
 
-    # ------------------------------------------------------------------
-    # Backpressure contract (audio consumer)
-    # ------------------------------------------------------------------
     def _register_consumer(self, ctx: PluginContext) -> None:
-        """Publish this plugin as the ``audio`` consumer of the stream hub."""
 
         if ctx.streams is None:
             return
         ctx.streams.register_consumer(
             self.id,
-            "audio",
+            MediaKind.AUDIO,
             cursor_fn=lambda: self._watermark(ctx.streams.current),
             busy_fn=lambda: self.busy() or self.flushing(),
             gate_limit_fn=self._gate_limit,
@@ -182,9 +185,6 @@ class STTPlugin(Plugin):
             return 0.0
         return max(0.2, float(self._setting("stt.buffer_seconds", 240.0)))
 
-    # ------------------------------------------------------------------
-    # Settings
-    # ------------------------------------------------------------------
     def _register_settings(self) -> None:
         settings = self._ctx.service("settings")
         for suffix in (
@@ -200,35 +200,41 @@ class STTPlugin(Plugin):
         ):
             settings.reset("stt." + suffix)
         entries = (
-            ("enabled", "启用语音转写", "bool", True, ""),
+            ("enabled", "启用语音转写", SettingType.BOOL, True, ""),
             (
                 "server_url",
                 "服务地址",
-                "string",
+                SettingType.STRING,
                 "http://127.0.0.1:8766",
                 "兼容 STT HTTP API 的服务地址",
             ),
-            ("language", "语言", "string", "Chinese", "服务使用的转写语言"),
-            ("context", "转写提示", "text", "", "留空使用无提示转写"),
-            ("timeout", "请求超时（秒）", "float", 60.0, "单次请求的超时时间"),
+            ("language", "语言", SettingType.STRING, "Chinese", "服务使用的转写语言"),
+            ("context", "转写提示", SettingType.TEXT, "", "留空使用无提示转写"),
+            (
+                "timeout",
+                "请求超时（秒）",
+                SettingType.FLOAT,
+                60.0,
+                "单次请求的超时时间",
+            ),
             (
                 "send_window_seconds",
                 "发送确认窗口（秒）",
-                "float",
+                SettingType.FLOAT,
                 120.0,
                 "录播已发送但未确认接收的音频上限；服务负责语音分段",
             ),
             (
                 "buffer_seconds",
                 "本地音频缓冲（秒）",
-                "float",
+                SettingType.FLOAT,
                 240.0,
                 "暂停读取前允许保留的未处理音频时长",
             ),
             (
                 "concurrency",
                 "服务端录播并发数",
-                "int",
+                SettingType.INT,
                 1,
                 "请求的活动推理数，由服务端限制到可用容量",
             ),
@@ -268,8 +274,8 @@ class STTPlugin(Plugin):
     def _covered(self, session: Any) -> Coverage:
         return Coverage(
             [
-                *self._coverage(session).coverage("audio").intervals,
-                *skip_coverage(session.meta, "audio").intervals,
+                *self._coverage(session).coverage(MediaKind.AUDIO).intervals,
+                *skip_coverage(session.meta, MediaKind.AUDIO).intervals,
             ]
         )
 
@@ -295,21 +301,23 @@ class STTPlugin(Plugin):
 
     def status(self) -> dict[str, Any]:
         if self._ctx is None:
-            return {"state": "disabled", "cursor": 0.0}
+            return {"state": SttState.DISABLED, "cursor": 0.0}
         session = self._ctx.streams.current
         state = self._state(session)
         items = [
-            item for item in session.transcript.items_since(0) if item.source == "stt"
+            item
+            for item in session.transcript.items_since(0)
+            if item.source == TextSource.STT
         ]
         covered = self._covered(session).total()
         return {
-            "state": "disabled"
+            "state": SttState.DISABLED
             if not self.enabled()
-            else "error"
+            else SttState.ERROR
             if state.error
-            else "running"
+            else SttState.RUNNING
             if state.active
-            else "idle",
+            else SttState.IDLE,
             "backend": "http-stt",
             "server_url": self._setting("stt.server_url"),
             "error": state.error,
@@ -381,7 +389,7 @@ class STTPlugin(Plugin):
                     session
                     for session in sessions
                     if not self._ctx.streams.text_progress(
-                        session.session_id, "transcript"
+                        session.session_id, StreamKind.TRANSCRIPT
                     ).final
                     and (
                         session.audio.duration > self._state(session).scheduled + EPS
@@ -395,12 +403,12 @@ class STTPlugin(Plugin):
                     if (
                         self._finished(session)
                         and not self._ctx.streams.text_progress(
-                            session.session_id, "transcript"
+                            session.session_id, StreamKind.TRANSCRIPT
                         ).final
                     ):
                         self._ctx.streams.seal_text(
                             session.session_id,
-                            "transcript",
+                            StreamKind.TRANSCRIPT,
                             state.scheduled,
                             final=True,
                         )
@@ -519,9 +527,9 @@ class STTPlugin(Plugin):
 
     def _live_connection(self, session: Any, client: STTClient, start: float) -> None:
         state = self._state(session)
-        mode = "offline" if str(session.meta.get("mode", "")) == "fast" else "live"
+        offline = session.meta.get("mode") == ProcessingMode.FAST
         stream = client.stream(
-            mode=mode,
+            offline=offline,
             concurrency=max(1, int(self._setting("stt.concurrency", 1))),
             **self._metadata(),
         )
@@ -551,7 +559,7 @@ class STTPlugin(Plugin):
                         continue
                     self._live_event(session, event, start, connection)
                     connection["activity"] = time.monotonic()
-                    if event["type"] == "done":
+                    if event["type"] == SttEventType.DONE:
                         done.set()
             except BaseException as exc:
                 errors.append(exc)
@@ -575,7 +583,7 @@ class STTPlugin(Plugin):
                             0.2, float(self._setting("stt.send_window_seconds", 120.0))
                         ),
                     )
-                    if mode == "offline"
+                    if offline
                     else 1.0
                 )
                 if end > connection["received"] + credit + EPS:
@@ -629,12 +637,12 @@ class STTPlugin(Plugin):
         if self._cancelled(session):
             return
         state = self._state(session)
-        kind = event["type"]
-        if kind == "accepted":
+        kind = SttEventType(event["type"])
+        if kind == SttEventType.ACCEPTED:
             end = min(connection["sent"], float(event["received_ms"]) / 1000)
             state.received = max(state.received, end)
             connection["received"] = max(connection["received"], end)
-        elif kind == "partial":
+        elif kind == SttEventType.PARTIAL:
             state.partial = dict(event)
             self._ctx.events.emit(
                 "stt.partial",
@@ -642,9 +650,9 @@ class STTPlugin(Plugin):
                 **{k: v for k, v in event.items() if k != "type"},
             )
             self._ctx.ui.refresh("stt.partial")
-        elif kind == "anomaly":
+        elif kind == SttEventType.ANOMALY:
             self._anomaly(session, dict(event))
-        elif kind == "final":
+        elif kind == SttEventType.FINAL:
             lo, hi = (
                 max(start, float(event["start_ms"]) / 1000),
                 min(connection["sent"], float(event["end_ms"]) / 1000),
@@ -656,7 +664,7 @@ class STTPlugin(Plugin):
             if hi > lo and not self._covered(session).covers(lo, hi):
                 self._append(session, lo, hi, str(event["text"]), {})
                 self._success(session, lo, hi)
-        elif kind in ("progress", "done"):
+        elif kind in (SttEventType.PROGRESS, SttEventType.DONE):
             end = min(connection["sent"], float(event["processed_ms"]) / 1000)
             if end >= connection["processed"]:
                 self._success(session, connection["processed"], end)
@@ -664,11 +672,11 @@ class STTPlugin(Plugin):
                 state.scheduled = max(state.scheduled, end)
 
     def _success(self, session: Any, start: float, end: float) -> None:
-        self._coverage(session).mark("audio", start, end)
+        self._coverage(session).mark(MediaKind.AUDIO, start, end)
         self._state(session).error = ""
         session.audio_gate.release(end)
         self._trim(session, end)
-        self._ctx.streams.seal_text(session.session_id, "transcript", end)
+        self._ctx.streams.seal_text(session.session_id, StreamKind.TRANSCRIPT, end)
 
     def _append(
         self, session: Any, start: float, end: float, text: str, extra: dict[str, Any]
@@ -682,7 +690,7 @@ class STTPlugin(Plugin):
         }
         meta.update(extra)
         item = session.transcript.append(
-            text, start=start, end=end, source="stt", meta=meta
+            text, start=start, end=end, source=TextSource.STT, meta=meta
         )
         if item is None:
             return
@@ -717,7 +725,7 @@ class STTPlugin(Plugin):
         state.failed.append({"start": start, "end": end, "error": str(error)})
         self._ctx.streams.seal_text(
             session.session_id,
-            "transcript",
+            StreamKind.TRANSCRIPT,
             end,
             error={"start": start, "end": end, "error": str(error)},
         )
@@ -787,7 +795,6 @@ class STTPlugin(Plugin):
         }
 
     def transcript_path(self, session_id: str = "") -> Path | None:
-        """Return the transcript log path, or None when no session is available."""
 
         ctx = self._ctx
         if ctx is None:
@@ -803,7 +810,6 @@ class STTPlugin(Plugin):
         return ctx.data_dir / "sessions" / sid / TRANSCRIPT_LOG
 
     def _persist_item(self, session_id: str, item: Any) -> None:
-        """Append one committed line to ``sessions/<id>/transcript.jsonl``."""
 
         ctx = self._ctx
         if ctx is None or not session_id:
@@ -830,7 +836,7 @@ class STTPlugin(Plugin):
         if session is not None:
             self._sessions[session.session_id] = session
             self._ctx.streams.set_text_enabled(
-                session.session_id, "transcript", self.enabled()
+                session.session_id, StreamKind.TRANSCRIPT, self.enabled()
             )
 
     def _on_session_stopped(self, event: Any) -> None:
@@ -863,25 +869,25 @@ class STTPlugin(Plugin):
                 self._state(session).done.wait(
                     float(self._setting("stt.timeout", 60.0))
                 )
-            self._ctx.streams.set_text_enabled(sid, "transcript", False)
+            self._ctx.streams.set_text_enabled(sid, StreamKind.TRANSCRIPT, False)
         else:
             start = self._disabled_at.pop(sid, session.audio.duration)
             end = session.audio.duration
             if end > start:
                 self._ctx.streams.seal_text(
                     sid,
-                    "transcript",
+                    StreamKind.TRANSCRIPT,
                     end,
                     error={"start": start, "end": end, "error": "Source disabled"},
                 )
             self._state(session).scheduled = max(self._state(session).scheduled, end)
-            self._ctx.streams.set_text_enabled(sid, "transcript", True)
+            self._ctx.streams.set_text_enabled(sid, StreamKind.TRANSCRIPT, True)
 
     def _render_page(self) -> list[dict[str, Any]]:
         status = self.status()
         blocks = [
             {
-                "type": "keyvalue",
+                "type": BlockType.KEYVALUE,
                 "items": [
                     ["状态", status["state"]],
                     ["服务", status["server_url"]],
@@ -900,32 +906,32 @@ class STTPlugin(Plugin):
         if status["partial"] is not None:
             blocks.append(
                 {
-                    "type": "markdown",
+                    "type": BlockType.MARKDOWN,
                     "text": "**临时文字**\n\n" + status["partial"]["text"],
                 }
             )
         items = [
             i
             for i in self._ctx.streams.current.transcript.items_since(0)
-            if i.source == "stt"
+            if i.source == TextSource.STT
         ][-30:]
         for item in items:
             blocks.append(
                 {
-                    "type": "markdown",
+                    "type": BlockType.MARKDOWN,
                     "text": f"**{_fmt_time(item.start)} - {_fmt_time(item.end)}**\n\n{item.text}",
                 }
             )
         if not items and status["partial"] is None:
             blocks.append(
                 {
-                    "type": "text",
+                    "type": BlockType.TEXT,
                     "text": "暂无转写结果．开始音频输入后，定稿会显示在这里．",
                 }
             )
         blocks.append(
             {
-                "type": "buttons",
+                "type": BlockType.BUTTONS,
                 "buttons": [
                     {
                         "label": "打开设置",

@@ -19,6 +19,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from enum import StrEnum
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -28,9 +29,12 @@ from PIL import Image
 
 from core.coverage import CoverageStore, skip_coverage
 from core.events import Event
+from core.agent_types import AgentRole, FinishReason, GenerationErrorCode, IpcMethod
 from core.plugin import Plugin, PluginContext
-from core.settings_spec import SettingsSpec
-from core.streams import VideoFrame
+from core.settings_spec import SettingType, SettingsSpec
+from core.streams import StreamKind, TextSource, VideoFrame
+from core.media import MediaKind, ProcessingMode
+from core.ui import BlockType
 
 from .fusion import fuse_frames
 from .prompts import (
@@ -49,6 +53,21 @@ logger = logging.getLogger("lecture_agent.plugin.vlm")
 # plugin reads it later to rebuild the lecture material, so board text that
 # was already recognised survives a crash, an early stop or a handout rerun.
 VISUAL_LOG = "visual.jsonl"
+
+
+class WindowOutcome(StrEnum):
+    EMPTY_RESPONSE = "模型返回空"
+    UNCHANGED = "与上一窗口无变化，已跳过"
+    BLANK_BOARD = "未识别到板书（空白黑板或仅示意图）"
+    DUPLICATE = "与上一窗口重复，已跳过"
+    WRITTEN = "已写入板书"
+
+
+class VLMRecognitionError(RuntimeError):
+    def __init__(self, message: str, *, code: GenerationErrorCode, attempts: int):
+        super().__init__(message)
+        self.code = code
+        self.attempts = attempts
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +233,7 @@ class VlmPlugin(Plugin):
             return
         ctx.streams.register_consumer(
             self.id,
-            "video",
+            MediaKind.VIDEO,
             cursor_fn=lambda: float(self.status().get("cursor", 0.0) or 0.0),
             busy_fn=lambda: self.busy() or self.flushing(),
             gate_limit_fn=self._gate_limit,
@@ -244,7 +263,7 @@ class VlmPlugin(Plugin):
             SettingsSpec(
                 key="vlm.enabled",
                 label="启用板书识别",
-                type="bool",
+                type=SettingType.BOOL,
                 default=True,
                 group="VLM",
                 description="是否启动 VLM 板书识别工作线程",
@@ -253,7 +272,7 @@ class VlmPlugin(Plugin):
             SettingsSpec(
                 key="vlm.window_seconds",
                 label="窗口时长（秒）",
-                type="float",
+                type=SettingType.FLOAT,
                 default=20.0,
                 group="VLM",
                 description="每次融合识别的视频窗口长度；窗口以采样点为中心，前后各占一半",
@@ -261,7 +280,7 @@ class VlmPlugin(Plugin):
             SettingsSpec(
                 key="vlm.cadence_live_seconds",
                 label="直播采样间隔（秒）",
-                type="float",
+                type=SettingType.FLOAT,
                 default=180.0,
                 group="VLM",
                 description="直播时每隔多少秒取一个 20 秒窗口（默认 3 分钟）",
@@ -269,7 +288,7 @@ class VlmPlugin(Plugin):
             SettingsSpec(
                 key="vlm.cadence_recording_seconds",
                 label="录播采样间隔（秒）",
-                type="float",
+                type=SettingType.FLOAT,
                 default=300.0,
                 group="VLM",
                 description="录播全速处理时每隔多少秒取一个 20 秒窗口（默认 5 分钟）",
@@ -277,7 +296,7 @@ class VlmPlugin(Plugin):
             SettingsSpec(
                 key="vlm.history_windows",
                 label="历史转录条数",
-                type="int",
+                type=SettingType.INT,
                 default=3,
                 group="VLM",
                 description="把最近几次转录作为纯文本上下文，供模型输出增量",
@@ -285,7 +304,7 @@ class VlmPlugin(Plugin):
             SettingsSpec(
                 key="vlm.fps",
                 label="采样帧率",
-                type="float",
+                type=SettingType.FLOAT,
                 default=4.0,
                 group="VLM",
                 description="VLM 处理使用的帧率（通常与视频帧率一致）",
@@ -293,15 +312,23 @@ class VlmPlugin(Plugin):
             SettingsSpec(
                 key="vlm.max_frames",
                 label="最大帧数",
-                type="int",
+                type=SettingType.INT,
                 default=12,
                 group="VLM",
                 description="每个窗口最多采样的帧数；0 表示不限制（全量帧很慢）",
             ),
             SettingsSpec(
+                key="vlm.loop_max_attempts",
+                label="重复输出最大尝试次数",
+                type=SettingType.INT,
+                default=3,
+                group="VLM",
+                description="包含首次识别；检测到重复输出时重新尝试",
+            ),
+            SettingsSpec(
                 key="vlm.fusion",
                 label="启用融合",
-                type="bool",
+                type=SettingType.BOOL,
                 default=True,
                 group="VLM",
                 description="启用图片融合（含配准与去遮挡）；关闭时只取最后一帧",
@@ -309,7 +336,7 @@ class VlmPlugin(Plugin):
             SettingsSpec(
                 key="vlm.prepare_ahead",
                 label="提前准备窗口数",
-                type="int",
+                type=SettingType.INT,
                 default=1,
                 group="VLM",
                 description="0 为顺序准备，1 为识别时准备下一个窗口",
@@ -317,7 +344,7 @@ class VlmPlugin(Plugin):
             SettingsSpec(
                 key="vlm.dedupe_threshold",
                 label="去重阈值",
-                type="float",
+                type=SettingType.FLOAT,
                 default=0.92,
                 group="VLM",
                 description="difflib.SequenceMatcher 相似度阈值，超过则跳过",
@@ -325,7 +352,7 @@ class VlmPlugin(Plugin):
             SettingsSpec(
                 key="vlm.prompt",
                 label="板书识别提示词",
-                type="text",
+                type=SettingType.TEXT,
                 default=BOARD_RECOGNITION_PROMPT,
                 group="VLM",
                 description=(
@@ -379,7 +406,7 @@ class VlmPlugin(Plugin):
             }
         if session is not None and self._ctx is not None:
             try:
-                covered = self._coverage(session).covered_seconds("video")
+                covered = self._coverage(session).covered_seconds(MediaKind.VIDEO)
             except Exception:  # noqa: BLE001 - status must never fail
                 covered = 0.0
             total = float(session.video.duration)
@@ -490,7 +517,7 @@ class VlmPlugin(Plugin):
         if image_path:
             blocks.append(
                 {
-                    "type": "image",
+                    "type": BlockType.IMAGE,
                     "src": f"/api/artifacts/{self._ctx.streams.current.session_id}/vlm/{Path(image_path).name}",
                     "alt": "最新融合板书",
                 }
@@ -501,7 +528,7 @@ class VlmPlugin(Plugin):
             )
             blocks.append(
                 {
-                    "type": "text",
+                    "type": BlockType.TEXT,
                     "text": f"最近窗口 {stamp}：{last.get('note', '')}"
                     + (
                         f"\n\n模型原始回复：\n{last['text']}"
@@ -514,7 +541,7 @@ class VlmPlugin(Plugin):
         # Collect recent visual items
         visual = self._ctx.streams.current.visual
         items = visual.items_since(max(0, len(visual) - 20))
-        visual_items = [i for i in items if i.source == "vlm"]
+        visual_items = [i for i in items if i.source == TextSource.VLM]
         if visual_items:
             # One markdown block per window: KaTeX can render them
             # progressively instead of blocking on one huge document.
@@ -522,9 +549,9 @@ class VlmPlugin(Plugin):
                 ts = ""
                 if item.start is not None and item.end is not None:
                     ts = f"**{_fmt_time(item.start)} - {_fmt_time(item.end)}**\n\n"
-                blocks.append({"type": "markdown", "text": f"{ts}{item.text}"})
+                blocks.append({"type": BlockType.MARKDOWN, "text": f"{ts}{item.text}"})
         elif not image_path:
-            blocks.append({"type": "text", "text": "暂无板书识别结果"})
+            blocks.append({"type": BlockType.TEXT, "text": "暂无板书识别结果"})
 
         return blocks
 
@@ -564,6 +591,9 @@ class VlmPlugin(Plugin):
         session = self._processing_session or ctx.streams.current
         sid = session.session_id
         request_id = f"vlm_{sid}_{time.monotonic_ns()}"
+        max_attempts = int(self._setting("vlm.loop_max_attempts", 3))
+        if max_attempts < 1:
+            raise ValueError("vlm.loop_max_attempts 必须至少为 1")
         with self._lock:
             if sid in self._cancelled_sessions:
                 raise RuntimeError("VLM session cancelled")
@@ -578,10 +608,11 @@ class VlmPlugin(Plugin):
 
         try:
             response = self._llm.call(
-                "generate",
-                role="board_recognition",
+                IpcMethod.GENERATE,
+                role=AgentRole.BOARD_RECOGNITION,
                 messages=messages,
                 temperature=0.1,
+                loop_max_attempts=max_attempts,
                 session_id=request_id,
                 on_sent=sent,
             )
@@ -589,9 +620,20 @@ class VlmPlugin(Plugin):
             with self._lock:
                 self._requests.pop(request_id, None)
                 self._submitted_requests.discard(request_id)
-        if sid in self._cancelled_sessions:
+        if sid in self._cancelled_sessions or self._stop_event.is_set():
             raise RuntimeError("VLM session cancelled")
-        if response.get("finish_reason") == "length":
+        if error := response.get("error"):
+            if (
+                error.get("code") == GenerationErrorCode.THINKING_LOOP
+                and error.get("attempts") == max_attempts
+            ):
+                raise VLMRecognitionError(
+                    error["message"],
+                    code=GenerationErrorCode(error["code"]),
+                    attempts=error["attempts"],
+                )
+            raise RuntimeError(error.get("message", str(error)))
+        if response.get("finish_reason") == FinishReason.LENGTH:
             raise RuntimeError(
                 "VLM output reached the model token limit; transcription is incomplete"
             )
@@ -616,7 +658,7 @@ class VlmPlugin(Plugin):
             start = self._disabled_at.pop(session.session_id, session.video.duration)
             self._ctx.streams.seal_text(
                 session.session_id,
-                "visual",
+                StreamKind.VISUAL,
                 session.video.duration,
                 error={
                     "start": start,
@@ -626,12 +668,16 @@ class VlmPlugin(Plugin):
                 if session.video.duration > start
                 else None,
             )
-            self._ctx.streams.set_text_enabled(session.session_id, "visual", True)
+            self._ctx.streams.set_text_enabled(
+                session.session_id, StreamKind.VISUAL, True
+            )
             self._start_worker()
         else:
             self._disabled_at[session.session_id] = self._cursor
             self._stop_worker()
-            self._ctx.streams.set_text_enabled(session.session_id, "visual", False)
+            self._ctx.streams.set_text_enabled(
+                session.session_id, StreamKind.VISUAL, False
+            )
 
     def _stop_worker(self) -> None:
         with self._lock:
@@ -746,7 +792,9 @@ class VlmPlugin(Plugin):
                 finally:
                     with self._lock:
                         self._flushing = False
-                hub.seal_text(session.session_id, "visual", video.duration, final=True)
+                hub.seal_text(
+                    session.session_id, StreamKind.VISUAL, video.duration, final=True
+                )
             else:
                 self._stop_event.wait(0.5)
             return
@@ -775,7 +823,7 @@ class VlmPlugin(Plugin):
                 self._next_center = center + cadence
         hub.seal_text(
             session.session_id,
-            "visual",
+            StreamKind.VISUAL,
             max(0.0, min(center + cadence - half, video.duration - window)),
         )
 
@@ -874,7 +922,7 @@ class VlmPlugin(Plugin):
             and self._prepared_future is None
         ):
             cadence = self._cadence(
-                recording=str(session.meta.get("mode", "")) == "fast"
+                recording=str(session.meta.get("mode", "")) == ProcessingMode.FAST
             )
             next_start, next_end = start + cadence, end + cadence
             self._prepared_key = (session.session_id, next_start, next_end)
@@ -920,7 +968,7 @@ class VlmPlugin(Plugin):
         image_path = str(result.get("image_path", "") or "")
 
         # The window was processed; record it even when the board was empty.
-        self._coverage(session).mark("video", start, end)
+        self._coverage(session).mark(MediaKind.VIDEO, start, end)
 
         ctx.events.emit(
             "vlm.segment",
@@ -928,7 +976,7 @@ class VlmPlugin(Plugin):
             start=start,
             end=end,
             chars=len(text),
-            role="board_recognition",
+            role=AgentRole.BOARD_RECOGNITION,
         )
 
         threshold = self._setting("vlm.dedupe_threshold", 0.92)
@@ -936,18 +984,18 @@ class VlmPlugin(Plugin):
             last_text = self._last_visual_text
 
         if not text:
-            note = "模型返回空"
+            note = WindowOutcome.EMPTY_RESPONSE
         elif text.strip() == NO_CHANGE_MARKER:
-            note = "与上一窗口无变化，已跳过"
+            note = WindowOutcome.UNCHANGED
         elif text == BLANK_BOARD_MARKER or is_trivial_board_text(text):
-            note = "未识别到板书（空白黑板或仅示意图）"
+            note = WindowOutcome.BLANK_BOARD
         elif (
             last_text
             and difflib.SequenceMatcher(None, last_text, text).ratio() >= threshold
         ):
-            note = "与上一窗口重复，已跳过"
+            note = WindowOutcome.DUPLICATE
         else:
-            note = "已写入板书"
+            note = WindowOutcome.WRITTEN
 
         with self._lock:
             self._last_window = {
@@ -965,13 +1013,13 @@ class VlmPlugin(Plugin):
             len(text),
         )
 
-        if note == "已写入板书":
+        if note == WindowOutcome.WRITTEN:
             visual = session.visual
             item = visual.append(
                 text,
                 start=start,
                 end=end,
-                source="vlm",
+                source=TextSource.VLM,
                 meta={
                     "image_path": image_path,
                     "model": result.get("model", ""),
@@ -994,9 +1042,68 @@ class VlmPlugin(Plugin):
             "start": start,
             "end": end,
             "chars": len(text),
-            "skipped": note != "已写入板书",
+            "skipped": note != WindowOutcome.WRITTEN,
             "note": note,
         }
+
+    def _skip_failed_window(self, session, start, end, error):
+        with self._lock:
+            if (
+                session.session_id in self._cancelled_sessions
+                or self._stop_event.is_set()
+            ):
+                raise RuntimeError("VLM session cancelled")
+            detail = {
+                "code": error.code,
+                "message": str(error),
+                "attempts": error.attempts,
+            }
+            record = {"start": start, "end": end, "error": detail}
+            path = self._ctx.data_dir / "sessions" / session.session_id / VISUAL_LOG
+            with self._persist_lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                previous = (
+                    [
+                        json.loads(line)
+                        for line in path.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                    if path.exists()
+                    else []
+                )
+                if not any(
+                    row.get("start") == start
+                    and row.get("end") == end
+                    and row.get("error", {}).get("code") == error.code
+                    for row in previous
+                ):
+                    with path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            failure = {
+                "start": start,
+                "end": end,
+                "error": str(error),
+                "code": error.code,
+                "attempts": error.attempts,
+            }
+            self._ctx.streams.seal_text(
+                session.session_id, StreamKind.VISUAL, end, error=failure
+            )
+            self._last_error = str(error)
+            self._last_window = {
+                **failure,
+                "chars": 0,
+                "text": "",
+                "note": "板书识别失败，已记录缺口并继续",
+            }
+            self._cursor = max(self._cursor, float(end))
+            session.video_gate.release(end)
+            session.video.trim(max(0.0, float(end) - 30.0))
+        self._ctx.events.emit(
+            "vlm.error", session_id=session.session_id, recoverable=True, **failure
+        )
+        self._ctx.ui.refresh("vlm.error")
+        return {"ok": False, "skipped": True, **failure}
 
     def _process_window(
         self,
@@ -1010,12 +1117,14 @@ class VlmPlugin(Plugin):
         self._processing_session = self._processing_session or ctx.streams.current
         try:
             result = self._run_window(start, end, frames)
+        except VLMRecognitionError as exc:
+            return self._skip_failed_window(self._processing_session, start, end, exc)
         except Exception as exc:
             self._last_error = f"{type(exc).__name__}: {exc}"
             session = self._processing_session
             ctx.streams.seal_text(
                 session.session_id,
-                "visual",
+                StreamKind.VISUAL,
                 start,
                 error={"start": start, "end": end, "error": self._last_error},
             )
@@ -1049,7 +1158,9 @@ class VlmPlugin(Plugin):
 
     @staticmethod
     def _should_skip(session: Any, start: float, end: float) -> bool:
-        return skip_coverage(getattr(session, "meta", None), "video").covers(start, end)
+        return skip_coverage(getattr(session, "meta", None), MediaKind.VIDEO).covers(
+            start, end
+        )
 
     def busy(self) -> bool:
         if not self.enabled():
@@ -1063,7 +1174,7 @@ class VlmPlugin(Plugin):
                 return False
             if session is None or not session.input_done:
                 return False
-            if str(session.meta.get("mode", "")) != "fast":
+            if str(session.meta.get("mode", "")) != ProcessingMode.FAST:
                 return False
             cursor = float(self._recording_cursor.get(session.session_id, 0.0))
             return cursor + 1.0 < session.video.duration
@@ -1080,7 +1191,7 @@ class VlmPlugin(Plugin):
             return False
         return (
             str((self._processing_session or ctx.streams.current).meta.get("mode", ""))
-            == "fast"
+            == ProcessingMode.FAST
         )
 
     def _run_recording_session(self) -> None:
@@ -1093,9 +1204,7 @@ class VlmPlugin(Plugin):
         half = window / 2.0
         cadence = self._cadence(recording=True)
         with self._lock:
-            done = sid in self._recording_sessions and (
-                session.input_done or session.ended_at is not None
-            )
+            done = session.visual_progress.final
         if done:
             # Same as the STT worker: idling must not hold the lock that the
             # UI's ``status()`` render needs on every poll.
@@ -1129,7 +1238,7 @@ class VlmPlugin(Plugin):
                         session.video.trim(max(0.0, end - 30.0))
                         ctx.streams.seal_text(
                             sid,
-                            "visual",
+                            StreamKind.VISUAL,
                             max(0.0, min(center - half, available - window)),
                         )
                         continue
@@ -1141,7 +1250,9 @@ class VlmPlugin(Plugin):
                         self._recording_cursor[sid] = center - half
                         self._next_center = center
                     ctx.streams.seal_text(
-                        sid, "visual", max(0.0, min(center - half, available - window))
+                        sid,
+                        StreamKind.VISUAL,
+                        max(0.0, min(center - half, available - window)),
                     )
                     continue
                 if (
@@ -1160,7 +1271,7 @@ class VlmPlugin(Plugin):
                                 with self._lock:
                                     self._cursor = available
                                     self._recording_cursor[sid] = available
-                    ctx.streams.seal_text(sid, "visual", available, final=True)
+                    ctx.streams.seal_text(sid, StreamKind.VISUAL, available, final=True)
                     break
                 return
         finally:
@@ -1180,7 +1291,7 @@ class VlmPlugin(Plugin):
         if session is not None:
             self._sessions[session.session_id] = session
             self._ctx.streams.set_text_enabled(
-                session.session_id, "visual", self.enabled()
+                session.session_id, StreamKind.VISUAL, self.enabled()
             )
 
     def _select_session(self):
@@ -1191,7 +1302,9 @@ class VlmPlugin(Plugin):
                 "input_failed"
             ):
                 continue
-            if self._ctx.streams.text_progress(session.session_id, "visual").final:
+            if self._ctx.streams.text_progress(
+                session.session_id, StreamKind.VISUAL
+            ).final:
                 continue
             cursor = self._recording_cursor.get(session.session_id, 0.0)
             finished = (

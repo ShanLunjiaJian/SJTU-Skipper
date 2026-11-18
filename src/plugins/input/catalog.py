@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from enum import StrEnum
 from typing import Any, Callable, TypeVar
 
 from integrations.sjtu_canvas import SJTUCatalog
@@ -16,13 +17,22 @@ _log = logging.getLogger("lecture_agent.plugins.input.catalog")
 T = TypeVar("T")
 
 
+class CatalogOperation(StrEnum):
+    COURSES = "courses"
+    RECORDINGS = "recordings"
+    RECORDING_URL = "recording_url"
+    RECORDING_STREAMS = "recording_streams"
+    LIVES = "lives"
+    LIVE_DEVICES = "live_devices"
+
+
 class Catalog:
     """Lazy catalog that reads token/base-url from a settings service."""
 
     def __init__(
         self,
         *,
-        settings: Any,  # settings service (FakeSettings or real)
+        settings: Any,
     ) -> None:
         self._settings = settings
         self._sjt_cat: SJTUCatalog | None = None
@@ -80,23 +90,21 @@ class Catalog:
     def has_token(self) -> bool:
         return bool(self._settings.get("input.canvas_token", ""))
 
-    # -- Courses ----------------------------------------------------------
-
     def list_courses(self) -> list[dict[str, Any]]:
-        return self._cached(("courses",), 60.0, lambda cat: cat.list_courses())
-
-    # -- Recordings -------------------------------------------------------
+        return self._cached(
+            (CatalogOperation.COURSES,), 60.0, lambda cat: cat.list_courses()
+        )
 
     def list_recordings(self, course_id: str, limit: int = 50) -> list[dict[str, Any]]:
         return self._cached(
-            ("recordings", str(course_id), int(limit)),
+            (CatalogOperation.RECORDINGS, str(course_id), int(limit)),
             30.0,
             lambda cat: cat.list_recordings(course_id, limit=limit),
         )
 
     def get_recording_url(self, course_id: str, video_id: str) -> str:
         return self._cached(
-            ("recording_url", str(course_id), str(video_id)),
+            (CatalogOperation.RECORDING_URL, str(course_id), str(video_id)),
             60.0,
             lambda cat: cat.get_recording_url(course_id, video_id),
         )
@@ -105,28 +113,24 @@ class Catalog:
         """Per-view URLs (``"1"``=课堂, ``"2"``=屏幕)."""
 
         return self._cached(
-            ("recording_streams", str(course_id), str(video_id)),
+            (CatalogOperation.RECORDING_STREAMS, str(course_id), str(video_id)),
             60.0,
             lambda cat: cat.get_recording_streams(course_id, video_id),
         )
 
-    # -- Live -------------------------------------------------------------
-
     def list_lives(self, start: str, end: str) -> list[dict[str, Any]]:
         return self._cached(
-            ("lives", start, end),
+            (CatalogOperation.LIVES, start, end),
             15.0,
             lambda cat: cat.list_lives(start, end),
         )
 
     def get_live_devices(self, live_id: str) -> list[dict[str, Any]]:
         return self._cached(
-            ("live_devices", str(live_id)),
+            (CatalogOperation.LIVE_DEVICES, str(live_id)),
             30.0,
             lambda cat: cat.get_live_devices(live_id),
         )
-
-    # -- Lifecycle --------------------------------------------------------
 
     def close(self) -> None:
         with self._lock:
@@ -139,5 +143,4 @@ class Catalog:
             cat.close()
 
     def reset(self) -> None:
-        """Discard cached catalog (e.g. after token change)."""
         self.close()

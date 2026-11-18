@@ -21,6 +21,7 @@ from .exceptions import VideoAuthError, VideoIntegrationError, VideoNetworkError
 from .models import (
     CanvasVideo,
     VideoAuth,
+    VideoAuthSource,
     VideoInfo,
 )
 
@@ -90,8 +91,10 @@ class SJTUVideoClient:
         self.canvas_token = canvas_token
         self.video_token = video_token.strip()
         self.video_course_id = video_course_id.strip()
-        self._auth_source = (
-            "environment" if self.video_token and self.video_course_id else ""
+        self._auth_source: VideoAuthSource = (
+            VideoAuthSource.ENVIRONMENT
+            if self.video_token and self.video_course_id
+            else VideoAuthSource.NONE
         )
         self._is_new_system = False
         self._owns_client = http_client is None
@@ -428,7 +431,7 @@ class SJTUVideoClient:
 
             self.video_token = jwt_token
             self.video_course_id = str(tecl_id)
-            self._auth_source = "canvas_sessionless_lti"
+            self._auth_source = VideoAuthSource.CANVAS_SESSIONLESS_LTI
             return self.current_auth()
 
         login_response = self._request(
@@ -486,7 +489,7 @@ class SJTUVideoClient:
             )
         self.video_token = video_token
         self.video_course_id = video_course_id
-        self._auth_source = "canvas_sessionless_lti"
+        self._auth_source = VideoAuthSource.CANVAS_SESSIONLESS_LTI
         return self.current_auth()
 
     def _ensure_auth(self, course_id: Optional[int]) -> VideoAuth:

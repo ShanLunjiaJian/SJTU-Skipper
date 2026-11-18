@@ -1,15 +1,16 @@
-"""Project model configuration, credentials, and OpenCode device login."""
-
 from __future__ import annotations
 
 import logging
 import threading
 import time
 import webbrowser
+from enum import StrEnum
 from typing import Any, Mapping
 
 from agent_runtime.client import RuntimeClient
+from core.agent_types import AgentRole, IpcMethod
 from core.plugin import Plugin, PluginContext
+from core.ui import BlockType, FormInputType
 from integrations.opencode_go import (
     OpenCodeGoError,
     poll_device_token,
@@ -26,18 +27,42 @@ _ACTIONS = (
 )
 
 
+class ProviderAuth(StrEnum):
+    NONE = "none"
+    API_KEY = "apiKey"
+    OAUTH = "oauth"
+
+
+class CredentialType(StrEnum):
+    API_KEY = "api_key"
+    OAUTH = "oauth"
+
+
+class ProviderSource(StrEnum):
+    CONFIG = "config"
+    PROJECT = "project"
+
+
 def _values(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     nested = payload.get("values")
     return nested if isinstance(nested, Mapping) else payload
 
 
-def _field(name: str, label: str, value: Any = "", **options: Any) -> dict[str, Any]:
+def _field(
+    name: str,
+    label: str,
+    value: Any = "",
+    *,
+    type: FormInputType = FormInputType.STRING,
+    input: FormInputType = FormInputType.TEXT,
+    **options: Any,
+) -> dict[str, Any]:
     return {
         "key": name,
         "name": name,
         "label": label,
-        "type": "string",
-        "input": "text",
+        "type": type,
+        "input": input,
         "value": value,
         **options,
     }
@@ -89,30 +114,40 @@ class LLMPlugin(Plugin):
         if self._ctx is not None:
             self._ctx.ui.refresh("llm:configuration")
 
-    def _call(self, method: str, **params: Any) -> dict[str, Any]:
+    def _call(self, method: IpcMethod, **params: Any) -> dict[str, Any]:
         if self._runtime is None:
             raise RuntimeError("The LLM runtime is unavailable")
-        return self._runtime.call(method, **params)
+        result = self._runtime.call(method, **params)
+        if method == IpcMethod.INFO:
+            result["roles"] = {
+                AgentRole(role): resolved
+                for role, resolved in result.get("roles", {}).items()
+            }
+            for provider in result.get("providers", []):
+                provider["auth"] = ProviderAuth(provider["auth"])
+                if provider.get("source"):
+                    provider["source"] = ProviderSource(provider["source"])
+        return result
 
     def _render_settings(self) -> list[dict[str, Any]]:
-        info = self._call("info")
+        info = self._call(IpcMethod.INFO)
         blocks: list[dict[str, Any]] = [
             {
-                "type": "form",
+                "type": BlockType.FORM,
                 "fields": [
                     _field(
                         "models_yaml",
                         "models.yml",
                         info["models_yaml"],
-                        type="text",
-                        input="textarea",
+                        type=FormInputType.TEXT,
+                        input=FormInputType.TEXTAREA,
                     ),
                     _field(
                         "roles_yaml",
                         "roles.yml",
                         info["roles_yaml"],
-                        type="text",
-                        input="textarea",
+                        type=FormInputType.TEXT,
+                        input=FormInputType.TEXTAREA,
                     ),
                 ],
                 "submit": {"label": "保存配置", "action": "llm.configure"},
@@ -126,18 +161,18 @@ class LLMPlugin(Plugin):
             if level:
                 selector += f":{level}"
             lines.append(f"- `{role}`: `{selector}`")
-        blocks.append({"type": "markdown", "text": "\n".join(lines)})
+        blocks.append({"type": BlockType.MARKDOWN, "text": "\n".join(lines)})
         providers = info.get("providers", [])
         lines = ["### 提供方凭据"]
         for provider in providers:
             status = "已配置" if provider.get("configured") else "未配置"
-            if provider.get("auth") == "none":
+            if provider.get("auth") == ProviderAuth.NONE:
                 status = "无需鉴权"
             source = provider.get("source") or "none"
             lines.append(f"- `{provider['id']}`: {status}（{source}）")
         if self._login_status:
             lines.append(self._login_status)
-        blocks.append({"type": "markdown", "text": "\n".join(lines)})
+        blocks.append({"type": BlockType.MARKDOWN, "text": "\n".join(lines)})
 
         def provider_field(items: list[dict[str, Any]]) -> dict[str, Any]:
             ids = [item["id"] for item in items]
@@ -145,37 +180,41 @@ class LLMPlugin(Plugin):
                 "provider",
                 "提供方",
                 ids[0] if ids else "",
-                type="select",
-                input="select",
+                type=FormInputType.SELECT,
+                input=FormInputType.SELECT,
                 options=ids,
             )
 
-        api_providers = [item for item in providers if item.get("auth") == "apiKey"]
+        api_providers = [
+            item for item in providers if item.get("auth") == ProviderAuth.API_KEY
+        ]
         if api_providers:
             blocks.append(
                 {
-                    "type": "form",
+                    "type": BlockType.FORM,
                     "fields": [
                         provider_field(api_providers),
-                        _field("key", "API Key", input="password"),
+                        _field("key", "API Key", input=FormInputType.PASSWORD),
                     ],
                     "submit": {"label": "保存密钥", "action": "llm.credentials"},
                 }
             )
-        oauth = [item for item in providers if item.get("auth") == "oauth"]
+        oauth = [item for item in providers if item.get("auth") == ProviderAuth.OAUTH]
         if oauth:
             blocks.append(
                 {
-                    "type": "form",
+                    "type": BlockType.FORM,
                     "fields": [provider_field(oauth)],
                     "submit": {"label": "关联套餐", "action": "llm.opencode_login"},
                 }
             )
-        configured = [item for item in providers if item.get("auth") != "none"]
+        configured = [
+            item for item in providers if item.get("auth") != ProviderAuth.NONE
+        ]
         if configured:
             blocks.append(
                 {
-                    "type": "form",
+                    "type": BlockType.FORM,
                     "fields": [provider_field(configured)],
                     "submit": {"label": "删除凭据", "action": "llm.logout"},
                 }
@@ -193,7 +232,7 @@ class LLMPlugin(Plugin):
                 "refresh": False,
             }
         try:
-            self._call("configure", models=models, roles=roles)
+            self._call(IpcMethod.CONFIGURE, models=models, roles=roles)
         except Exception as exc:
             return {
                 "ok": False,
@@ -218,7 +257,7 @@ class LLMPlugin(Plugin):
                 "refresh": False,
             }
         try:
-            self._call("credentials", provider=provider, key=key)
+            self._call(IpcMethod.CREDENTIALS, provider=provider, key=key)
         except Exception:
             # Provider errors can contain request data. Never echo credential values.
             logger.error("failed to save provider credentials")
@@ -239,7 +278,7 @@ class LLMPlugin(Plugin):
                 if self._login_provider == provider:
                     self._login_cancel.set()
                     self._login_status = ""
-                self._call("logout", provider=provider)
+                self._call(IpcMethod.LOGOUT, provider=provider)
         except Exception:
             return {"ok": False, "message": "凭据删除失败．请重试．", "refresh": False}
         self._refresh()
@@ -250,8 +289,8 @@ class LLMPlugin(Plugin):
         try:
             allowed = {
                 item["id"]
-                for item in self._call("info").get("providers", [])
-                if item.get("auth") == "oauth"
+                for item in self._call(IpcMethod.INFO).get("providers", [])
+                if item.get("auth") == ProviderAuth.OAUTH
             }
             if provider not in allowed:
                 return {
@@ -303,10 +342,10 @@ class LLMPlugin(Plugin):
                         if cancel.is_set():
                             return
                         self._call(
-                            "import_credentials",
+                            IpcMethod.IMPORT_CREDENTIALS,
                             provider=provider,
                             credential={
-                                "type": "oauth",
+                                "type": CredentialType.OAUTH,
                                 "access": tokens.access_token,
                                 "refresh": tokens.refresh_token,
                                 "expires": tokens.expires_at_ms,

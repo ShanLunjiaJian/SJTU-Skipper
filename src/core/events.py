@@ -26,8 +26,6 @@ EVENT_ERROR = "event.error"
 
 @dataclass(frozen=True, slots=True)
 class EventType:
-    """A named event type plugins may define for documentation/validation."""
-
     name: str
     description: str = ""
 
@@ -37,8 +35,6 @@ class EventType:
 
 @dataclass(frozen=True, slots=True)
 class Event:
-    """An immutable event delivered to handlers."""
-
     type: str
     payload: Mapping[str, Any]
     ts: float
@@ -53,8 +49,6 @@ Handler = Callable[[Event], None]
 
 @dataclass(slots=True)
 class Subscription:
-    """Handle returned by :meth:`EventBus.on`."""
-
     bus: "EventBus"
     type: str
     handler: Handler
@@ -86,9 +80,6 @@ class EventBus:
         self._event_id = 0
         self._logger = logger
 
-    # ------------------------------------------------------------------
-    # Registration
-    # ------------------------------------------------------------------
     def define(self, name: str, description: str = "") -> EventType:
         if not name or not isinstance(name, str):
             raise ValueError("event type name must be a non-empty string")
@@ -192,9 +183,6 @@ class EventBus:
                 1 for sub in self._handlers.get(str(event_type), ()) if sub.active
             ) + sum(1 for sub in self._any if sub.active)
 
-    # ------------------------------------------------------------------
-    # Emission
-    # ------------------------------------------------------------------
     def emit(self, event_type: str | EventType, **payload: Any) -> Event:
         name = str(event_type)
         with self._lock:
@@ -246,9 +234,6 @@ class EventBus:
                 continue
             self._dispatch(event)
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
     def start(self) -> None:
         with self._lock:
             if self._running:

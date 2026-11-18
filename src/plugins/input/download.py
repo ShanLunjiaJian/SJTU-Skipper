@@ -1,5 +1,3 @@
-"""Download recordings through a shared seekable byte cache."""
-
 from __future__ import annotations
 
 import logging
@@ -121,9 +119,6 @@ class MediaDownloader:
             self._connection_active[0] -= 1
             self._connection_condition.notify_all()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
     def start(
         self,
         url: str,
@@ -164,9 +159,6 @@ class MediaDownloader:
         finally:
             handle.close()
 
-    # ------------------------------------------------------------------
-    # Probing
-    # ------------------------------------------------------------------
     def _make_client(self, timeout: float | None = None) -> httpx2.Client:
         value = self._timeout if timeout is None else timeout
         return httpx2.Client(

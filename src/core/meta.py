@@ -10,8 +10,6 @@ InfoProvider = Callable[[], Mapping[str, Any] | str]
 
 
 class MetaRegistry:
-    """Plugins contribute small, human-readable metadata snapshots."""
-
     def __init__(self) -> None:
         self._providers: dict[str, tuple[str, InfoProvider]] = {}
         self._lock = threading.RLock()

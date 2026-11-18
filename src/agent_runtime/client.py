@@ -11,6 +11,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from core.agent_types import IpcMethod, RuntimeFrameType
+
 
 class RuntimeClient:
     def __init__(self, data_dir: Path):
@@ -50,6 +52,7 @@ class RuntimeClient:
         try:
             for line in process.stdout:
                 message = json.loads(line)
+                message["type"] = RuntimeFrameType(message["type"])
                 with self._lock:
                     target = self._pending.get(str(message.get("id", "")))
                 if target is not None:
@@ -61,16 +64,20 @@ class RuntimeClient:
         with self._lock:
             if self._process is process:
                 for target in self._pending.values():
-                    target.put({"type": "error", "error": reason})
+                    target.put({"type": RuntimeFrameType.ERROR, "error": reason})
 
-    def stream(self, method: str, *, on_sent=None, **params):
+    def stream(self, method: IpcMethod, *, on_sent=None, **params):
+        if not isinstance(method, IpcMethod):
+            raise TypeError("Runtime method must be an IpcMethod")
         with self._lock:
-            if method in ("cancel", "close_session"):
+            if method in (IpcMethod.CANCEL, IpcMethod.CLOSE_SESSION, IpcMethod.MESSAGE):
                 if (
                     self._closed
                     or self._process is None
                     or self._process.poll() is not None
                 ):
+                    if method == IpcMethod.MESSAGE:
+                        raise RuntimeError("Agent runtime is closed")
                     return
             else:
                 self._start()
@@ -94,25 +101,25 @@ class RuntimeClient:
                 on_sent()
             while True:
                 message = target.get()
-                if message["type"] == "error":
+                if message["type"] == RuntimeFrameType.ERROR:
                     raise RuntimeError(message["error"])
                 yield message
-                if message["type"] == "result":
+                if message["type"] == RuntimeFrameType.RESULT:
                     break
         finally:
             with self._lock:
                 self._pending.pop(request_id, None)
 
-    def call(self, method: str, **params) -> dict[str, Any]:
+    def call(self, method: IpcMethod, **params) -> dict[str, Any]:
         for message in self.stream(method, **params):
-            if message["type"] == "result":
+            if message["type"] == RuntimeFrameType.RESULT:
                 return message["result"]
-        if method in ("cancel", "close_session"):
+        if method in (IpcMethod.CANCEL, IpcMethod.CLOSE_SESSION):
             return {}
         raise RuntimeError("Agent runtime returned no result")
 
     def cancel(self, session_id: str):
-        return self.call("cancel", session_id=session_id)
+        return self.call(IpcMethod.CANCEL, session_id=session_id)
 
     def close(self):
         with self._lock:
