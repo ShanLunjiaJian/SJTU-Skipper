@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-from core.media import MediaKind, ProcessingMode
-from core.streams import StreamKind
-from plugins.stt.client import SttEventType
-
 import json
 import logging
 import queue
@@ -15,21 +11,17 @@ import httpx2
 import pytest
 
 from core.events import EventBus
+from core.media import MediaKind, ProcessingMode
 from core.meta import MetaRegistry
 from core.plugin import PluginContext
 from core.services import ServiceRegistry
-from core.streams import StreamHub
+from core.streams import StreamHub, StreamKind
 from core.ui import UIManager
 from plugins.stt import STTPlugin
-from plugins.stt.client import STTClient
+from plugins.stt.client import STTClient, SttEventType
 from plugins.stt.errors import SttError
 from plugins.stt.plugin import PAGE_ID
 from tests.support import FakeSettings
-
-
-class Settings(FakeSettings):
-    def reset(self, key: str) -> None:
-        self.values.pop(key, None)
 
 
 def make_ctx(tmp_path: Path, values: dict[str, Any] | None = None) -> PluginContext:
@@ -37,7 +29,9 @@ def make_ctx(tmp_path: Path, values: dict[str, Any] | None = None) -> PluginCont
     bus.start()
     services = ServiceRegistry()
     services.register(
-        "settings", Settings({"stt.enabled": False, **(values or {})}), plugin_id="test"
+        "settings",
+        FakeSettings({"stt.enabled": False, **(values or {})}),
+        plugin_id="test",
     )
     return PluginContext(
         plugin_id="stt",
@@ -145,10 +139,24 @@ class Stream:
 
 
 class Client:
-    def __init__(self, streams: list[Stream] | None = None) -> None:
+    supports_stream = True
+    max_window = 120.0
+
+    def __init__(
+        self,
+        streams: list[Stream] | None = None,
+        *,
+        language: str = "Chinese",
+        context: str = "",
+    ) -> None:
         self.streams: list[Stream] = []
         self.prepared = streams or []
         self.calls: list[dict[str, Any]] = []
+        self._language = language
+        self._context = context
+
+    def metadata(self, context: str = "") -> dict[str, str]:
+        return {"language": self._language, "context": context}
 
     def stream(self, **kwargs: Any) -> Stream:
         self.calls.append(kwargs)
@@ -178,11 +186,14 @@ def test_settings_service_and_debug_page(tmp_path: Path) -> None:
     plugin.setup(ctx)
     try:
         settings = ctx.service("settings")
+        assert settings.get("stt.provider") == "compatible"
         assert "stt.credentials_json" not in settings.values
         assert "stt.chunk_seconds" not in settings.values
         assert "stt.context" not in settings.values
         assert settings.get("stt.timeout") == 7
         assert settings.get("stt.concurrency") == 3
+        assert settings.get("stt.window_seconds") == 20
+        assert settings.get("stt.google.credentials_json") == ""
         assert PAGE_ID in ctx.ui.snapshot()["pages"]
         assert "stt.debug" in ctx.ui.snapshot()["commands"]
         assert ctx.service("stt").flushing() is False
@@ -269,7 +280,7 @@ def test_continuous_stream_and_subsecond_tail(
     assert all(len(frame) <= 6400 for frame in client.streams[0].frames)
     assert b"".join(client.streams[0].frames) == b"\x01\x00" * 7200
     assert client.streams[0].finished
-    assert session.audio_gate.limit >= 1930
+    assert plugin._gate_limit() >= 1930
     assert plugin.status()["cursor"] == pytest.approx(0.45)
     assert plugin.status()["partial"] is None
     assert plugin.status()["anomalies"][0]["code"] == "repetition_collapsed"
@@ -445,7 +456,7 @@ def test_no_topic(app: Any, name: Any) -> None:
     plugin, ctx = app
     session = ctx.streams.current
     session.meta["course_name"] = name
-    assert plugin._metadata(session)["context"] == ""
+    assert plugin._context_hint(session) == ""
 
 
 def test_session_topic(app: Any) -> None:
@@ -453,8 +464,8 @@ def test_session_topic(app: Any) -> None:
     old = ctx.streams.current
     old.meta["course_name"] = " 数学分析\n（荣誉）III "
     ctx.streams.start_session(meta={"course_name": "复分析"})
-    assert plugin._metadata(old)["context"] == "这是一堂数学分析 （荣誉）III课程。"
-    assert plugin._metadata(ctx.streams.current)["context"] == "这是一堂复分析课程。"
+    assert plugin._context_hint(old) == "这是一堂数学分析 （荣誉）III课程。"
+    assert plugin._context_hint(ctx.streams.current) == "这是一堂复分析课程。"
 
 
 def test_service_reports_tail_as_busy_and_flushing(

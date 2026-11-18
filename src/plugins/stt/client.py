@@ -96,21 +96,61 @@ class STTStream:
 
 
 class STTClient:
-    """Reuse one HTTP pool for concurrent uploads and track active streams."""
+    """Compatible HTTP/WebSocket STT service adapter.
+
+    Reuse one HTTP pool for concurrent uploads and track active streams.
+    """
+
+    name = "compatible"
+    label = "兼容 STT 服务（HTTP/WebSocket）"
+    supports_stream = True
+    max_window = 120.0
 
     def __init__(
         self,
         server_url: str,
         *,
         timeout: float = 60.0,
+        language: str = "Chinese",
+        context: str = "",
         transport: httpx2.BaseTransport | None = None,
     ) -> None:
         self.server_url = server_url.rstrip("/")
         self.timeout = timeout
+        self._language = language
+        self._context = context
         self._http = httpx2.Client(timeout=timeout, transport=transport)
         self._cancel = threading.Event()
         self._lock = threading.Lock()
         self._streams: set[STTStream] = set()
+
+    @staticmethod
+    def configured(get: Any) -> bool:
+        return bool(str(get("stt.server_url", "") or "").strip())
+
+    @classmethod
+    def describe(cls, get: Any) -> dict[str, Any]:
+        return {
+            "endpoint": str(get("stt.server_url", "http://127.0.0.1:8766") or ""),
+            "model": "",
+            "language": str(get("stt.language", "Chinese") or ""),
+            "missing": "兼容 STT 服务地址为空",
+        }
+
+    @classmethod
+    def create(
+        cls, get: Any, *, timeout: float = 60.0, transport: Any = None
+    ) -> STTClient:
+        return cls(
+            str(get("stt.server_url", "http://127.0.0.1:8766") or "")
+            or "http://127.0.0.1:8766",
+            timeout=timeout,
+            language=str(get("stt.language", "Chinese") or "Chinese"),
+            transport=transport,
+        )
+
+    def metadata(self, context: str = "") -> dict[str, str]:
+        return {"language": self._language, "context": context}
 
     def transcribe(self, wav: bytes, *, language: str, context: str) -> dict[str, Any]:
         for attempt in range(3):
