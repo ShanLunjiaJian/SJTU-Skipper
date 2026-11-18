@@ -14,7 +14,6 @@ from core.agent_types import (
     ExecutionBlockStatus,
     ExecutionStatus,
     FinishReason,
-    ReviewerEventType,
     RuntimeFrameType,
     AgentProfile,
     AgentRunResult,
@@ -22,7 +21,6 @@ from core.agent_types import (
     AgentSessionInfo,
     AgentTool,
     AgentToolName,
-    ReviewStatus,
 )
 from core.plugin import Plugin, PluginContext
 from core.settings_spec import SettingsSpec, SettingType
@@ -299,9 +297,7 @@ class AgentService:
                         finish_reason=FinishReason(
                             values.get("finish_reason") or FinishReason.STOP
                         ),
-                        review_status=ReviewStatus(
-                            values.get("review_status", ReviewStatus.NOT_REVIEWED)
-                        ),
+                        review_passed=values.get("review_passed") is True,
                     )
                     completed = True
                     continue
@@ -315,11 +311,11 @@ class AgentService:
                     self._decode_execution(data)
                 elif name == AgentEventType.REVIEWER:
                     data["role"] = AgentRole(data["role"])
-                    event = data["event"]
-                    if event in ReviewerEventType:
-                        data["event"] = ReviewerEventType(event)
+                    if "finished" in data:
+                        if not isinstance(data["finished"], bool):
+                            raise ValueError("Reviewer finished flag must be a boolean")
                     else:
-                        data["event"] = AgentEventType(event)
+                        data["event"] = AgentEventType(data["event"])
                         if data["event"] == AgentEventType.EXECUTION:
                             self._decode_execution(data)
                 step = int(data.pop("step", 0))

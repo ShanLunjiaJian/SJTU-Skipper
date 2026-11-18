@@ -36,11 +36,11 @@ llm-agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 
 每个 `StreamSet` 包含音频、视频、转写和板书流．时间单位为秒，媒体时间从会话起点计算．消费者各自维护读取位置．
 
-| 流 | 数据与读取契约 |
-| --- | --- |
+| 流            | 数据与读取契约                                                                               |
+| ------------- | -------------------------------------------------------------------------------------------- |
 | `AudioStream` | PCM 字节；`read(start, end)` 返回保留区间的音频；`buffered_ranges` 返回有真实 PCM 的连续区间 |
-| `VideoStream` | JPEG 帧；`read_frames` 返回含时间范围的帧；`read` 返回帧字节拼接 |
-| `TextStream` | 不可变 `TextItem` 序列；包含文本、时间、来源和元信息；按索引增量读取 |
+| `VideoStream` | JPEG 帧；`read_frames` 返回含时间范围的帧；`read` 返回帧字节拼接                             |
+| `TextStream`  | 不可变 `TextItem` 序列；包含文本、时间、来源和元信息；按索引增量读取                         |
 
 媒体流的 `duration` 是累计时间，`len()` 返回整秒．文字流的 `len()` 返回条目数．媒体追加不覆盖已有时间区间，但允许时间空洞．`trim(before)` 释放已消费媒体，累计时间保持不变．流不保证保留完整媒体供历史回放．
 
@@ -120,7 +120,7 @@ Python 与 Bun 使用带请求 ID 的 JSON Lines 通信．stdout 传 IPC 消息�
 
 来源终止后，笔记写作者读取完整来源和成功底稿．写作与修订共用 SDK 会话．启用审阅时，写作者通过 `review_notes` 调用独立只读审阅者．审阅者读取来源和 3 份文稿的冻结副本，返回 `correct` 布尔值、findings、explanation 和 confidence．
 
-审阅状态只有通过、未通过、未审阅．不需要审阅时直接通过．通过结果绑定文稿摘要，聊天消息不撤销通过．用户可调整或停止审阅流程，运行时不强制重复审阅．
+`review_passed` 记录文稿是否通过审阅．未启用审阅时自动通过．启用审阅时，文稿必须通过审阅才能发布．通过结果绑定文稿摘要，聊天消息不撤销通过．
 
 审阅 operation 独立于工具等待；异步报告只交付 1 次．报告与冻结文稿摘要绑定，文稿改变后旧报告不能批准新内容．停止父任务时取消并回收审阅子会话．
 
@@ -153,17 +153,17 @@ HTTP 和 WebSocket 共用 `auth.json` 登录保护．登录页允许未登录访
 
 ## 持久化与退出
 
-| 路径（相对 `data_dir`） | 内容 |
-| --- | --- |
-| `settings.json`、`auth.json` | 插件设置、登录账号与签名密钥 |
-| `llm_runtime/` | 模型与角色 YAML、提供方凭据、SDK 会话、授权工作区 |
-| `sessions/<sid>/meta.json` | 会话元信息 |
-| `sessions/<sid>/coverage.json` | 音频与视频处理覆盖区间 |
-| `sessions/<sid>/transcript.jsonl`、`visual.jsonl` | 转写与板书记录 |
-| `sessions/<sid>/media/`、`vlm/` | 本地录像与融合图 |
-| `sessions/<sid>/note_work/` | 片段底稿、笔记工作区与任务状态 |
-| `sessions/<sid>/lecture_source.md` | 发布使用的完整来源 |
-| `sessions/<sid>/notes/note_{knowledge,gossip,notice}.md` | 知识、闲话与通知笔记 |
-| `sessions/<sid>/notes/instant_note_{knowledge,gossip,notice}.md` | 片段预览 |
+| 路径（相对 `data_dir`）                                          | 内容                                              |
+| ---------------------------------------------------------------- | ------------------------------------------------- |
+| `settings.json`、`auth.json`                                     | 插件设置、登录账号与签名密钥                      |
+| `llm_runtime/`                                                   | 模型与角色 YAML、提供方凭据、SDK 会话、授权工作区 |
+| `sessions/<sid>/meta.json`                                       | 会话元信息                                        |
+| `sessions/<sid>/coverage.json`                                   | 音频与视频处理覆盖区间                            |
+| `sessions/<sid>/transcript.jsonl`、`visual.jsonl`                | 转写与板书记录                                    |
+| `sessions/<sid>/media/`、`vlm/`                                  | 本地录像与融合图                                  |
+| `sessions/<sid>/note_work/`                                      | 片段底稿、笔记工作区与任务状态                    |
+| `sessions/<sid>/lecture_source.md`                               | 发布使用的完整来源                                |
+| `sessions/<sid>/notes/note_{knowledge,gossip,notice}.md`         | 知识、闲话与通知笔记                              |
+| `sessions/<sid>/notes/instant_note_{knowledge,gossip,notice}.md` | 片段预览                                          |
 
 媒体流保存在内存，文本日志与覆盖记录供补录和笔记生成使用．退出时先停止输入，再取消分析和笔记任务，关闭 SDK 会话与 Bun 子进程，最后停止时钟和事件总线．

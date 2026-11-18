@@ -18,8 +18,6 @@ from core.agent_types import (
     ExecutionBlockStatus,
     ExecutionRole,
     ExecutionStatus,
-    ReviewerEventType,
-    ReviewStatus,
 )
 from plugins.notes_pipeline.types import (
     ChunkState,
@@ -221,34 +219,35 @@ def test_execution_blocks_and_review_invalidation():
     assert main["output_tokens"] == 10
     assert main["tokens_per_second"] == 5
 
-    def reviewer(event, **payload):
+    def reviewer(**payload):
         emit(
             AgentEventType.REVIEWER,
             reviewer_id="coverage",
             role=AgentRole.NOTE_REVIEW,
-            event=event,
             round=1,
             **payload,
         )
 
-    reviewer(ReviewerEventType.STARTED)
+    reviewer(finished=False)
     reviewer(
-        AgentEventType.EXECUTION, block=completed, metrics={"model": "review-model"}
+        event=AgentEventType.EXECUTION,
+        block=completed,
+        metrics={"model": "review-model"},
     )
     report = {
         "correct": True,
         "explanation": "Covered",
         "findings": [],
     }
-    reviewer(ReviewerEventType.FINISHED, content=json.dumps(report))
+    reviewer(finished=True, content=json.dumps(report))
     child = task["agents"]["coverage"]
-    assert child["review_status"] == ReviewStatus.PASSED
+    assert child["review_passed"] is True
     assert child["model"] == "review-model"
     assert child["blocks"][0] == completed
     assert child["blocks"][1]["kind"] == ExecutionBlockKind.REVIEW
     assert child["blocks"][1]["report"] == report
     emit(AgentEventType.FILE, file="note_knowledge.md")
-    assert child["review_status"] == ReviewStatus.NOT_REVIEWED
+    assert child["review_passed"] is False
     blocks = note_log_blocks({"session_id": "lecture", "tasks": [task], "error": ""})
     assert blocks == [
         {
@@ -262,10 +261,10 @@ def test_execution_blocks_and_review_invalidation():
     assert all(
         "history" not in card and "activity" not in card for card in blocks[0]["agents"]
     )
-    reviewer(ReviewerEventType.FAILED, error="Review failed")
-    assert child["status"] == ExecutionStatus.FAILED
-    assert child["blocks"][1]["status"] == ExecutionBlockStatus.FAILED
-    assert child["blocks"][1]["error"] == "Review failed"
+    reviewer(finished=True)
+    assert child["status"] == ExecutionStatus.COMPLETED
+    assert child["review_passed"] is False
+    assert child["blocks"][1]["report"] == report
 
 
 @pytest.mark.parametrize("correct", [True, False])
@@ -279,7 +278,7 @@ def test_review_replaces_only_final_output(correct):
     task = {"agents": {}, "label": "Writer"}
     pipeline.agent_tasks = {"writer": task}
 
-    def emit(event, round, **payload):
+    def emit(round, **payload):
         pipeline._agent_event(
             Event(
                 AgentEventType.REVIEWER,
@@ -287,7 +286,6 @@ def test_review_replaces_only_final_output(correct):
                     "session_id": "writer",
                     "reviewer_id": "reviewer",
                     "role": AgentRole.NOTE_REVIEW,
-                    "event": event,
                     "round": round,
                     **payload,
                 },
@@ -299,13 +297,14 @@ def test_review_replaces_only_final_output(correct):
     report = {"correct": correct, "explanation": "Covered", "findings": []}
     content = json.dumps(report)
     for round in (1, 2):
-        emit(ReviewerEventType.STARTED, round)
+        emit(round, finished=False)
         child = task["agents"]["reviewer"]
         assert child["status"] == ExecutionStatus.RUNNING
+        assert child["review_passed"] is False
         for suffix in ("commentary", "output-a", "output-b"):
             emit(
-                AgentEventType.EXECUTION,
                 round,
+                event=AgentEventType.EXECUTION,
                 block={
                     "id": f"{round}:{suffix}",
                     "kind": ExecutionBlockKind.TEXT,
@@ -314,14 +313,12 @@ def test_review_replaces_only_final_output(correct):
                 },
             )
         emit(
-            ReviewerEventType.FINISHED,
             round,
+            finished=True,
             content=content,
             block_ids=[f"{round}:output-a", f"{round}:output-b"],
         )
-        assert child["review_status"] == (
-            ReviewStatus.PASSED if correct else ReviewStatus.FAILED
-        )
+        assert child["review_passed"] is correct
 
     assert [block["id"] for block in child["blocks"]] == [
         "1:commentary",
@@ -334,21 +331,8 @@ def test_review_replaces_only_final_output(correct):
         report,
     ]
     pipeline._agent_event(Event(AgentEventType.FILE, {"session_id": "writer"}, 0, 0))
-    assert child["review_status"] == ReviewStatus.NOT_REVIEWED
+    assert child["review_passed"] is False
     assert child["blocks"][1]["report"] == report
-
-    emit(
-        ReviewerEventType.FAILED,
-        3,
-        content='{"overall_correctness":"correct"}',
-        error="Invalid review report",
-        block_ids=[],
-    )
-    assert len(child["blocks"]) == 5
-    assert child["blocks"][-1]["id"] == "reviewer:review:3"
-    assert child["blocks"][-1]["status"] == ExecutionBlockStatus.FAILED
-    assert "report" not in child["blocks"][-1]
-    assert child["review_status"] == ReviewStatus.FAILED
 
 
 @pytest.mark.parametrize("correct", ["true", 1, None])
@@ -367,7 +351,7 @@ def test_review_rejects_non_boolean(correct):
             {
                 "session_id": "writer",
                 "reviewer_id": "reviewer",
-                "event": ReviewerEventType.FINISHED,
+                "finished": True,
                 "round": 1,
                 "content": json.dumps({"correct": correct}),
             },
@@ -376,10 +360,8 @@ def test_review_rejects_non_boolean(correct):
         )
     )
     child = task["agents"]["reviewer"]
-    assert child["review_status"] == ReviewStatus.FAILED
-    assert child["blocks"][0]["kind"] == ExecutionBlockKind.REVIEW
-    assert child["blocks"][0]["status"] == ExecutionBlockStatus.FAILED
-    assert "report" not in child["blocks"][0]
+    assert child["review_passed"] is False
+    assert not child["blocks"]
 
 
 def test_concurrent_chunks_share_one_viewer():
@@ -475,9 +457,9 @@ class ScriptedNoteAgent:
         return True, ""
 
 
-def note_result(message="done", error=None, review_status=ReviewStatus.NOT_REVIEWED):
+def note_result(message="done", error=None, review_passed=False):
     return SimpleNamespace(
-        error=error, final_message=message, review_status=review_status
+        error=error, final_message=message, review_passed=review_passed
     )
 
 
@@ -861,12 +843,12 @@ def test_published_review_survives_restart(tmp_path):
                 env.pipeline.status(session.session_id)["phase"] == NotePhase.PUBLISHED
             )
         )
-        expected = env.pipeline.status(session.session_id)["review_status"]
+        assert env.pipeline.status(session.session_id)["review_passed"] is True
     with note_pipeline(
         tmp_path,
         lambda session, instruction: write_notes(session, "Unexpected regeneration"),
     ) as restored:
-        assert restored.pipeline.status(session.session_id)["review_status"] == expected
+        assert restored.pipeline.status(session.session_id)["review_passed"] is True
         assert (
             restored.pipeline.status(session.session_id)["phase"] == NotePhase.PUBLISHED
         )
@@ -1069,27 +1051,22 @@ def test_continuation_admission_stages(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "review_enabled, verdict, expected_status",
-    [
-        (True, ReviewStatus.NOT_REVIEWED, ReviewStatus.NOT_REVIEWED),
-        (True, ReviewStatus.PASSED, ReviewStatus.PASSED),
-        (True, ReviewStatus.FAILED, ReviewStatus.FAILED),
-        (False, ReviewStatus.NOT_REVIEWED, ReviewStatus.PASSED),
-    ],
+    "review_enabled, review_passed", [(True, False), (True, True), (False, False)]
 )
-def test_continuation_reopens_saved_writer_and_preserves_qa(
-    tmp_path, review_enabled, verdict, expected_status
+def test_continuation_requires_approval_and_preserves_qa(
+    tmp_path, review_enabled, review_passed
 ):
     from core.note_document import build_block, parse_blocks
 
     def run(session, instruction):
         write_notes(session, "Revised body")
-        return note_result(review_status=verdict)
+        return note_result(review_passed=review_passed)
 
     with note_pipeline(tmp_path, run) as env:
         pipeline = env.pipeline
         with pipeline.condition:
             state = saved_writer(pipeline)
+            state["review_passed"] = False
             if not review_enabled:
                 state["writer"]["review"] = None
             notes = tmp_path / "sessions" / "lecture" / "notes"
@@ -1098,6 +1075,7 @@ def test_continuation_reopens_saved_writer_and_preserves_qa(
             )
             path = notes / "note_knowledge.md"
             path.write_text(path.read_text() + "\n" + qa)
+            before = path.read_bytes()
             frozen_source = (
                 pipeline._directory("lecture")
                 / state["writer"]["files"][SOURCE_FILENAME]
@@ -1128,7 +1106,12 @@ def test_continuation_reopens_saved_writer_and_preserves_qa(
             [],
             ["first\nline", "second"],
         )
-        assert pipeline.status("lecture")["phase"] == NotePhase.PUBLISHED
+        status = pipeline.status("lecture")
+        published = not review_enabled or review_passed
+        assert status["phase"] == (
+            NotePhase.PUBLISHED if published else NotePhase.FAILED
+        )
+        assert status["review_passed"] is published
         assert (
             pipeline.status("lecture")["generation_state"] == GenerationState.FINISHED
         )
@@ -1136,7 +1119,9 @@ def test_continuation_reopens_saved_writer_and_preserves_qa(
         assert len(reopened) == len(env.agent.calls) == 1
         assert env.agent.calls[0][1] == "first\nline"
         assert env.agent.follow_ups == [["second"]]
-        assert pipeline.status("lecture")["review_status"] == expected_status
+        if not published:
+            assert path.read_bytes() == before
+            return
         published = path.read_text()
         assert "Revised body" in published
         preserved = parse_blocks(published)
@@ -1174,6 +1159,7 @@ def test_failed_continuation_can_retry(tmp_path):
         env.agent.reopen = reopen
         with pipeline.condition:
             state = saved_writer(pipeline)
+            state["writer"]["review"] = None
             notes = tmp_path / "sessions" / "lecture" / "notes"
             published = {name: (notes / name).read_bytes() for name in NOTE_HEADERS}
             payload = {
@@ -1374,7 +1360,7 @@ def test_stale_review_does_not_show_passed(tmp_path):
                         "session_id": "writer",
                         "reviewer_id": "review-child",
                         "role": AgentRole.NOTE_REVIEW,
-                        "event": ReviewerEventType.FINISHED,
+                        "finished": True,
                         "round": 1,
                         "stale": True,
                         "content": content,
@@ -1385,7 +1371,7 @@ def test_stale_review_does_not_show_passed(tmp_path):
             )
             child = task["agents"]["review-child"]
             assert child["session_id"] == "review-child"
-            assert child["review_status"] == ReviewStatus.NOT_REVIEWED
+            assert child["review_passed"] is False
             env.pipeline.agent_tasks.clear()
 
 

@@ -138,7 +138,7 @@ for frame in ctx.llm.stream(IpcMethod.GENERATE, role="board_recognition", messag
 
 - `llm` 服务提供项目 OMP 运行时的 `call`、`stream`、`cancel`、`close` 和 `session_transcript`．单次生成、交互会话、配置和鉴权共用该接口．文件任务由 `agent` 服务管理应用状态．
 - `call`/`stream` 的方法参数必须是 `IpcMethod` 成员（`generate`、`info`、`configure` 等）．
-- `session_transcript(session_id)` 返回可恢复会话的 SDK transcript 路径，或 `None`．运行时的指针与 transcript 布局属于 `llm` 服务，其他插件不要自行读取运行时目录．
+- `ctx.llm.session_transcript(session_id)` 返回可恢复会话的记录路径．会话仍活动、记录缺失或记录无法恢复时，返回 `None`．插件不能直接读取运行时目录．
 - 模型和思考级别来自 `roles.yml`．提供方、模型能力与兼容参数来自 `models.yml`．`api` 的可选值由安装的 OMP SDK 决定．
 - `ctx.llm.call(IpcMethod.INFO)` 返回角色、提供方状态和用量．Agent 会话创建时固定配置．
 - `stt` 使用独立 HTTP/WebSocket 服务协议．

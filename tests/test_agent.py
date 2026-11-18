@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import json
+import shutil
 import threading
 
 import pytest
 
 from config import load_config
-from core.agent_types import AgentProfile, AgentRole, AgentTool, IpcMethod, ReviewStatus
+from core.agent_types import (
+    AgentEventType,
+    AgentProfile,
+    AgentRole,
+    AgentTool,
+    IpcMethod,
+)
 from core.plugin import Plugin
 from core.runtime import build_runtime
 from core.workspace import FileWorkspace
@@ -86,13 +94,13 @@ def _make_agent_runtime(tmp_path, script=None, settings=None):
     return runtime, runtime.services.require("agent"), llm, settings
 
 
-def test_ordered_followups_and_review_status(tmp_path):
+def test_ordered_followups_and_review_approval(tmp_path):
     def script(sdk, params):
         yield {
             "type": "result",
             "result": {
                 "final_message": "Stopped",
-                "review_status": "passed",
+                "review_passed": True,
             },
         }
 
@@ -102,7 +110,7 @@ def test_ordered_followups_and_review_status(tmp_path):
         result = agent.run(session.id, "Stop reviewing", follow_ups=["Keep the notes"])
         assert sdk.runs[0]["instruction"] == "Stop reviewing"
         assert sdk.runs[0]["follow_ups"] == ["Keep the notes"]
-        assert result.review_status is ReviewStatus.PASSED
+        assert result.review_passed is True
     finally:
         runtime.stop()
 
@@ -160,16 +168,22 @@ def test_runs_keep_sdk_history_and_forward_events(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "event", ["started", "agent.run.ready", "agent.delta", "finished"]
+    "payload",
+    [
+        {"finished": False},
+        {"event": AgentEventType.RUN_READY},
+        {"event": AgentEventType.DELTA},
+        {"finished": True},
+    ],
 )
-def test_reviewer_events_preserve_run(tmp_path, event):
+def test_reviewer_events_preserve_run(tmp_path, payload):
     def script(sdk, params):
         yield {
             "type": "event",
             "name": "agent.reviewer",
             "data": {
                 "role": "note_review",
-                "event": event,
+                **payload,
                 "reviewer_id": "writer-review",
                 "text": "Review text",
             },
@@ -184,7 +198,8 @@ def test_reviewer_events_preserve_run(tmp_path, event):
         assert result.error is None
         assert result.final_message == "Notes complete"
         forwarded = next(item for item in observed if item.type == "agent.reviewer")
-        assert forwarded.data["event"] == event
+        for name, value in payload.items():
+            assert forwarded.data[name] is value
         assert forwarded.data["reviewer_id"] == "writer-review"
     finally:
         runtime.stop()
@@ -511,26 +526,45 @@ def test_reopen_uses_strict_native_operation(tmp_path):
 def test_can_resume_reads_saved_transcript_through_runtime(tmp_path):
     from agent_runtime.client import RuntimeClient
 
+    if shutil.which("bun") is None:
+        pytest.skip("Bun is required for the runtime")
     runtime, agent, _sdk, _ = _make_agent_runtime(tmp_path)
+    client = RuntimeClient(tmp_path)
     try:
         live = agent.create_session("writer")
-        client = RuntimeClient(tmp_path)
         agent._runtime = client
         assert agent.can_resume("") == (False, "agent session is unknown")
+        assert agent.can_resume(live.id) == (False, "agent session is still live")
         assert agent.can_resume("writer") == (
             False,
             "saved session transcript is unavailable",
         )
+        pointer = tmp_path / "session-writer.path"
         transcript = tmp_path / "writer.jsonl"
+        pointer.write_text(str(transcript), encoding="utf-8")
+        assert not agent.can_resume("writer")[0]
         transcript.write_text("{}\n", encoding="utf-8")
-        (tmp_path / "session-writer.path").write_text(str(transcript), encoding="utf-8")
+        assert not agent.can_resume("writer")[0]
+        header = {
+            "type": "session",
+            "version": 3,
+            "id": "writer",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "cwd": str(tmp_path),
+        }
+        entry = {
+            "type": "message",
+            "id": "prompt",
+            "parentId": None,
+            "timestamp": header["timestamp"],
+            "message": {"role": "user", "content": "Continue", "timestamp": 0},
+        }
+        transcript.write_text(json.dumps(header) + "\n", encoding="utf-8")
+        assert not agent.can_resume("writer")[0]
+        history = "\n".join(map(json.dumps, (header, entry))) + "\n"
+        transcript.write_text(history, encoding="utf-8")
         assert agent.can_resume("writer") == (True, "")
-        (tmp_path / "session-writer.path").write_text("", encoding="utf-8")
-        assert not agent.can_resume("writer")[0]
-        transcript.unlink()
-        (tmp_path / "session-writer.path").write_text(str(transcript), encoding="utf-8")
-        assert not agent.can_resume("writer")[0]
-        assert agent.can_resume(live.id) == (False, "agent session is still live")
-        assert client._process is None
+        assert transcript.read_text(encoding="utf-8") == history
     finally:
+        client.close()
         runtime.stop()

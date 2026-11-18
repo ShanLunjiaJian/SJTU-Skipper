@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { Runtime } from "./runtime";
-import { ReviewStatus } from "./review";
 import {
   AgentRole,
   IpcMethod,
@@ -219,7 +218,7 @@ test("configured instructions remain ordered user messages", async () => {
         ),
     ).toBe(false);
     expect(result).toHaveProperty("final_message", "Done without review");
-    expect(result).toHaveProperty("review_status", ReviewStatus.PASSED);
+    expect(result).toHaveProperty("review_passed", true);
   } finally {
     await fixture.close();
   }
@@ -279,8 +278,63 @@ test("writer cannot complete before a passing review", async () => {
       () => {},
     );
     expect(result).toHaveProperty("final_message", "Reviewed completion");
-    expect(result).toHaveProperty("review_status", ReviewStatus.PASSED);
+    expect(result).toHaveProperty("review_passed", true);
     expect(reviewerCalls).toBe(1);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test.each([false, undefined])("writer cannot finish without approval (%s)", async (correct) => {
+  const events: Record<string, unknown>[] = [];
+  let writerCalls = 0;
+  const fixture = await localRuntime((body) => {
+    if (JSON.stringify(body.messages).includes("REJECT_REVIEW")) {
+      if (correct === undefined)
+        return Response.json({ error: { message: "Reviewer unavailable" } }, { status: 400 });
+      return sse(
+        modelText(
+          JSON.stringify({ correct, explanation: "Fix notes", confidence: 1, findings: [] }),
+        ),
+      );
+    }
+    return ++writerCalls === 1
+      ? sse(modelTool("review_notes", {}, "review-rejected"))
+      : sse(modelText("Premature completion"));
+  });
+  try {
+    const files: Record<string, string> = {};
+    for (const name of [
+      "lecture_source.md",
+      "note_knowledge.md",
+      "note_gossip.md",
+      "note_notice.md",
+    ]) {
+      files[name] = path.join(fixture.root, name);
+      await Bun.write(files[name]!, "Notes");
+    }
+    await fixture.runtime.dispatch(
+      IpcMethod.CREATE_SESSION,
+      {
+        id: "rejected",
+        files,
+        meta: { review: { system: "REJECT_REVIEW", prompt: "Review", maxRounds: 1 } },
+      },
+      () => {},
+    );
+    await expect(
+      fixture.runtime.dispatch(
+        IpcMethod.RUN,
+        { session_id: "rejected", instruction: "Write notes" },
+        (name, data) => {
+          if (name === RuntimeEvent.REVIEWER && typeof data.finished === "boolean")
+            events.push(data);
+        },
+      ),
+    ).rejects.toThrow("Review round limit reached without approval");
+    expect(events.map((event) => event.finished)).toEqual([false, true]);
+    if (correct === undefined) expect(events[1]).not.toHaveProperty("content");
+    else expect(JSON.parse(String(events[1]?.content)).correct).toBe(false);
   } finally {
     await fixture.close();
   }
@@ -363,7 +417,7 @@ test("an accepted review survives a harmless user message", async () => {
         () => {},
       ),
     ).toEqual({ accepted: true });
-    expect(await run).toMatchObject({ final_message: "Finished", review_status: "passed" });
+    expect(await run).toMatchObject({ final_message: "Finished", review_passed: true });
     expect(reviews).toBe(1);
     expect(writers).toBe(3);
   } finally {
@@ -442,7 +496,7 @@ test("message admitted during the final review check is delivered", async () => 
     );
     expect(injected).toBe(true);
     expect(delivered).toEqual(["Late message"]);
-    expect(result).toMatchObject({ final_message: "Delivered", review_status: "passed" });
+    expect(result).toMatchObject({ final_message: "Delivered", review_passed: true });
     expect(reviews).toBe(1);
     expect(writers).toBeGreaterThan(1);
   } finally {
@@ -942,11 +996,10 @@ test("writer messages preserve acceptance for unchanged files", async () => {
     reviewerRelease.resolve();
     const result = await run;
     expect(result).toHaveProperty("final_message", "Final answer");
-    expect(result).toHaveProperty("review_status", ReviewStatus.PASSED);
+    expect(result).toHaveProperty("review_passed", true);
     expect(reviewCalls).toBe(1);
     const finished = events.filter(
-      ({ name, data }) =>
-        name === RuntimeEvent.REVIEWER && data.event === RuntimeEvent.REVIEW_FINISHED,
+      ({ name, data }) => name === RuntimeEvent.REVIEWER && data.finished === true,
     );
     expect(finished.map(({ data }) => data.stale)).toEqual([false]);
     const sourceIds = finished[0]!.data.block_ids as string[];
@@ -1181,7 +1234,7 @@ test("reviewer retains history and refreshes notes across rounds", async () => {
     );
     expect(result).toMatchObject({
       final_message: "Reviewed correction",
-      review_status: ReviewStatus.PASSED,
+      review_passed: true,
     });
     expect(writers).toBe(4);
     expect(reviewerRequests).toHaveLength(4);
@@ -1203,7 +1256,7 @@ test("reviewer retains history and refreshes notes across rounds", async () => {
       "continuity-review",
       "continuity-review",
     ]);
-    const finished = events.filter((event) => event.event === RuntimeEvent.REVIEW_FINISHED);
+    const finished = events.filter((event) => event.finished === true);
     expect(finished.map((event) => event.stale)).toEqual([false, false]);
     await fixture.runtime.dispatch(IpcMethod.CLOSE_SESSION, { session_id: "continuity" }, () => {});
     await expect(
@@ -1304,10 +1357,7 @@ test("reviewer messages change only the reviewer turn", async () => {
     expect(await run).toHaveProperty("final_message", "Reviewed");
     expect(writers).toBe(2);
     expect(reviewers).toBe(2);
-    expect(events.find((event) => event.event === RuntimeEvent.REVIEW_FINISHED)).toHaveProperty(
-      "stale",
-      false,
-    );
+    expect(events.find((event) => event.finished === true)).toHaveProperty("stale", false);
     expect(
       await fixture.runtime.dispatch(
         IpcMethod.MESSAGE,
@@ -1323,6 +1373,7 @@ test("reviewer messages change only the reviewer turn", async () => {
 test("explicit stop cancels parent and reviewer without delivery", async () => {
   const reviewerStarted = Promise.withResolvers<void>();
   let reviewerId = "";
+  const lifecycle: Record<string, unknown>[] = [];
   const fixture = await localRuntime((body) => {
     if (!JSON.stringify(body.messages).includes("REVIEW_STOP"))
       return sse(modelTool("review_notes", {}, "review-stop"));
@@ -1371,6 +1422,7 @@ test("explicit stop cancels parent and reviewer without delivery", async () => {
       (name, data) => {
         if (name === RuntimeEvent.REVIEWER) {
           reviewerId = String(data.reviewer_id);
+          if (typeof data.finished === "boolean") lifecycle.push(data);
           if (data.event === RuntimeEvent.DELTA) reviewerStarted.resolve();
         }
       },
@@ -1382,6 +1434,8 @@ test("explicit stop cancels parent and reviewer without delivery", async () => {
     await reviewerStarted.promise;
     await fixture.runtime.dispatch(IpcMethod.CANCEL, { session_id: "stop-parent" }, () => {});
     expect(String(await outcome)).toContain("cancelled");
+    expect(lifecycle.map((event) => event.finished)).toEqual([false, true]);
+    expect(lifecycle.at(-1)).not.toHaveProperty("content");
     expect(
       await fixture.runtime.dispatch(
         IpcMethod.MESSAGE,
@@ -1468,11 +1522,10 @@ test("reviewer corrects malformed reports in the same round", async () => {
       },
     );
     expect(result).toHaveProperty("final_message", "Complete");
-    expect(result).toHaveProperty("review_status", ReviewStatus.PASSED);
-    expect(events.filter((event) => event.event === RuntimeEvent.REVIEW_STARTED)).toHaveLength(1);
-    expect(events.filter((event) => event.event === RuntimeEvent.REVIEW_FINISHED)).toHaveLength(1);
-    expect(events.some((event) => event.event === RuntimeEvent.REVIEW_FAILED)).toBe(false);
-    const child = events.find((event) => event.event === RuntimeEvent.REVIEW_STARTED)?.reviewer_id;
+    expect(result).toHaveProperty("review_passed", true);
+    expect(events.filter((event) => event.finished === false)).toHaveLength(1);
+    expect(events.filter((event) => event.finished === true)).toHaveLength(1);
+    const child = events.find((event) => event.finished === false)?.reviewer_id;
     await fixture.runtime.dispatch(IpcMethod.CLOSE_SESSION, { session_id: "invalid" }, () => {});
     await expect(
       fixture.runtime.dispatch(IpcMethod.RUN, { session_id: child, instruction: "Late" }, () => {}),

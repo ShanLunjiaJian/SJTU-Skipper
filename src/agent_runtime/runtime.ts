@@ -14,7 +14,7 @@ import { registerOpenCode } from "./opencode";
 import { generate } from "./generate";
 import { compact as compactContext } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import { ReviewGate, ReviewStatus, parseReviewReport, type ReviewOptions } from "./review";
+import { ReviewGate, parseReviewReport, type ReviewOptions } from "./review";
 import { observeExecution } from "./execution";
 import { providerView } from "./provider-view";
 import {
@@ -322,8 +322,59 @@ export class Runtime {
     return this.config;
   }
 
+  private async savedTranscriptPath(id: string) {
+    const pointer = path.join(this.root, `session-${id}.path`);
+    const saved = (await Bun.file(pointer).exists()) ? (await Bun.file(pointer).text()).trim() : "";
+    if (!saved) throw new Error(`Saved session transcript is unavailable: ${id}`);
+    let loaded;
+    try {
+      loaded = parseSessionContent(await readFile(saved, "utf8"));
+    } catch {
+      throw new Error(`Saved session transcript is unreadable: ${id}`);
+    }
+    if (
+      loaded.invalidHeader ||
+      loaded.malformedRecords ||
+      !loaded.entries.some((entry) => entry.type === "message")
+    )
+      throw new Error(`Saved session transcript is invalid: ${id}`);
+    return saved;
+  }
+
+  private async openSavedSession(id: string, saved: string, suppressBreadcrumb = false) {
+    const manager = await SessionManager.open(saved, path.join(this.root, "sessions"), undefined, {
+      initialCwd: path.join(this.root, "workspaces", id),
+      throwIfMissing: true,
+      suppressBreadcrumb,
+    });
+    if (
+      !manager
+        .getBranch()
+        .some((entry) => entry.type === "message" && entry.message.role === "user")
+    ) {
+      await manager.close();
+      throw new Error(`Saved session transcript has no conversation: ${id}`);
+    }
+    return manager;
+  }
+
+  private async sessionTranscript(id: string) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id) || this.sessions.has(id) || this.opening.has(id))
+      return { path: null };
+    try {
+      const saved = await this.savedTranscriptPath(id);
+      const manager = await this.openSavedSession(id, saved, true);
+      await manager.close();
+      return { path: manager.getSessionFile() ?? null };
+    } catch {
+      return { path: null };
+    }
+  }
+
   async dispatch(method: IpcMethod, params: Record<string, unknown>, emit: Emit): Promise<unknown> {
     if (method === IpcMethod.MESSAGE) return this.message(params);
+    if (method === IpcMethod.SESSION_TRANSCRIPT)
+      return this.sessionTranscript(String(params.session_id));
     if (method === IpcMethod.CANCEL || method === IpcMethod.CLOSE_SESSION) {
       const conversation = this.sessions.get(String(params.session_id));
       if (conversation?.run) void this.stopRun(conversation, conversation.run).catch(() => {});
@@ -439,26 +490,7 @@ export class Runtime {
         const sessionDir = path.join(this.root, "sessions");
         const pointer = path.join(this.root, `session-${id}.path`);
         const saved =
-          method === IpcMethod.REOPEN_SESSION && (await Bun.file(pointer).exists())
-            ? (await Bun.file(pointer).text()).trim()
-            : undefined;
-        if (method === IpcMethod.REOPEN_SESSION && !saved?.trim())
-          throw new Error(`Saved session transcript is unavailable: ${id}`);
-        if (method === IpcMethod.REOPEN_SESSION && saved) {
-          let loaded;
-          try {
-            loaded = parseSessionContent(await readFile(saved, "utf8"));
-          } catch {
-            throw new Error(`Saved session transcript is unreadable: ${id}`);
-          }
-          if (
-            loaded.invalidHeader ||
-            loaded.malformedRecords ||
-            !loaded.entries.length ||
-            !loaded.entries.some((entry) => entry.type === "message")
-          )
-            throw new Error(`Saved session transcript is invalid: ${id}`);
-        }
+          method === IpcMethod.REOPEN_SESSION ? await this.savedTranscriptPath(id) : undefined;
         const role = validate(agentRoleSchema, params.role ?? AgentRole.DEFAULT, "agent role");
         const resolved = this.resolve(config, role);
         const compact = this.resolve(config, AgentRole.COMPACTION);
@@ -490,16 +522,17 @@ export class Runtime {
         const gate = reviewOptions
           ? new ReviewGate(cwd, reviewOptions, async (role, prompt, files, signal, operation) => {
               const child = `${id}-review`;
-              const childEvents: Emit = (name, data) =>
+              const reviewerEvent = (data: Record<string, unknown>) =>
                 this.sessions.get(id)?.emit(RuntimeEvent.REVIEWER, {
                   ...data,
                   session_id: id,
                   reviewer_id: child,
                   role,
-                  event: name,
                   round: operation.round,
                   stale: operation.isStale(),
                 });
+              const childEvents: Emit = (name, data) => reviewerEvent({ ...data, event: name });
+              signal?.throwIfAborted();
               let cancellation: Promise<unknown> | undefined;
               let output: { final_message: string; final_message_block_ids: string[] } | undefined;
               const abort = () => {
@@ -508,8 +541,7 @@ export class Runtime {
               };
               signal?.addEventListener("abort", abort, { once: true });
               try {
-                signal?.throwIfAborted();
-                childEvents(RuntimeEvent.REVIEW_STARTED, {});
+                reviewerEvent({ finished: false });
                 const reviewer = this.sessions.get(child);
                 if (reviewer) {
                   await reviewer.workspace.initialize(files, Object.keys(files));
@@ -547,7 +579,6 @@ export class Runtime {
                     final_message: string;
                     final_message_block_ids: string[];
                   };
-                  output = result;
                   if (result.error) throw new Error(result.error);
                   signal?.throwIfAborted();
                   try {
@@ -556,21 +587,18 @@ export class Runtime {
                     instruction = `${error instanceof Error ? error.message : String(error)}\nReturn a corrected JSON report that satisfies the review schema.`;
                     continue;
                   }
-                  childEvents(RuntimeEvent.REVIEW_FINISHED, {
-                    content: result.final_message,
-                    block_ids: result.final_message_block_ids,
-                  });
+                  output = result;
                   return result.final_message;
                 }
-              } catch (error) {
-                childEvents(RuntimeEvent.REVIEW_FAILED, {
-                  error: error instanceof Error ? error.message : String(error),
-                  content: output?.final_message,
-                  block_ids: output?.final_message_block_ids,
-                });
-                throw error;
               } finally {
                 signal?.removeEventListener("abort", abort);
+                reviewerEvent({
+                  finished: true,
+                  ...(output && {
+                    content: output.final_message,
+                    block_ids: output.final_message_block_ids,
+                  }),
+                });
                 await cancellation;
               }
             })
@@ -595,18 +623,8 @@ export class Runtime {
           }));
         };
         const manager = saved
-          ? await SessionManager.open(saved, sessionDir, undefined, {
-              initialCwd: cwd,
-              throwIfMissing: true,
-            })
+          ? await this.openSavedSession(id, saved)
           : SessionManager.create(cwd, sessionDir);
-        if (
-          method === IpcMethod.REOPEN_SESSION &&
-          !manager
-            .getBranch()
-            .some((entry) => entry.type === "message" && entry.message.role === "user")
-        )
-          throw new Error(`Saved session transcript has no conversation: ${id}`);
         const result = await createAgentSession({
           cwd,
           agentId: id,
@@ -858,6 +876,7 @@ export class Runtime {
           const generation = control.generation;
           for (const change of await conversation.workspace.changes())
             emit(RuntimeEvent.FILE, { session_id: id, ...change });
+          const reviewPassed = (await conversation.review?.satisfied()) ?? true;
           if (control.cancelled) throw new Error("Agent run cancelled");
           if (
             generation !== control.generation ||
@@ -866,29 +885,13 @@ export class Runtime {
             conversation.review?.hasPending()
           )
             continue;
-          if (conversation.review) {
-            const satisfied = await conversation.review.satisfied();
-            if (control.cancelled) throw new Error("Agent run cancelled");
-            // ``satisfied`` reads the note files, so a message may have been
-            // admitted while it awaited: stay in the loop and deliver it
-            // instead of completing the run with an undelivered inbox.
-            if (
-              generation !== control.generation ||
-              control.inbox.length ||
-              control.barrier ||
-              conversation.review.hasPending()
-            )
-              continue;
-            if (!satisfied) {
-              if (conversation.review.exhausted())
-                throw new Error(
-                  "Review round limit reached without approval of the saved notes",
-                );
-              prompts = [
-                "The saved notes do not have a passing review. Call review_notes, address its findings, and obtain approval for the saved notes before completing.",
-              ];
-              continue;
-            }
+          if (!reviewPassed) {
+            if (conversation.review?.exhausted())
+              throw new Error("Review round limit reached without approval of the saved notes");
+            prompts = [
+              "The saved notes do not have a passing review. Call review_notes, address its findings, and obtain approval for the saved notes before completing.",
+            ];
+            continue;
           }
           control.acceptingMessages = false;
           break;
@@ -919,9 +922,7 @@ export class Runtime {
           steps,
           error,
           total_tokens,
-          review_status: conversation.review
-            ? await conversation.review.status()
-            : ReviewStatus.PASSED,
+          review_passed: true,
         };
       } catch (error) {
         await this.stopRun(conversation, control);

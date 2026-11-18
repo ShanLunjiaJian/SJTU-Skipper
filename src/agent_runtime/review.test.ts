@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ReviewGate, ReviewStatus, parseReviewReport } from "./review";
+import { ReviewGate, parseReviewReport } from "./review";
 
 test("edits require the unified reviewer again", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "note-review-"));
@@ -51,7 +51,6 @@ test("edits require the unified reviewer again", async () => {
     const tool = gate.tool();
     const run = () => tool.execute("review", {}, undefined, undefined, {} as never);
     expect(await gate.satisfied()).toBe(false);
-    expect(await gate.status()).toBe(ReviewStatus.NOT_REVIEWED);
     const failed = await run();
     const content = failed.content.find((block) => block.type === "text");
     if (!content || content.type !== "text") throw new Error("Missing review report");
@@ -61,7 +60,6 @@ test("edits require the unified reviewer again", async () => {
     expect(failedReport.report.findings).toHaveLength(1);
     expect(failedReport).not.toHaveProperty("review");
     expect(await gate.satisfied()).toBe(false);
-    expect(await gate.status()).toBe(ReviewStatus.FAILED);
     await Bun.write(path.join(directory, "note_knowledge.md"), "Corrected");
     // A writer's final reply does not change the gate.
     expect(await gate.satisfied()).toBe(false);
@@ -75,10 +73,8 @@ test("edits require the unified reviewer again", async () => {
     );
     expect(prompts[1]).toContain("Restored the source condition. Recheck the theorem.");
     expect(await gate.satisfied()).toBe(true);
-    expect(await gate.status()).toBe(ReviewStatus.PASSED);
     await Bun.write(path.join(directory, "note_notice.md"), "Changed after passing");
     expect(await gate.satisfied()).toBe(false);
-    expect(await gate.status()).toBe(ReviewStatus.NOT_REVIEWED);
     await run();
     expect(await gate.satisfied()).toBe(true);
     expect(seen.sort()).toEqual(

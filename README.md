@@ -85,19 +85,19 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 
 内置插件：
 
-| 插件 | id | 作用 |
-| --- | --- | --- |
-| settings | `settings` | 设置注册、持久化、设置页 |
-| llm | `llm` | 项目 Bun 运行时、模型角色配置与提供方鉴权 |
-| input | `input` | Canvas/SJTU 录播、直播、ffmpeg 源 |
-| stt | `stt` | 兼容 HTTP/WebSocket STT 服务，支持流式临时文字、定稿及课程上下文 |
-| vlm | `vlm` | 视频流 -> 融合板书 -> 文字流 |
-| llm-agent | `llm-agent` | SDK 多会话助手，原生 read/grep/glob/edit/write，流式事件与文件授权 |
-| notes-pipeline | `notes-pipeline` | 按来源完成位置整理片段，汇总文稿后审阅，通过后发布笔记 |
-| summarize | `summarize` | 笔记页面与课后 direct/fill/skip 策略 |
-| ask | `ask` | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存 |
-| reader | `reader` | 通用 Markdown 阅读页（每门课程一页），持有选中菜单与内联问答块 |
-| instant-summarize | `instant-summarize` | 分段笔记页面与预览开关，直播和录播均可使用 |
+| 插件 ID             | 作用                                                                |
+| ------------------- | ------------------------------------------------------------------- |
+| `settings`          | 设置注册、持久化、设置页                                            |
+| `llm`               | 项目 Bun 运行时、模型角色配置与提供方鉴权                           |
+| `input`             | Canvas/SJTU 录播、直播、ffmpeg 源                                   |
+| `stt`               | 兼容 HTTP/WebSocket STT 服务，支持流式临时文字、定稿及课程上下文    |
+| `vlm`               | 视频流 -> 融合板书 -> 文字流                                        |
+| `llm-agent`         | SDK 多会话助手，原生 read/grep/glob/edit/write，流式事件与文件授权  |
+| `notes-pipeline`    | 按来源完成位置整理片段，汇总文稿后审阅，通过后发布笔记              |
+| `summarize`         | 笔记页面与课后 direct/fill/skip 策略                                |
+| `ask`               | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存 |
+| `reader`            | 通用 Markdown 阅读页（每门课程一页），持有选中菜单与内联问答块      |
+| `instant-summarize` | 分段笔记页面与预览开关，直播和录播均可使用                          |
 
 分段核心区间由 `notes.chunk_seconds` 设置，`notes.overlap_seconds` 提供左侧原文上下文．重叠原文不重复计入正文．`notes.concurrency` 限制笔记 agent 并发数．分段预览标为未审阅；`note_review` 统一检查完整笔记的来源覆盖与正确性．
 
@@ -123,17 +123,6 @@ tests/
 docs/
 data/                             # 运行产物（gitignore）
 ```
-
-## 格式化
-
-flake 提供 Biome 2.6.5．`nix fmt` 通过 treefmt 调用 Biome 格式化 TypeScript，Prettier 不处理 TypeScript．配置见 `biome.json`：
-
-- 仅匹配 `.ts`、`.tsx`、`.mts`、`.cts`．
-- 使用 2 个空格缩进、LF 换行、100 列和文件末尾换行．
-- 使用双引号、分号、尾逗号和箭头函数参数括号．
-- 运算符位于换行前一行，保留对象括号内空格．
-
-只格式化运行时代码时执行 `nix develop -c biome format --write src/agent_runtime`．
 
 ## 测试
 

@@ -19,6 +19,7 @@ export enum IpcMethod {
   GENERATE = "generate",
   CREATE_SESSION = "create_session",
   REOPEN_SESSION = "reopen_session",
+  SESSION_TRANSCRIPT = "session_transcript",
   RUN = "run",
   MESSAGE = "message",
   CANCEL = "cancel",
@@ -47,9 +48,6 @@ export enum RuntimeEvent {
   LLM_ATTEMPT = "llm.attempt",
   LLM_DELTA = "llm.delta",
   LLM_REASONING = "llm.reasoning",
-  REVIEW_STARTED = "started",
-  REVIEW_FINISHED = "finished",
-  REVIEW_FAILED = "failed",
 }
 
 export enum WorkspaceTool {
@@ -266,6 +264,12 @@ export const ipcRequestSchema = type({
     id: nonemptyString,
     method: type.enumerated(IpcMethod.CANCEL, IpcMethod.CLOSE_SESSION),
     params: sessionParams,
+  })
+  .or({
+    "+": "reject",
+    id: nonemptyString,
+    method: type.enumerated(IpcMethod.SESSION_TRANSCRIPT),
+    params: type({ "+": "reject", session_id: "string" }),
   })
   .or({
     "+": "reject",

@@ -44,6 +44,9 @@ class LLMProxy:
     def cancel(self, session_id: str):
         return self._service().cancel(session_id)
 
+    def session_transcript(self, session_id: str) -> Path | None:
+        return self._service().session_transcript(session_id)
+
     def close(self) -> None:
         service = self._services.get("llm")
         if service is not None:
