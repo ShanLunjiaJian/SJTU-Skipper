@@ -44,7 +44,7 @@ llm-agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 
 媒体流的 `duration` 是累计时间，`len()` 返回整秒．文字流的 `len()` 返回条目数．媒体追加不覆盖已有时间区间，但允许时间空洞．`trim(before)` 释放已消费媒体，累计时间保持不变．流不保证保留完整媒体供历史回放．
 
-`StreamHub` 管理会话生命周期和媒体消费者登记．输入通过消费者接口取得背压与完成状态，不导入 STT/VLM 实现．`BacklogGate` 限制待处理媒体量．
+`StreamHub` 管理会话生命周期和媒体消费者登记．输入通过消费者接口取得读取限额与完成状态，不导入 STT/VLM 实现．`BacklogGate` 限制待处理媒体量．
 
 - `session.started`、`session.stopped` 报告会话生命周期．
 - `stream.appended` 报告追加．音频默认每 0.5 秒合并通知，视频默认每 1 秒合并通知，文字逐条通知．
@@ -72,10 +72,12 @@ llm-agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 - 每次发送最多 200 ms PCM，接收线程独立处理事件．
 - `partial` 更新临时文字，`final` 写入永久转写．
 - `accepted` 推进发送额度；成功结果才更新覆盖记录并释放音频．发送位置、接收位置和成功处理位置分别记录．
+- 服务在 `ready.max_audio_ms` 公布识别窗口上限．客户端据此调整未处理音频的容量上限，防止录播尚未到切分点就暂停读取．
+- 直播持续更新临时文字，定稿重新识别完整窗口，可修正临时文字中的误识别．
 - 断线重传未提交范围．重试耗尽的范围保留为覆盖缺口并报告错误．
 - 禁用 STT 时只推进逻辑音频时间，不保留 PCM 或插入静音．
 
-`stt.server_url` 默认 `http://127.0.0.1:8766`，可由 `STT_SERVER_URL` 初始化．语言与提示上下文分别通过 `stt.language`、`stt.context` 配置．
+`stt.server_url` 默认 `http://127.0.0.1:8766`，可由 `STT_SERVER_URL` 初始化．语言通过 `stt.language` 配置．直播与离线转写均使用当前会话的课程名，生成一句课程说明．课程名为空或超过 80 个字符时不发送提示．
 
 ### 板书识别
 

@@ -169,6 +169,7 @@ def test_settings_service_and_debug_page(tmp_path: Path) -> None:
         {
             "stt.credentials_json": "secret",
             "stt.chunk_seconds": 20,
+            "stt.context": "手动提示",
             "stt.timeout": 7,
             "stt.concurrency": 3,
         },
@@ -179,6 +180,7 @@ def test_settings_service_and_debug_page(tmp_path: Path) -> None:
         settings = ctx.service("settings")
         assert "stt.credentials_json" not in settings.values
         assert "stt.chunk_seconds" not in settings.values
+        assert "stt.context" not in settings.values
         assert settings.get("stt.timeout") == 7
         assert settings.get("stt.concurrency") == 3
         assert PAGE_ID in ctx.ui.snapshot()["pages"]
@@ -250,22 +252,24 @@ def test_continuous_stream_and_subsecond_tail(
     app: Any, monkeypatch: pytest.MonkeyPatch, mode: ProcessingMode, offline: bool
 ) -> None:
     plugin, ctx = app
-    client = Client()
+    stream = Stream()
+    stream.metadata["max_audio_ms"] = 960000
+    client = Client([stream])
     monkeypatch.setattr(plugin, "_new_client", lambda: client)
     session = ctx.streams.current
     session.meta["mode"] = mode
+    session.meta["course_name"] = "微积分"
     session.audio.append(b"\x01\x00" * 7200)
     session.input_done = True
-    ctx.service("settings").set_many(
-        {"stt.context": "微积分", "stt.language": "Chinese", "stt.enabled": True}
-    )
+    ctx.service("settings").set_many({"stt.language": "Chinese", "stt.enabled": True})
     wait_until(lambda: len(session.transcript) == 1 and not plugin.busy())
     assert client.calls[0]["offline"] is offline
-    assert client.calls[0]["context"] == "微积分"
+    assert client.calls[0]["context"] == "这是一堂微积分课程。"
     assert len(client.streams) == 1
     assert all(len(frame) <= 6400 for frame in client.streams[0].frames)
     assert b"".join(client.streams[0].frames) == b"\x01\x00" * 7200
     assert client.streams[0].finished
+    assert session.audio_gate.limit >= 1930
     assert plugin.status()["cursor"] == pytest.approx(0.45)
     assert plugin.status()["partial"] is None
     assert plugin.status()["anomalies"][0]["code"] == "repetition_collapsed"
@@ -420,6 +424,7 @@ def test_manual_http_preserves_log_and_metadata(
         lambda: STTClient("http://test", transport=httpx2.MockTransport(handler)),
     )
     session = ctx.streams.current
+    session.meta["course_name"] = "复分析"
     session.audio.append(b"\x00\x00" * 8000)
     result = ctx.service("stt").transcribe(0, 0.5)
     assert result["segments"] == 1
@@ -432,6 +437,24 @@ def test_manual_http_preserves_log_and_metadata(
     }
     assert plugin.status()["cursor"] == 0.5
     assert b"RIFF" in seen[0]
+    assert json.dumps("这是一堂复分析课程。").encode() in seen[0]
+
+
+@pytest.mark.parametrize("name", [None, "", " \n ", 93330, "课" * 81])
+def test_no_topic(app: Any, name: Any) -> None:
+    plugin, ctx = app
+    session = ctx.streams.current
+    session.meta["course_name"] = name
+    assert plugin._metadata(session)["context"] == ""
+
+
+def test_session_topic(app: Any) -> None:
+    plugin, ctx = app
+    old = ctx.streams.current
+    old.meta["course_name"] = " 数学分析\n（荣誉）III "
+    ctx.streams.start_session(meta={"course_name": "复分析"})
+    assert plugin._metadata(old)["context"] == "这是一堂数学分析 （荣誉）III课程。"
+    assert plugin._metadata(ctx.streams.current)["context"] == "这是一堂复分析课程。"
 
 
 def test_service_reports_tail_as_busy_and_flushing(
