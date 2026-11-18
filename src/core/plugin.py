@@ -126,20 +126,27 @@ class _ScopedUI(UIManager):
     def register_action(
         self, action_id: str, handler: Any, *, plugin_id: str = ""
     ) -> None:
-        owner = plugin_id or self._scope_plugin_id
-        if owner == self._scope_plugin_id and not action_id.startswith(
-            f"{self._scope_namespace}."
-        ):
+        owner = self._scope_plugin_id
+        if plugin_id and plugin_id != owner:
+            raise PluginError(
+                f"Plugin '{owner}' cannot register UI actions for '{plugin_id}'"
+            )
+        if not action_id.startswith(f"{self._scope_namespace}."):
             raise PluginError(
                 f"Plugin '{owner}' must register UI actions under "
                 f"'{self._scope_namespace}.*', not {action_id!r}"
             )
         super().register_action(action_id, handler, plugin_id=owner)
 
-    def unregister_action(self, action_id: str, *, plugin_id: str | None = None) -> None:
-        super().unregister_action(
-            action_id, plugin_id=plugin_id or self._scope_plugin_id
-        )
+    def unregister_action(
+        self, action_id: str, *, plugin_id: str | None = None
+    ) -> None:
+        owner = self._scope_plugin_id
+        if plugin_id and plugin_id != owner:
+            raise PluginError(
+                f"Plugin '{owner}' cannot unregister UI actions for '{plugin_id}'"
+            )
+        super().unregister_action(action_id, plugin_id=owner)
 
     def register_command(
         self,

@@ -55,6 +55,10 @@ class FileWorkspace:
     def to_dict(self) -> dict[str, Path]:
         return dict(self._files)
 
+    def copy(self) -> FileWorkspace:
+        """Copy the file map without copying file contents."""
+        return FileWorkspace(self._files, readonly=self._readonly)
+
     def text(self, name: str) -> str:
         path = self._files.get(name)
         return path.read_text(encoding="utf-8") if path and path.exists() else ""

@@ -126,10 +126,11 @@ def test_sessions_use_roles_and_authorized_files(tmp_path):
             tools=[AgentTool("read"), AgentTool("grep"), AgentTool("glob")],
         )
         agent.register_agent(profile)
+        workspace = FileWorkspace({"source.md": source}, readonly=("source.md",))
         session = agent.create_session(
             "review",
             agent="review",
-            workspace=FileWorkspace({"source.md": source}, readonly=("source.md",)),
+            workspace=workspace,
         )
         declaration = sdk.sessions[session.id]
         assert declaration["role"] == AgentRole.NOTE_REVIEW
@@ -137,6 +138,37 @@ def test_sessions_use_roles_and_authorized_files(tmp_path):
         assert declaration["readonly"] == ["source.md"]
         assert declaration["tools"] == ["read", "grep", "glob"]
         assert agent.list_sessions()[0]["model"] == "lecture/test"
+
+        exported = agent.session_workspace(session.id)
+        assert exported is not None
+        workspace.register("source.md", tmp_path / "other.md")
+        exported.register("source.md", tmp_path / "redirected.md")
+        authorized = agent.session_workspace(session.id)
+        assert authorized is not None
+        assert authorized.path("source.md") == source
+        assert authorized.readonly == ("source.md",)
+        assert authorized.text("source.md") == "complete source"
+    finally:
+        runtime.stop()
+
+
+def test_session_step_is_independent_of_runtime_options(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path)
+    try:
+        session = agent.create_session("chat", meta={"step": "runtime option"})
+        assert session.step == 0
+        during = []
+
+        def observe(event):
+            if event.type == AgentEventType.RUN_STARTED:
+                during.append(agent.get_session(session.id).step)
+
+        for _ in range(2):
+            assert agent.run(session.id, "Run", on_event=observe).steps == 1
+            assert agent.get_session(session.id).step == 1
+        assert during == [0, 0]
+        assert session.step == 0
+        assert sdk.sessions[session.id]["meta"]["step"] == "runtime option"
     finally:
         runtime.stop()
 
@@ -485,7 +517,7 @@ def test_reopen_uses_strict_native_operation(tmp_path):
     session = agent.create_session("writer", role=AgentRole.NOTE_WRITER, tools=[])
     values = dict(
         name="writer",
-        workspace=agent._session(session.id).workspace,
+        workspace=agent.session_workspace(session.id),
         system_prompt="system",
         role=AgentRole.NOTE_WRITER,
         tools=[],

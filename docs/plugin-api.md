@@ -209,10 +209,10 @@ def handler(payload: dict):
 
 Action 归属：
 
-- action id 必须以插件声明的命名空间开头（`action_namespace` 或插件 id）．跨命名空间注册会被拒绝，重复 id 也会被拒绝．
+- action id 必须以插件的命名空间开头，后接 `.`．命名空间默认是插件 id，可用 `action_namespace` 指定．插件不能以其他插件的 id 注册 action，也不能重复注册同一个 action id．
 - `ctx.ui.unregister_action(action_id)` 只允许移除本插件注册的 action．
 - `ctx.ui.action_owner(action_id)` 返回注册方插件 id 或 `None`，`ctx.ui.has_action(action_id)` 判断是否存在．
-- 驱动其他插件拥有的 action 时，用 `uses_actions = ("other.action",)` 声明．加载时校验目标存在且属于已加载插件；声明缺失会让插件加载失败．
+- 驱动其他插件的 action 时，用 `uses_actions = ("other.action",)` 声明．如果声明的 action 不存在，或注册方未加载，插件加载失败．
 - 运行时再次确认：目标 action 不存在时不要构造失效的交互控件，例如省略 `send_action`．
 
 `agent_activity` 使用精确 SDK 会话 ID 发送消息：
@@ -359,7 +359,9 @@ agent.close(writer.id)
 
 `FileWorkspace` 声明文件映射和只读文件．工具使用工作区内的相对路径．运行时拒绝绝对路径、URI、目录逃逸和符号链接．只读会话需将 `tools` 限制为 `read/grep/glob`．
 
-`create_session`、`reopen` 和 `get_session` 返回不可变的 `AgentSessionInfo`（`id`、`name`、`role`、`model`、`step`、`created_at`）．会话的工作区通过 `agent.session_workspace(session_id)` 获取；`meta` 只用于向运行时传递选项（如 `review`），不要用它回传插件自身状态．会话仍活动时 `reopen` 失败，`get_session` 只返回快照，运行中的状态以 `agent.*` 事件为准．
+`create_session`、`reopen` 和 `get_session` 返回不可变的 `AgentSessionInfo`．`step` 从 0 开始，运行结束后记录 SDK 返回的步数．运行中的状态以 `agent.*` 事件为准．会话仍活动时，`reopen` 失败．
+
+`agent.session_workspace(session_id)` 返回会话文件映射的副本，不复制文稿内容．修改传入或返回的文件映射，不会改变会话授权的路径或只读标记．`meta` 只向运行时传递选项，例如 `review`．
 
 `on_event` 接收 `AgentEvent`，事件名见第 3 节．文稿变化触发 `agent.file`，应用在 publication lock 内写回授权文件并刷新预览．
 
