@@ -19,6 +19,7 @@ from core.agent_types import (
     AgentProfile,
     AgentRunResult,
     AgentRole,
+    AgentSessionInfo,
     AgentTool,
     AgentToolName,
     ReviewStatus,
@@ -72,7 +73,7 @@ class AgentService:
         workspace: FileWorkspace | None = None,
         tools: list[AgentToolName | AgentTool] | None = None,
         meta: Mapping[str, Any] | None = None,
-    ) -> AgentSession:
+    ) -> AgentSessionInfo:
         if isinstance(agent, str):
             with self._lock:
                 profile = self._agents.get(agent)
@@ -118,7 +119,7 @@ class AgentService:
         self._create_runtime_session(session)
         with self._lock:
             self._sessions[session.id] = session
-        return session
+        return session.to_info()
 
     def reopen(
         self,
@@ -130,7 +131,7 @@ class AgentService:
         role: AgentRole,
         tools: list[AgentToolName],
         meta: Mapping[str, Any],
-    ) -> AgentSession:
+    ) -> AgentSessionInfo:
         unknown = set(tools) - set(_FILE_TOOLS)
         if unknown:
             raise ValueError(f"Unsupported tools: {', '.join(sorted(unknown))}")
@@ -153,7 +154,7 @@ class AgentService:
             with self._lock:
                 self._sessions.pop(session_id, None)
             raise
-        return session
+        return session.to_info()
 
     def message(self, session_id: str, message: str) -> dict[str, Any]:
         if not session_id or not message.strip():
@@ -161,7 +162,7 @@ class AgentService:
                 "accepted": False,
                 "reason": "A session and a non-empty message are required",
             }
-        session = self.get_session(session_id)
+        session = self._session(session_id)
         if session is not None and session.cancelled.is_set():
             return {"accepted": False, "reason": "Agent session is closing"}
         # Bun owns reviewer sessions and checks admission for every exact ID.
@@ -212,12 +213,24 @@ class AgentService:
         session.model = str(result["model"])
         session.runtime_ready = True
 
-    def get_session(self, session_id: str) -> AgentSession | None:
+    def get_session(self, session_id: str) -> AgentSessionInfo | None:
+        """Return the immutable view other plugins are allowed to read."""
+
+        session = self._session(session_id)
+        return None if session is None else session.to_info()
+
+    def session_workspace(self, session_id: str) -> FileWorkspace | None:
+        """Return the authorized file map of a live session."""
+
+        session = self._session(session_id)
+        return None if session is None else session.workspace
+
+    def _session(self, session_id: str) -> AgentSession | None:
         with self._lock:
             return self._sessions.get(session_id)
 
     def _require_session(self, session_id: str) -> AgentSession:
-        session = self.get_session(session_id)
+        session = self._session(session_id)
         if session is None:
             raise KeyError(f"Session {session_id!r} not found")
         return session
@@ -232,7 +245,7 @@ class AgentService:
         self._runtime.cancel(session_id)
 
     def close(self, session_id: str) -> None:
-        session = self.get_session(session_id)
+        session = self._session(session_id)
         if session is None:
             return
         try:
@@ -399,6 +412,7 @@ class AgentPlugin(Plugin):
     id = "llm-agent"
     requires = ("settings", "llm")
     provides = ("agent",)
+    action_namespace = "agent"
 
     def __init__(self) -> None:
         self.ctx: PluginContext | None = None

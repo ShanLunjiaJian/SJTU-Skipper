@@ -38,6 +38,8 @@ from .prompts import ASK_PROMPT_TEMPLATE, INSTANT_SYSTEM_PROMPT, RESEARCH_SYSTEM
 
 ACTION = "ask.ask"
 SELECTION_ID = "ask.ask"
+# Follow-up channel owned by the llm-agent plugin; advertised only while present.
+MESSAGE_ACTION = "agent.message"
 
 
 class AskService:
@@ -60,6 +62,7 @@ class AskPlugin(Plugin):
     requires = ("settings", "llm-agent", "reader")
     optional_requires = ("notes-pipeline",)
     provides = ("ask",)
+    uses_actions = (MESSAGE_ACTION,)
 
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
@@ -441,9 +444,10 @@ class _Live:
             return self._activity()
 
     def _activity(self) -> dict[str, Any]:
+        owner = self._plugin.ctx.ui.has_action(MESSAGE_ACTION)
         return {
             "id": f"qa-{self._qa_id}",
-            "send_action": "agent.message",
+            "send_action": MESSAGE_ACTION if owner else "",
             "send_values": {},
             "agents": [
                 {

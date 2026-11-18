@@ -39,7 +39,6 @@ from .types import (
     GenerationState,
     NotePhase,
     NotePublication,
-    NoteSessionRole,
     NoteTaskKind,
 )
 from .prompts import (
@@ -1106,7 +1105,10 @@ class NotesPipelinePlugin(Plugin):
         self, sid, session_id, instruction, *, follow_ups=(), contextualize=True
     ):
         with self._agent_slot(sid):
-            session = self.agent.get_session(session_id)
+            info = self.agent.get_session(session_id)
+            if info is None:
+                raise KeyError(f"Agent session {session_id!r} not found")
+            is_writer = info.role == AgentRole.NOTE_WRITER
             with self.condition:
                 self._check_running(sid)
                 history = self._state(sid).setdefault("last_agent_tasks", [])
@@ -1123,7 +1125,7 @@ class NotesPipelinePlugin(Plugin):
                 self.agent_tasks[session_id] = {
                     "id": f"notes-agent:{session_id}",
                     "session_id": sid,
-                    "label": session.name,
+                    "label": info.name,
                     "detail": "执行中",
                     "agent_step": 0,
                     "started": time.monotonic(),
@@ -1131,10 +1133,10 @@ class NotesPipelinePlugin(Plugin):
                         "main": self._execution_agent(
                             "main",
                             ExecutionRole.WRITER
-                            if session.meta.get("role") == NoteSessionRole.WRITER
+                            if is_writer
                             else ExecutionRole.CHUNK_WRITER,
-                            session.name,
-                            session.model,
+                            info.name,
+                            info.model,
                             session_id=session_id,
                         )
                     },
@@ -1174,10 +1176,11 @@ class NotesPipelinePlugin(Plugin):
                         )
                     )
                 if event.type == AgentEventType.FILE:
+                    workspace = self.agent.session_workspace(session_id)
                     with self.condition:
                         self._check_running(sid)
-                        if session.meta.get("role") == NoteSessionRole.WRITER:
-                            self._publish_lecture(sid, session.workspace, draft=True)
+                        if is_writer and workspace is not None:
+                            self._publish_lecture(sid, workspace, draft=True)
                             self.ctx.ui.refresh("notes.preview")
 
             try:
@@ -1193,7 +1196,7 @@ class NotesPipelinePlugin(Plugin):
                     ),
                 )
                 with self.condition:
-                    if session.meta.get("role") == NoteSessionRole.WRITER:
+                    if is_writer:
                         self.continuations[sid] = ContinuationStage.FINISHING
                     self._check_running(sid)
                     task = self.agent_tasks[session_id]
@@ -1205,7 +1208,7 @@ class NotesPipelinePlugin(Plugin):
                 return result
             finally:
                 with self.condition:
-                    if session.meta.get("role") == NoteSessionRole.WRITER:
+                    if is_writer:
                         self.continuations[sid] = ContinuationStage.FINISHING
                     task = self.agent_tasks.pop(session_id, None)
                     if task is not None:
@@ -1227,7 +1230,6 @@ class NotesPipelinePlugin(Plugin):
                 AgentToolName.EDIT,
                 AgentToolName.WRITE,
             ],
-            meta={"role": NoteSessionRole.NOTES, "lecture_session": sid},
         )
         try:
             result = self._agent_run(sid, session.id, instruction)
@@ -1456,11 +1458,7 @@ class NotesPipelinePlugin(Plugin):
                 AgentToolName.EDIT,
                 AgentToolName.WRITE,
             ],
-            meta={
-                "role": NoteSessionRole.WRITER,
-                "lecture_session": sid,
-                **({"review": review} if review_enabled else {}),
-            },
+            meta={"review": review} if review_enabled else {},
         )
         with self.condition:
             state = self._state(sid)
@@ -1515,11 +1513,7 @@ class NotesPipelinePlugin(Plugin):
                 system_prompt=saved["system_prompt"],
                 role=saved["role"],
                 tools=saved["tools"],
-                meta={
-                    "role": NoteSessionRole.WRITER,
-                    "lecture_session": sid,
-                    **({"review": review} if review else {}),
-                },
+                meta={"review": review} if review else {},
             )
             directory = self._directory(sid) / saved["directory"]
             review_enabled = review is not None

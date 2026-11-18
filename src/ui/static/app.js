@@ -1889,11 +1889,8 @@
         class: "btn btn-primary",
         text: "发送",
       });
-      root.append(
-        el("div", { class: "execution-bar" }, [select, metrics]),
-        log,
-        el("div", { class: "execution-composer" }, [input, send]),
-      );
+      const composer = el("div", { class: "execution-composer" }, [input, send]);
+      root.append(el("div", { class: "execution-bar" }, [select, metrics]), log, composer);
       view = {
         key,
         page: state.ui.active_page,
@@ -1910,6 +1907,7 @@
         rows: new Map(),
         positions: new Map(),
         agents: [],
+        composer,
       };
       const close = () => {
         menu.hidden = true;
@@ -2043,6 +2041,8 @@
     }
     view.sendAction = block.send_action;
     view.sendValues = block.send_values || {};
+    // No channel means the run is closed: keep the log, hide the composer.
+    view.composer.hidden = !view.sendAction;
     view.agents = Array.isArray(block.agents) ? block.agents : [];
     const targets = new Map();
     view.agents.forEach((agent, index) => {

@@ -136,6 +136,8 @@ Python 与 Bun 使用带请求 ID 的 JSON Lines 通信．stdout 传 IPC 消息�
 
 `agent_activity` 通过 `send_action`、`send_values` 和各记录的 `session_id` 指定消息目标．共享编辑器按目标保存草稿、光标、选区和滚动位置．日志更新不替换输入节点；问答完成时，存在草稿或待响应提交的编辑器保留在最终答案旁．
 
+UI action 按插件命名空间注册，注册与注销都校验所有者；驱动其他插件的 action 需用 `uses_actions` 声明，加载时校验目标存在且属于已加载插件．拥有者缺席时，发送方省略 `send_action`，前端隐藏编辑器只保留日志．
+
 `reader.show` 接受文档列表，为每个笔记会话建立独立页面．reader 先解析整份 Markdown，再分离内联问答组件，保留跨段脚注引用．服务端使用 `markdown-it-py` 渲染，前端用 KaTeX 渲染数学公式．
 
 `ask` 注册全局选中菜单．快速问答不注册文件工具；研究问答允许 `read`、`grep`、`glob` 读取授权材料．两种问答均包含选区上下文与历史问答．问答保存在笔记内的 `qa` 注释块中，reader 负责定位、写入、折叠和删除．`qa.live` 通知在浏览器原地更新问答内容．

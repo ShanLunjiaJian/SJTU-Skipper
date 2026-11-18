@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from core.agent_types import AgentRole, AgentToolName
+from core.agent_types import AgentRole, AgentSessionInfo, AgentToolName
 from core.workspace import FileWorkspace
 
 
@@ -34,3 +34,15 @@ class AgentSession:
             "model": self.model,
             "created_at": self.created_at,
         }
+
+    def to_info(self) -> AgentSessionInfo:
+        """Return the read-only view handed to other plugins."""
+
+        return AgentSessionInfo(
+            id=self.id,
+            name=self.name,
+            role=self.role,
+            model=self.model,
+            step=int(self.meta.get("step", 0) or 0),
+            created_at=self.created_at,
+        )

@@ -21,6 +21,7 @@ from support import FakeLLM
 
 class DemoUI(Plugin):
     id = "test-ui"
+    action_namespace = "test"
 
     def setup(self, ctx: PluginContext) -> None:
         ctx.ui.add_tab(Side.LEFT, "test", "测试", icon="◈")

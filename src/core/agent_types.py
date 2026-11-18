@@ -140,6 +140,22 @@ class AgentEvent:
     data: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class AgentSessionInfo:
+    """Immutable snapshot of one agent session, safe across plugin boundaries.
+
+    The live session object stays inside the ``llm-agent`` plugin; consumers
+    read this snapshot instead of poking at mutable session state.
+    """
+
+    id: str
+    name: str = ""
+    role: AgentRole = AgentRole.DEFAULT
+    model: str = ""
+    step: int = 0
+    created_at: float = 0.0
+
+
 @dataclass(slots=True)
 class AgentRunResult:
     session_id: str
@@ -158,6 +174,7 @@ __all__ = [
     "AgentProfile",
     "AgentRole",
     "AgentRunResult",
+    "AgentSessionInfo",
     "AgentTool",
     "AgentToolName",
     "ExecutionStatus",

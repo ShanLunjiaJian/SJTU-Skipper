@@ -297,6 +297,92 @@ def test_missing_optional_dependency_is_not_an_error(tmp_path: Path) -> None:
         runtime.stop()
 
 
+def test_uses_actions_must_exist(tmp_path: Path) -> None:
+    class Needs(Plugin):
+        id = "needs"
+        uses_actions = ("absent.message",)
+
+        def setup(self, ctx: PluginContext) -> None:
+            pass
+
+    runtime = build_runtime(load_config(data_dir=tmp_path), plugins=[Needs()])
+    with pytest.raises(PluginError, match="absent.message"):
+        runtime.start()
+    assert runtime.started is False
+
+
+def test_uses_actions_resolves_owner(tmp_path: Path) -> None:
+    class Channel(Plugin):
+        id = "channel"
+        provides = ("channel",)
+
+        def setup(self, ctx: PluginContext) -> None:
+            ctx.register_service("channel", object())
+            ctx.ui.register_action("channel.send", lambda payload: {"ok": True})
+
+    class Consumer(Plugin):
+        id = "consumer"
+        requires = ("channel",)
+        uses_actions = ("channel.send",)
+
+        def setup(self, ctx: PluginContext) -> None:
+            ctx.require("channel")
+
+    runtime = build_runtime(
+        load_config(data_dir=tmp_path), plugins=[Channel(), Consumer()]
+    )
+    runtime.start()
+    try:
+        assert runtime.ui.action_owner("channel.send") == "channel"
+        assert runtime.plugins.loaded == ["channel", "consumer"]
+    finally:
+        runtime.stop()
+
+
+def test_ui_action_namespace_is_enforced(tmp_path: Path) -> None:
+    class Wrong(Plugin):
+        id = "wrong"
+        provides = ("wrong",)
+
+        def setup(self, ctx: PluginContext) -> None:
+            ctx.ui.register_action("other.ping", lambda payload: {"ok": True})
+
+    runtime = build_runtime(load_config(data_dir=tmp_path), plugins=[Wrong()])
+    with pytest.raises(PluginError, match="must register UI actions under"):
+        runtime.start()
+    assert runtime.started is False
+
+
+def test_ui_action_unregister_checks_owner(tmp_path: Path) -> None:
+    class Owner(Plugin):
+        id = "owner"
+        provides = ("owner",)
+
+        def setup(self, ctx: PluginContext) -> None:
+            ctx.register_service("owner", object())
+            ctx.ui.register_action("owner.ping", lambda payload: {"ok": True})
+
+    class Thief(Plugin):
+        id = "thief"
+        requires = ("owner",)
+        provides = ("thief",)
+
+        def setup(self, ctx: PluginContext) -> None:
+            ctx.register_service("thief", object())
+            with pytest.raises(ValueError, match="belongs to 'owner'"):
+                ctx.ui.unregister_action("owner.ping")
+            ctx.ui.unregister_action("thief.missing")
+
+    runtime = build_runtime(load_config(data_dir=tmp_path), plugins=[Owner(), Thief()])
+    runtime.start()
+    try:
+        assert runtime.ui.has_action("owner.ping")
+        assert runtime.ui.action_owner("owner.ping") == "owner"
+        assert runtime.ui.action_owner("owner.absent") is None
+    finally:
+        runtime.stop()
+
+
 def test_unload_survives_failing_reader_cleanup(tmp_path: Path) -> None:
     class BadReader(Plugin):
         id = "reader"

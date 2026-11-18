@@ -12,6 +12,7 @@ from core.ui import Side
 class MyPlugin(Plugin):
     id = "my-plugin"
     requires = ("settings", "llm")   # 插件 id，不是服务名
+    action_namespace = "my"          # 可选；UI action 前缀，缺省等于 id
 
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
@@ -24,7 +25,7 @@ class MyPlugin(Plugin):
             render=lambda: [{"type": "text", "text": "hello"}],
         )
         ctx.ui.add_page("my:page", "我的页面", render=self.render_page)
-        ctx.ui.register_action("my.action", self.on_action, plugin_id=self.id)
+        ctx.ui.register_action("my.action", self.on_action)
         ctx.events.on("clock.tick", self.on_tick, plugin_id=self.id)
 
     def render_page(self):
@@ -197,7 +198,7 @@ Block：
 Action：
 
 ```python
-ctx.ui.register_action("my.action", handler, plugin_id=ctx.plugin_id)
+ctx.ui.register_action("my.action", handler)
 
 def handler(payload: dict):
     # payload 还包含 page_id / item_id
@@ -205,6 +206,14 @@ def handler(payload: dict):
 ```
 
 返回 `refresh=True` 会让前端重新拉取 state．长任务需在后台执行，action 立即返回．
+
+Action 归属：
+
+- action id 必须以插件声明的命名空间开头（`action_namespace` 或插件 id）．跨命名空间注册会被拒绝，重复 id 也会被拒绝．
+- `ctx.ui.unregister_action(action_id)` 只允许移除本插件注册的 action．
+- `ctx.ui.action_owner(action_id)` 返回注册方插件 id 或 `None`，`ctx.ui.has_action(action_id)` 判断是否存在．
+- 驱动其他插件拥有的 action 时，用 `uses_actions = ("other.action",)` 声明．加载时校验目标存在且属于已加载插件；声明缺失会让插件加载失败．
+- 运行时再次确认：目标 action 不存在时不要构造失效的交互控件，例如省略 `send_action`．
 
 `agent_activity` 使用精确 SDK 会话 ID 发送消息：
 
@@ -320,8 +329,8 @@ workspace = FileWorkspace(
     {"notes.md": "/path/notes.md", "source.md": "/path/source.md"},
     readonly=("notes.md", "source.md"),
 )
-session = agent.create_session(name="my-reader", agent="my.reader", workspace=workspace)
-result = agent.run(session.id, "解释这一段", on_event=lambda event: print(event))
+info = agent.create_session(name="my-reader", agent="my.reader", workspace=workspace)
+result = agent.run(info.id, "解释这一段", on_event=lambda event: print(event))
 
 # 写作会话只允许修改列出的文稿．
 writer = agent.create_session(
@@ -349,6 +358,8 @@ agent.close(writer.id)
 | `write` | 完整写入授权可写文稿                     |
 
 `FileWorkspace` 声明文件映射和只读文件．工具使用工作区内的相对路径．运行时拒绝绝对路径、URI、目录逃逸和符号链接．只读会话需将 `tools` 限制为 `read/grep/glob`．
+
+`create_session`、`reopen` 和 `get_session` 返回不可变的 `AgentSessionInfo`（`id`、`name`、`role`、`model`、`step`、`created_at`）．会话的工作区通过 `agent.session_workspace(session_id)` 获取；`meta` 只用于向运行时传递选项（如 `review`），不要用它回传插件自身状态．会话仍活动时 `reopen` 失败，`get_session` 只返回快照，运行中的状态以 `agent.*` 事件为准．
 
 `on_event` 接收 `AgentEvent`，事件名见第 3 节．文稿变化触发 `agent.file`，应用在 publication lock 内写回授权文件并刷新预览．
 

@@ -518,8 +518,25 @@ class UIManager:
                 raise ValueError(f"UI action {action_id!r} already registered")
             self._actions[action_id] = _Action(action_id, handler, plugin_id)
 
-    def unregister_action(self, action_id: str) -> None:
+    def action_owner(self, action_id: str) -> str | None:
+        """Return the plugin that registered *action_id*, or ``None``."""
+
         with self._lock:
+            action = self._actions.get(action_id)
+        return None if action is None else action.plugin_id or None
+
+    def unregister_action(self, action_id: str, *, plugin_id: str | None = None) -> None:
+        """Drop an action; ``plugin_id`` restricts it to its owner."""
+
+        with self._lock:
+            action = self._actions.get(action_id)
+            if action is None:
+                return
+            if plugin_id is not None and action.plugin_id != plugin_id:
+                raise ValueError(
+                    f"UI action {action_id!r} belongs to {action.plugin_id!r}, "
+                    f"not {plugin_id!r}"
+                )
             self._actions.pop(action_id, None)
 
     def register_command(

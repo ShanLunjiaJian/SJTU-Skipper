@@ -12,7 +12,6 @@ from plugins.notes_pipeline.types import (
     ChunkState,
     GenerationState,
     NotePhase,
-    NoteSessionRole,
 )
 from plugins.summarize.plugin import OnStopAction
 from core.agent_types import (
@@ -127,7 +126,6 @@ def test_writer_preview_is_published_before_terminal_result(tmp_path):
             "writer",
             role=AgentRole.NOTE_WRITER,
             workspace=FileWorkspace(files, readonly=(SOURCE_FILENAME,)),
-            meta={"role": NoteSessionRole.WRITER, "lecture_session": "lecture"},
         )
         results = queue.Queue()
         thread = threading.Thread(

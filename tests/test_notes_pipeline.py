@@ -12,6 +12,7 @@ from core.streams import StreamHub, StreamKind
 from core.agent_types import (
     AgentEventType,
     AgentRole,
+    AgentSessionInfo,
     AgentToolName,
     ExecutionBlockKind,
     ExecutionBlockStatus,
@@ -417,9 +418,34 @@ class ScriptedNoteAgent:
     def create_session(self, name, **kwargs):
         with self.lock:
             self.next_id += 1
-            session = SimpleNamespace(id=str(self.next_id), name=name, **kwargs)
-            self.sessions[session.id] = session
-            return session
+            session_id = str(self.next_id)
+            fields = dict(kwargs)
+            fields.setdefault("role", AgentRole.DEFAULT)
+            session = SimpleNamespace(id=session_id, name=name, **fields)
+            self.sessions[session_id] = session
+            return AgentSessionInfo(
+                id=session_id,
+                name=name,
+                role=AgentRole(session.role),
+                model="fake-model",
+            )
+
+    def get_session(self, session_id):
+        with self.lock:
+            session = self.sessions.get(session_id)
+        if session is None:
+            return None
+        return AgentSessionInfo(
+            id=session.id,
+            name=session.name,
+            role=AgentRole(session.role),
+            model="fake-model",
+        )
+
+    def session_workspace(self, session_id):
+        with self.lock:
+            session = self.sessions.get(session_id)
+        return None if session is None else session.workspace
 
     def reset(self, sid):
         assert sid in self.sessions
@@ -453,6 +479,12 @@ def note_result(message="done", error=None, review_status=ReviewStatus.NOT_REVIE
     return SimpleNamespace(
         error=error, final_message=message, review_status=review_status
     )
+
+
+def lecture_of(session):
+    """Lecture session id the pipeline prefixes to its agent-session names."""
+
+    return session.name.split(" ", 1)[0]
 
 
 def write_notes(session, body):
@@ -763,7 +795,7 @@ def test_final_tasks_keep_session_sources_when_selection_changes(tmp_path):
     writer_sources = {}
 
     def run(session, instruction):
-        sid = session.meta["lecture_session"]
+        sid = lecture_of(session)
         source = session.workspace.text(SOURCE_FILENAME)
         writer_sources[sid] = source
         both_writers.wait(8)
@@ -942,6 +974,30 @@ def saved_writer(pipeline, sid="lecture"):
     )
     pipeline._save(state)
     return state
+
+
+def test_note_log_blocks_drop_message_channel(tmp_path):
+    from plugins.summarize.plugin import note_log_blocks
+
+    task = {
+        "agents": {
+            "main": {
+                "id": "main",
+                "role": ExecutionRole.WRITER,
+                "label": "Writer",
+                "status": ExecutionStatus.RUNNING,
+                "blocks": [],
+            }
+        }
+    }
+    state = {"session_id": "lecture", "tasks": [task], "error": ""}
+    channel = note_log_blocks(state)[0]
+    assert channel["send_action"] == "notes-pipeline.message"
+    assert channel["send_values"] == {"session_id": "lecture"}
+    silent = note_log_blocks(state, message_channel=False)[0]
+    assert silent["send_action"] == ""
+    assert silent["send_values"] == {}
+    assert silent["agents"] == channel["agents"]
 
 
 def test_continuation_admission_stages(tmp_path):
@@ -1163,7 +1219,7 @@ def test_initial_failure_cannot_continue(tmp_path, draft):
         write_notes(session, "Unpublished initial notes")
         if draft:
             env.pipeline._publish_lecture(
-                session.meta["lecture_session"], session.workspace, draft=True
+                lecture_of(session), session.workspace, draft=True
             )
         return note_result(error="Initial generation failed")
 

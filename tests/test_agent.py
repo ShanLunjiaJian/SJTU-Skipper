@@ -302,7 +302,7 @@ def test_incomplete_runtime_stream_is_failure(tmp_path):
     try:
         session = agent.create_session("chat")
         assert agent.run(session.id, "Run").error
-        assert not session.runtime_ready
+        assert not agent._session(session.id).runtime_ready
     finally:
         runtime.stop()
 
@@ -325,7 +325,7 @@ def test_cancel_stops_active_runtime_run(tmp_path):
         agent.cancel(session.id)
         thread.join(3)
         assert not thread.is_alive()
-        assert session.cancelled.is_set()
+        assert agent._session(session.id).cancelled.is_set()
     finally:
         runtime.stop()
 
@@ -437,7 +437,7 @@ def test_message_does_not_wait_for_run_lock(tmp_path):
             event.type == "agent.run.ready" and event.session_id == session.id
             for event in observed
         )
-        assert not session.cancelled.is_set()
+        assert not agent._session(session.id).cancelled.is_set()
         assert agent.message("bun-owned-reviewer", "review detail")["accepted"]
     finally:
         release.set()
@@ -470,7 +470,7 @@ def test_reopen_uses_strict_native_operation(tmp_path):
     session = agent.create_session("writer", role=AgentRole.NOTE_WRITER, tools=[])
     values = dict(
         name="writer",
-        workspace=session.workspace,
+        workspace=agent._session(session.id).workspace,
         system_prompt="system",
         role=AgentRole.NOTE_WRITER,
         tools=[],
@@ -503,7 +503,7 @@ def test_reopen_uses_strict_native_operation(tmp_path):
         restored = agent.reopen(session.id, **values)
         assert restored.id == session.id
         assert restored.model == "restored-model"
-        assert not restored.cancelled.is_set()
+        assert not agent._session(session.id).cancelled.is_set()
     finally:
         runtime.stop()
 

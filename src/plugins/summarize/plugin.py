@@ -13,7 +13,7 @@ class OnStopAction(StrEnum):
     SKIP = "skip"
 
 
-def note_log_blocks(state):
+def note_log_blocks(state, *, message_channel: bool = True):
     agents = [agent for task in state["tasks"] for agent in task["agents"].values()]
     blocks = (
         [
@@ -21,8 +21,14 @@ def note_log_blocks(state):
                 "type": BlockType.AGENT_ACTIVITY,
                 "id": state["session_id"],
                 "agents": agents,
-                "send_action": "notes-pipeline.message",
-                "send_values": {"session_id": state["session_id"]},
+                **(
+                    {
+                        "send_action": "notes-pipeline.message",
+                        "send_values": {"session_id": state["session_id"]},
+                    }
+                    if message_channel
+                    else {"send_action": "", "send_values": {}}
+                ),
             }
         ]
         if agents
@@ -85,6 +91,7 @@ class SummarizePlugin(Plugin):
     requires = ("settings", "notes-pipeline", "reader")
     optional_requires = ("input",)
     provides = ("summarize",)
+    uses_actions = ("notes-pipeline.message",)
     ON_STOP_LABELS = (
         (OnStopAction.DIRECT, "直接生成笔记"),
         (OnStopAction.FILL, "先补全再生成"),
@@ -283,7 +290,10 @@ class SummarizePlugin(Plugin):
         return {"ok": True, "open_page": page}
 
     def _render_logs(self, sid):
-        blocks = note_log_blocks(self.pipeline.status(sid))
+        blocks = note_log_blocks(
+            self.pipeline.status(sid),
+            message_channel=self.ctx.ui.has_action("notes-pipeline.message"),
+        )
         return blocks or [
             {
                 "type": BlockType.TEXT,

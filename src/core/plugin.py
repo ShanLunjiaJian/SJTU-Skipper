@@ -37,6 +37,10 @@ class Plugin:
     requires: tuple[str, ...] = ()
     optional_requires: tuple[str, ...] = ()
     provides: tuple[str, ...] = ()
+    # Prefix every UI action of this plugin must use; defaults to ``id``.
+    action_namespace: str = ""
+    # UI action ids owned by other plugins that this plugin drives.
+    uses_actions: tuple[str, ...] = ()
 
     def setup(self, ctx: "PluginContext") -> None:  # pragma: no cover - abstract
         raise NotImplementedError
@@ -49,11 +53,12 @@ class Plugin:
 
 
 class _ScopedUI(UIManager):
-    __slots__ = ("_scope_plugin_id",)
+    __slots__ = ("_scope_plugin_id", "_scope_namespace")
 
-    def __init__(self, target: UIManager, plugin_id: str) -> None:
+    def __init__(self, target: UIManager, plugin_id: str, namespace: str = "") -> None:
         self.__dict__ = target.__dict__
         self._scope_plugin_id = plugin_id
+        self._scope_namespace = namespace or plugin_id
 
     def add_tab(
         self,
@@ -121,8 +126,19 @@ class _ScopedUI(UIManager):
     def register_action(
         self, action_id: str, handler: Any, *, plugin_id: str = ""
     ) -> None:
-        super().register_action(
-            action_id, handler, plugin_id=plugin_id or self._scope_plugin_id
+        owner = plugin_id or self._scope_plugin_id
+        if owner == self._scope_plugin_id and not action_id.startswith(
+            f"{self._scope_namespace}."
+        ):
+            raise PluginError(
+                f"Plugin '{owner}' must register UI actions under "
+                f"'{self._scope_namespace}.*', not {action_id!r}"
+            )
+        super().register_action(action_id, handler, plugin_id=owner)
+
+    def unregister_action(self, action_id: str, *, plugin_id: str | None = None) -> None:
+        super().unregister_action(
+            action_id, plugin_id=plugin_id or self._scope_plugin_id
         )
 
     def register_command(
@@ -229,11 +245,11 @@ class _ScopedServices(ServiceRegistry):
         super().register(name, obj, plugin_id=plugin_id)
 
 
-def _scoped_ui(ui: Any, plugin_id: str) -> Any:
+def _scoped_ui(ui: Any, plugin_id: str, namespace: str = "") -> Any:
     if not plugin_id or ui is None or isinstance(ui, _ScopedUI):
         return ui
     if isinstance(ui, UIManager):
-        return _ScopedUI(ui, plugin_id)
+        return _ScopedUI(ui, plugin_id, namespace)
     return ui
 
 
@@ -268,9 +284,12 @@ class PluginContext:
     # the DAG boundary check (used by unit tests that build a context by hand).
     allowed_dependencies: set[str] | None = None
     declared_provides: tuple[str, ...] = field(default_factory=tuple)
+    action_namespace: str = ""
 
     def __post_init__(self) -> None:
-        self.ui = _scoped_ui(self.ui, self.plugin_id)
+        self.ui = _scoped_ui(
+            self.ui, self.plugin_id, self.action_namespace or self.plugin_id
+        )
         self.events = _scoped_events(self.events, self.plugin_id)
         self.meta = _scoped_meta(self.meta, self.plugin_id)
         if (
@@ -501,6 +520,12 @@ class PluginManager:
             }
         if not getattr(ctx, "declared_provides", ()):
             ctx.declared_provides = tuple(plugin.provides)
+        if not getattr(ctx, "action_namespace", ""):
+            ctx.action_namespace = plugin.action_namespace or plugin.id
+        # ``__post_init__`` already wrapped ``ctx.ui``; re-wrap it so the scope
+        # carries the declared action namespace instead of assuming the id.
+        if self._ui is not None and isinstance(ctx.ui, UIManager):
+            ctx.ui = _scoped_ui(self._ui, plugin.id, ctx.action_namespace)
         return ctx
 
     @staticmethod
@@ -512,6 +537,22 @@ class PluginManager:
             if dep in plugins and dep not in deps and dep != plugin.id:
                 deps.append(dep)
         return deps
+
+    def _check_action_usage(self, plugin: Plugin, loaded: set[str]) -> None:
+        """Every declared UI action must exist and belong to a loaded plugin."""
+
+        for action_id in plugin.uses_actions:
+            owner = self._ui.action_owner(action_id) if self._ui is not None else None
+            if owner is None:
+                raise PluginError(
+                    f"plugin {plugin.id!r} declares uses_actions={action_id!r} but "
+                    "no plugin registered that UI action"
+                )
+            if owner not in loaded:
+                raise PluginError(
+                    f"plugin {plugin.id!r} uses UI action {action_id!r} owned by "
+                    f"unloaded plugin {owner!r}"
+                )
 
     def _sort(self) -> list[str]:
         plugins = self._plugins
@@ -611,6 +652,14 @@ class PluginManager:
                 raise PluginError(f"plugin {pid!r} setup failed: {exc}") from exc
             with self._lock:
                 self._loaded.append(pid)
+        with self._lock:
+            loaded = set(self._loaded)
+        for pid in order:
+            try:
+                self._check_action_usage(self._plugins[pid], loaded)
+            except PluginError:
+                self.teardown()
+                raise
         return order
 
     def load_plugin(self, plugin_or_spec: Plugin | type[Plugin] | str) -> Plugin:
@@ -683,6 +732,19 @@ class PluginManager:
                 f"plugin {pid!r} declared provides={plugin.provides!r} but never "
                 f"registered {unregistered!r}"
             )
+
+        with self._lock:
+            loaded = set(self._loaded) | {pid}
+        try:
+            self._check_action_usage(plugin, loaded)
+        except PluginError:
+            try:
+                plugin.teardown()
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+            self._cleanup_plugin(pid)
+            _rollback()
+            raise
 
         with self._lock:
             if pid not in self._loaded:

@@ -48,7 +48,3 @@ class NoteTaskKind(StrEnum):
     CHUNK = "chunk"
     FINAL = "final"
 
-
-class NoteSessionRole(StrEnum):
-    NOTES = "notes"
-    WRITER = "writer"

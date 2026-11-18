@@ -307,6 +307,16 @@ def test_live_accumulates_execution() -> None:
     assert final["collapsed"] is False
 
 
+def test_live_hides_channel_without_agent_action() -> None:
+    ui = Mock()
+    ui.has_action.return_value = False
+    plugin = SimpleNamespace(ctx=SimpleNamespace(ui=ui, logger=Mock()))
+    live = _Live(plugin, "/note.md", "question")
+    activity = ui.notify.call_args.args[1]["activity"]
+    assert activity["send_action"] == ""
+    assert activity["send_values"] == {}
+
+
 def test_live_binds_exact_session():
     plugin = SimpleNamespace(ctx=SimpleNamespace(ui=Mock(), logger=Mock()))
     live = _Live(plugin, "/note.md", "question")
