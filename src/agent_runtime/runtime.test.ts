@@ -1587,3 +1587,224 @@ test("IPC rejects unknown roles and tools", () => {
     }),
   ).toBe(false);
 });
+
+async function catalogFixture() {
+  const server = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const { pathname } = new URL(request.url);
+      if (!pathname.endsWith("/models")) return new Response("not found", { status: 404 });
+      if (pathname.startsWith("/v2/")) return Response.json({ data: [] });
+      return Response.json({
+        data: [
+          {
+            id: "proof",
+            limit: { context: 200_000, output: 8_000 },
+            modalities: { input: ["text", "image/png"] },
+            capabilities: { reasoning: { supported: true } },
+          },
+          { id: "plain", limit: { context: 64_000, output: 4_000 } },
+        ],
+      });
+    },
+  });
+  const directory = await mkdtemp(path.join(tmpdir(), "runtime-catalog-"));
+  const runtime = new Runtime(path.join(directory, "runtime"));
+  const base = `http://127.0.0.1:${server.port}`;
+  await runtime.dispatch(
+    IpcMethod.CONFIGURE,
+    {
+      models: JSON.stringify({
+        providers: {
+          local: {
+            api: "openai-completions",
+            auth: "none",
+            baseUrl: `${base}/v1`,
+            models: [
+              {
+                id: "proof",
+                input: ["text", "image"],
+                contextWindow: 8_000,
+                maxTokens: 1_000,
+                compat: { supportsDeveloperRole: false },
+              },
+            ],
+          },
+          second: {
+            api: "openai-completions",
+            auth: "none",
+            baseUrl: `${base}/v1`,
+            models: [
+              { id: "plain", input: ["text", "image"], contextWindow: 4_000, maxTokens: 500 },
+            ],
+          },
+        },
+      }),
+      roles: "default: local/proof:off\nnote_writer: second/plain:high\n",
+    },
+    () => {},
+  );
+  return {
+    runtime,
+    base,
+    async close() {
+      await runtime.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+test("catalog reports structured providers, models and selectors", async () => {
+  const fixture = await catalogFixture();
+  try {
+    const catalog = (await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, () => {})) as any;
+    expect(catalog.providers.map((provider: any) => provider.id)).toEqual(["local", "second"]);
+    expect(catalog.providers[0].models).toEqual([
+      {
+        id: "proof",
+        contextWindow: 8_000,
+        maxTokens: 1_000,
+        input: ["text", "image"],
+        reasoning: false,
+      },
+    ]);
+    expect(catalog.selectors.default).toBe("local/proof:off");
+    expect(catalog.selectors.note_writer).toBe("second/plain:high");
+    expect(catalog.roles.default).toEqual({
+      provider: "local",
+      model: "proof",
+      thinkingLevel: "off",
+    });
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("models_set edits capabilities and keeps unedited model fields", async () => {
+  const fixture = await catalogFixture();
+  try {
+    const catalog = (await fixture.runtime.dispatch(
+      IpcMethod.MODELS_SET,
+      {
+        provider: "local",
+        models: [
+          {
+            id: "proof",
+            contextWindow: 200_000,
+            maxTokens: 8_000,
+            input: ["text", "image"],
+            reasoning: true,
+          },
+        ],
+      },
+      () => {},
+    )) as any;
+    expect(catalog.providers[0].models).toEqual([
+      {
+        id: "proof",
+        contextWindow: 200_000,
+        maxTokens: 8_000,
+        input: ["text", "image"],
+        reasoning: true,
+      },
+    ]);
+    expect(catalog.models_yaml).toContain("supportsDeveloperRole: false");
+    expect(catalog.models_yaml).toContain("contextWindow: 200000");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("discover reads the endpoint model list", async () => {
+  const fixture = await catalogFixture();
+  try {
+    const result = (await fixture.runtime.dispatch(
+      IpcMethod.DISCOVER,
+      { provider: "local" },
+      () => {},
+    )) as any;
+    expect(result.base_url).toBe(`${fixture.base}/v1`);
+    expect(result.models).toEqual([
+      {
+        id: "plain",
+        contextWindow: 64_000,
+        maxTokens: 4_000,
+        input: ["text"],
+        reasoning: false,
+      },
+      {
+        id: "proof",
+        contextWindow: 200_000,
+        maxTokens: 8_000,
+        input: ["text", "image"],
+        reasoning: true,
+      },
+    ]);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("provider_set creates a provider from the endpoint and provider_remove remaps roles", async () => {
+  const fixture = await catalogFixture();
+  try {
+    const added = (await fixture.runtime.dispatch(
+      IpcMethod.PROVIDER_SET,
+      {
+        id: "third",
+        base_url: `${fixture.base}/v1/`,
+        api: "openai-completions",
+        auth: "none",
+      },
+      () => {},
+    )) as any;
+    const third = added.providers.find((provider: any) => provider.id === "third");
+    expect(third.models.map((model: any) => model.id)).toEqual(["plain", "proof"]);
+    expect(third.baseUrl).toBe(`${fixture.base}/v1`);
+
+    await expect(
+      fixture.runtime.dispatch(
+        IpcMethod.PROVIDER_SET,
+        { id: "empty", base_url: `${fixture.base}/v2`, api: "openai-completions", auth: "none" },
+        () => {},
+      ),
+    ).rejects.toThrow("端点没有返回任何模型");
+
+    const removed = (await fixture.runtime.dispatch(
+      IpcMethod.PROVIDER_REMOVE,
+      { provider: "second" },
+      () => {},
+    )) as any;
+    expect(removed.providers.map((provider: any) => provider.id)).toEqual(["local", "third"]);
+    expect(removed.selectors.note_writer).toBe("@default");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("role_set rewrites one selector and keeps the rest", async () => {
+  const fixture = await catalogFixture();
+  try {
+    const catalog = (await fixture.runtime.dispatch(
+      IpcMethod.ROLE_SET,
+      { role: AgentRole.NOTE_WRITER, selector: "local/proof:high" },
+      () => {},
+    )) as any;
+    expect(catalog.selectors.note_writer).toBe("local/proof:high");
+    expect(catalog.selectors.default).toBe("local/proof:off");
+    await expect(
+      fixture.runtime.dispatch(
+        IpcMethod.ROLE_SET,
+        { role: AgentRole.NOTE_WRITER, selector: "local/missing:high" },
+        () => {},
+      ),
+    ).rejects.toThrow();
+    expect(
+      ((await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, () => {})) as any).selectors
+        .note_writer,
+    ).toBe("local/proof:high");
+  } finally {
+    await fixture.close();
+  }
+});

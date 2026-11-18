@@ -11,12 +11,16 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx2
 
 DEVICE_CODE_URL = "https://opencode.ai/console/auth/device/code"
 TOKEN_URL = "https://opencode.ai/console/auth/device/token"
 OAUTH_CLIENT_ID = "opencode-cli"
+# The device endpoint advertises relative paths ("/console/device?..."), which a
+# browser or a markdown link would resolve against this application.
+CONSOLE_BASE_URL = "https://opencode.ai"
 
 
 class OpenCodeGoError(RuntimeError):
@@ -85,6 +89,7 @@ def start_device_flow() -> DeviceFlow:
     )
     if not device_code or not verification:
         raise OpenCodeGoError("OpenCode 授权响应缺少 device_code/verification_uri。")
+    verification = urljoin(CONSOLE_BASE_URL + "/", verification)
     return DeviceFlow(
         device_code=device_code,
         user_code=user_code,

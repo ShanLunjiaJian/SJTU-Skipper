@@ -306,6 +306,7 @@ def create_app(runtime: Runtime) -> FastAPI:
                 "message": result.message,
                 "refresh": result.refresh,
                 "open_page": result.open_page,
+                "open_url": result.open_url,
                 "data": result.data,
             }
         )

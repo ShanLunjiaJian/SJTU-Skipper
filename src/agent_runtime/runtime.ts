@@ -27,10 +27,13 @@ import {
   workspaceToolSchema,
   agentRoleSchema,
   type Emit,
+  type ModelSettings,
+  type ModelsConfiguration,
   modelsConfigurationSchema,
   rolesConfigurationSchema,
   credentialSchema,
 } from "./schemas";
+import { normalizeModels } from "./discovery";
 
 enum MessageRejectionReason {
   EMPTY = "Message is empty",
@@ -38,6 +41,8 @@ enum MessageRejectionReason {
 }
 
 const ROLE_NAMES = Object.values(AgentRole);
+const DEFAULT_API = "openai-completions";
+const DISCOVERY_TIMEOUT_MS = 30_000;
 interface Configuration {
   models: string;
   roles: string;
@@ -322,6 +327,132 @@ export class Runtime {
     return this.config;
   }
 
+  /** Write a validated configuration atomically, restoring the previous files on failure. */
+  private async storeConfiguration(config: Configuration) {
+    const previous = this.config;
+    const entries = [
+      ["models.yml", config.models],
+      ["roles.yml", config.roles],
+    ];
+    try {
+      for (const [name, text] of entries) {
+        await writeFile(path.join(this.root, `${name}.tmp`), text, { mode: 0o600 });
+      }
+      for (const [name] of entries) {
+        await rename(path.join(this.root, `${name}.tmp`), path.join(this.root, name));
+      }
+    } catch (error) {
+      if (previous) {
+        await writeFile(path.join(this.root, "models.yml"), previous.models, { mode: 0o600 });
+        await writeFile(path.join(this.root, "roles.yml"), previous.roles, { mode: 0o600 });
+      }
+      throw error;
+    }
+    this.config = config;
+  }
+
+  /** Parsed models.yml and roles.yml of the active configuration. */
+  private async definitions() {
+    const config = await this.load();
+    return {
+      config,
+      models: validate(
+        modelsConfigurationSchema,
+        Bun.YAML.parse(config.models),
+        "models.yml",
+      ),
+      roles: validate(
+        rolesConfigurationSchema,
+        Bun.YAML.parse(config.roles),
+        "roles.yml",
+      ),
+    };
+  }
+
+  /** Structured configuration view for the settings UI. */
+  private async catalog() {
+    const { config, models } = await this.definitions();
+    const providers = Object.entries(models.providers).map(([id, provider]) => ({
+      id,
+      api: String(provider.api ?? DEFAULT_API),
+      auth: provider.auth ?? "apiKey",
+      baseUrl: String(provider.baseUrl ?? ""),
+      configured:
+        provider.auth === "none" ||
+        !!provider.apiKey ||
+        this.auth!.credentials.list(id).length > 0,
+      source: provider.apiKey ? ProviderSource.CONFIG : ProviderSource.PROJECT,
+      models: provider.models.map((model) => ({
+        id: model.id,
+        contextWindow: Number(model.contextWindow ?? 0),
+        maxTokens: Number(model.maxTokens ?? 0),
+        input: Array.isArray(model.input) ? model.input.map(String) : ["text"],
+        reasoning: Boolean(model.reasoning),
+      })),
+    }));
+    return {
+      providers,
+      selectors: config.selectors,
+      roles: Object.fromEntries(
+        ROLE_NAMES.map((role) => {
+          const resolved = this.resolve(config, role);
+          return [
+            role,
+            {
+              provider: resolved.model!.provider,
+              model: resolved.model!.id,
+              thinkingLevel: resolved.thinkingLevel,
+            },
+          ];
+        }),
+      ),
+      models_yaml: config.models,
+      roles_yaml: config.roles,
+      usage: this.usage,
+    };
+  }
+
+  /** Validate and persist an edited configuration, then report the new catalog. */
+  private async applyEdited(
+    models: ModelsConfiguration,
+    roles: Record<string, string>,
+  ) {
+    const config = await this.configuration(
+      Bun.YAML.stringify(models, null, 2),
+      Bun.YAML.stringify(roles, null, 2),
+    );
+    await this.storeConfiguration(config);
+    return this.catalog();
+  }
+
+  private async discover(provider: string) {
+    const { models } = await this.definitions();
+    const definition = models.providers[provider];
+    if (!definition) throw new Error(`Unknown provider: ${provider}`);
+    const baseUrl = String(definition.baseUrl ?? "").replace(/\/+$/, "");
+    return { base_url: baseUrl, models: await this.fetchModels(provider, baseUrl) };
+  }
+
+  /** Read the endpoint's model list with the provider's stored credential. */
+  private async fetchModels(provider: string, baseUrl: string) {
+    if (!baseUrl) throw new Error("Provider has no base URL to discover models from");
+    const headers: Record<string, string> = { accept: "application/json" };
+    const key = await this.auth!.keys.get(provider);
+    if (key) headers.authorization = `Bearer ${key}`;
+    const response = await fetch(`${baseUrl}/models`, {
+      headers,
+      signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`Model discovery failed: HTTP ${response.status}`);
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new Error("Model discovery failed: response is not JSON");
+    }
+    return normalizeModels(body);
+  }
+
   private async savedTranscriptPath(id: string) {
     const pointer = path.join(this.root, `session-${id}.path`);
     const saved = (await Bun.file(pointer).exists()) ? (await Bun.file(pointer).text()).trim() : "";
@@ -409,27 +540,75 @@ export class Runtime {
     }
     if (method === IpcMethod.CONFIGURE) {
       const config = await this.configuration(String(params.models), String(params.roles));
-      const previous = this.config;
-      const entries = [
-        ["models.yml", config.models],
-        ["roles.yml", config.roles],
-      ];
-      try {
-        for (const [name, text] of entries) {
-          await writeFile(path.join(this.root, `${name}.tmp`), text, { mode: 0o600 });
-        }
-        for (const [name] of entries) {
-          await rename(path.join(this.root, `${name}.tmp`), path.join(this.root, name));
-        }
-      } catch (error) {
-        if (previous) {
-          await writeFile(path.join(this.root, "models.yml"), previous.models, { mode: 0o600 });
-          await writeFile(path.join(this.root, "roles.yml"), previous.roles, { mode: 0o600 });
-        }
-        throw error;
-      }
-      this.config = config;
+      await this.storeConfiguration(config);
       return this.dispatch(IpcMethod.INFO, {}, emit);
+    }
+    if (method === IpcMethod.CATALOG) return this.catalog();
+    if (method === IpcMethod.DISCOVER) return this.discover(String(params.provider));
+    if (method === IpcMethod.MODELS_SET) {
+      const provider = String(params.provider);
+      const { models, roles } = await this.definitions();
+      const definition = models.providers[provider];
+      if (!definition) throw new Error(`Unknown provider: ${provider}`);
+      const known = new Map(definition.models.map((model) => [model.id, model]));
+      const edited = params.models as ModelSettings[];
+      const next = edited.map((row) => {
+        // Keep provider-specific fields (compat flags, aliases) the UI does not edit.
+        const merged: Record<string, unknown> = { ...(known.get(row.id) ?? {}) };
+        merged.id = row.id;
+        for (const [key, value] of [
+          ["contextWindow", row.contextWindow],
+          ["maxTokens", row.maxTokens],
+          ["input", row.input],
+          ["reasoning", row.reasoning],
+        ] as const) {
+          if (value === undefined) delete merged[key];
+          else merged[key] = value;
+        }
+        return merged;
+      });
+      if (!next.length) throw new Error("至少保留一个模型");
+      definition.models = next as typeof definition.models;
+      return this.applyEdited(models, roles);
+    }
+    if (method === IpcMethod.PROVIDER_SET) {
+      const id = String(params.id);
+      const { models, roles } = await this.definitions();
+      const existing = models.providers[id];
+      const patch: Record<string, unknown> = { ...(existing ?? {}) };
+      if (params.base_url !== undefined)
+        patch.baseUrl = String(params.base_url).trim().replace(/\/+$/, "");
+      if (params.api !== undefined) patch.api = String(params.api);
+      if (params.auth !== undefined) patch.auth = params.auth;
+      if (!existing?.models?.length) {
+        // A provider is only usable with models; take them from the endpoint.
+        const discovered = await this.fetchModels(id, String(patch.baseUrl ?? ""));
+        if (!discovered.length) throw new Error("端点没有返回任何模型");
+        patch.models = discovered.map((model) => ({ ...model }) as Record<string, unknown>);
+      }
+      models.providers = { ...models.providers, [id]: patch as never };
+      return this.applyEdited(models, roles);
+    }
+    if (method === IpcMethod.PROVIDER_REMOVE) {
+      const provider = String(params.provider);
+      const { models, roles } = await this.definitions();
+      if (!models.providers[provider]) throw new Error(`Unknown provider: ${provider}`);
+      if (Object.keys(models.providers).length === 1)
+        throw new Error("至少保留一个提供方");
+      const providers = { ...models.providers };
+      delete providers[provider];
+      const next: Record<string, string> = {};
+      for (const [role, selector] of Object.entries(roles)) {
+        next[role] = selector.startsWith(`${provider}/`) ? "@default" : selector;
+      }
+      if (next.default.startsWith("@")) throw new Error("请先把默认角色切换到其他模型");
+      models.providers = providers;
+      return this.applyEdited(models, next);
+    }
+    if (method === IpcMethod.ROLE_SET) {
+      const role = validate(agentRoleSchema, params.role, "agent role");
+      const { models, roles } = await this.definitions();
+      return this.applyEdited(models, { ...roles, [role]: String(params.selector) });
     }
     if (method === IpcMethod.CREDENTIALS || method === IpcMethod.IMPORT_CREDENTIALS) {
       const credential =

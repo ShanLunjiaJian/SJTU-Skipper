@@ -467,35 +467,98 @@ def test_action_and_readonly_settings_fields(tmp_path: Path) -> None:
 
 
 class ConfigurationRuntime:
+    """In-memory stand-in for the Bun runtime's configuration surface."""
+
     def __init__(self, directory: Path) -> None:
         self.directory = directory
         self.calls: list[tuple[IpcMethod, dict]] = []
         self.fail_configure = False
         self.closed = False
+        self.providers = {
+            "lecture": {
+                "baseUrl": "http://lecture.test/v1",
+                "api": "openai-completions",
+                "auth": "apiKey",
+                "configured": True,
+                "models": [
+                    {
+                        "id": "example",
+                        "contextWindow": 32000,
+                        "maxTokens": 4096,
+                        "input": ["text", "image"],
+                        "reasoning": True,
+                    }
+                ],
+            },
+            "opencode": {
+                "baseUrl": "https://opencode.ai/inference/go/openai/v1",
+                "api": "openai-completions",
+                "auth": "oauth",
+                "configured": False,
+                "models": [
+                    {
+                        "id": "flash",
+                        "contextWindow": 200000,
+                        "maxTokens": 8000,
+                        "input": ["text"],
+                        "reasoning": False,
+                    }
+                ],
+            },
+        }
+        self.selectors = {
+            "default": "lecture/example:high",
+            "note_writer": "lecture/example:medium",
+            "board_recognition": "lecture/example:off",
+        }
+        self.discovered = [
+            {
+                "id": "extra",
+                "name": "Extra Model",
+                "contextWindow": 100000,
+                "maxTokens": 2000,
+                "input": ["text", "image"],
+                "reasoning": True,
+            },
+            {
+                "id": "plain",
+                "contextWindow": 64000,
+                "maxTokens": 4000,
+                "input": ["text"],
+                "reasoning": False,
+            },
+        ]
         self.configuration = {
             "models_yaml": "providers: {}\n",
-            "roles_yaml": "default: lecture/example\n",
-            "providers": [
+            "roles_yaml": "default: lecture/example:high\n",
+        }
+
+    def _resolved(self, role: str) -> dict:
+        selector = self.selectors.get(role, self.selectors["default"])
+        target, _, level = selector.partition(":")
+        provider, _, model = target.partition("/")
+        return {"provider": provider, "model": model, "thinkingLevel": level or None}
+
+    def _catalog(self) -> dict:
+        providers = []
+        for pid, provider in self.providers.items():
+            providers.append(
                 {
-                    "id": "lecture",
-                    "auth": ProviderAuth.API_KEY,
-                    "configured": True,
-                    "source": ProviderSource.PROJECT,
-                },
-                {
-                    "id": "opencode",
-                    "auth": ProviderAuth.OAUTH,
-                    "configured": False,
-                    "source": ProviderSource.PROJECT,
-                },
-            ],
-            "roles": {
-                "default": {
-                    "provider": "lecture",
-                    "model": "example",
-                    "thinkingLevel": "high",
+                    "id": pid,
+                    "api": provider["api"],
+                    "auth": provider["auth"],
+                    "baseUrl": provider["baseUrl"],
+                    "configured": provider["configured"],
+                    "source": "project",
+                    "models": [dict(model) for model in provider["models"]],
                 }
-            },
+            )
+        return {
+            **self.configuration,
+            "providers": providers,
+            "selectors": dict(self.selectors),
+            "roles": {role: self._resolved(role) for role in self.selectors},
+            "usage": {},
         }
 
     def call(self, method: IpcMethod, **params):
@@ -506,7 +569,41 @@ class ConfigurationRuntime:
             self.configuration.update(
                 models_yaml=params["models"], roles_yaml=params["roles"]
             )
-        return dict(self.configuration)
+        elif method == IpcMethod.CATALOG:
+            return self._catalog()
+        elif method == IpcMethod.INFO:
+            return self._catalog()
+        elif method == IpcMethod.DISCOVER:
+            return {"base_url": "", "models": [dict(m) for m in self.discovered]}
+        elif method == IpcMethod.PROVIDER_SET:
+            provider = self.providers.setdefault(
+                params["id"],
+                {
+                    "models": [],
+                    "api": params["api"],
+                    "auth": params["auth"],
+                    "configured": params["auth"] != "apiKey",
+                },
+            )
+            provider.update(api=params["api"], auth=params["auth"])
+            provider["baseUrl"] = params["base_url"]
+            if not provider["models"]:
+                provider["models"] = [dict(m) for m in self.discovered]
+        elif method == IpcMethod.PROVIDER_REMOVE:
+            self.providers.pop(params["provider"], None)
+            for role, selector in list(self.selectors.items()):
+                if selector.startswith(f"{params['provider']}/"):
+                    self.selectors[role] = "@default"
+        elif method == IpcMethod.MODELS_SET:
+            if not params["models"]:
+                raise ValueError("至少保留一个模型")
+            provider = self.providers[params["provider"]]
+            provider["models"] = [dict(m) for m in params["models"]]
+        elif method == IpcMethod.ROLE_SET:
+            self.selectors[params["role"]] = params["selector"]
+        elif method == IpcMethod.CREDENTIALS:
+            self.providers[params["provider"]]["configured"] = True
+        return self._catalog()
 
     def close(self):
         self.closed = True
@@ -524,18 +621,52 @@ def make_llm_settings_runtime(tmp_path, monkeypatch):
     return runtime, plugin, runtime.services.require("llm")
 
 
+def llm_tabs(runtime) -> dict[str, list[dict]]:
+    runtime.ui.open_page("settings:main")
+    tabs = runtime.ui.state()["page_content"]["settings:main"][0]["tabs"]
+    section = next(tab for tab in tabs if tab["title"] == "LLM")
+    nested = section["blocks"][0]["tabs"]
+    return {tab["title"]: tab["blocks"] for tab in nested}
+
+
+def _table(blocks, action=None) -> dict:
+    tables = [block for block in blocks if block["type"] == "table"]
+    if action is None:
+        return tables[0]
+    return next(
+        table
+        for table in tables
+        if any(item.get("action") == action for item in table.get("row_actions", []))
+    )
+
+
+def _form(blocks, action: str) -> dict:
+    return next(
+        block
+        for block in blocks
+        if block["type"] == "form" and block.get("submit", {}).get("action") == action
+    )
+
+
+def test_settings_page_is_a_workflow(tmp_path, monkeypatch):
+    runtime, _plugin, _backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        tabs = llm_tabs(runtime)
+        assert list(tabs) == ["概览", "提供方", "模型", "角色", "原始配置"]
+        overview = json.dumps(tabs["概览"], ensure_ascii=False)
+        assert "默认模型" in overview
+        assert "opencode" in overview
+        assert "未配置凭据" in overview
+        assert "lecture/example" in overview
+    finally:
+        runtime.stop()
+
+
 def test_external_yaml_editors_save_without_settings_copies(tmp_path, monkeypatch):
     runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
     try:
-        runtime.ui.open_page("settings:main")
-        blocks = runtime.ui.state()["page_content"]["settings:main"][0]["tabs"][0][
-            "blocks"
-        ]
-        editors = next(
-            block
-            for block in blocks
-            if block.get("submit", {}).get("action") == "llm.configure"
-        )
+        tabs = llm_tabs(runtime)
+        editors = _form(tabs["原始配置"], "llm.configure")
         assert {field["name"] for field in editors["fields"]} == {
             "models_yaml",
             "roles_yaml",
@@ -543,7 +674,6 @@ def test_external_yaml_editors_save_without_settings_copies(tmp_path, monkeypatc
         assert all(
             field["input"] == FormInputType.TEXTAREA for field in editors["fields"]
         )
-        assert "lecture/example:high" in json.dumps(blocks)
 
         result = runtime.ui.dispatch_action(
             "llm.configure",
@@ -565,11 +695,285 @@ def test_external_yaml_editors_save_without_settings_copies(tmp_path, monkeypatc
         service = runtime.services.require("settings")
         assert "models_yaml" not in service.all()
         assert "roles_yaml" not in service.all()
+    finally:
+        runtime.stop()
+
+
+def test_provider_cards_carry_credentials_and_presets(tmp_path, monkeypatch):
+    runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        blocks = llm_tabs(runtime)["提供方"]
+        cards = next(block for block in blocks if block["type"] == "cards")
+        assert [card["id"] for card in cards["items"]] == ["lecture", "opencode"]
+        lecture, opencode = cards["items"]
+        assert [action["action"] for action in lecture["actions"]] == [
+            "llm.logout",
+            "llm.provider.remove",
+        ]
+        assert "llm.opencode_login" in [
+            action["action"] for action in opencode["actions"]
+        ]
+        assert {meta[0] for meta in lecture["meta"]} == {"协议", "鉴权", "凭据", "模型"}
+        assert _form(lecture["blocks"], "llm.provider.save")["fields"][-1][
+            "visible_when"
+        ] == {
+            "key": "auth",
+            "values": ["apiKey"],
+        }
+
+        add = _form(blocks, "llm.provider.save")
+        fields = {field["name"]: field for field in add["fields"]}
+        assert fields["preset"]["options"] == ["opencode-go", "deepseek", "custom"]
+        assert fields["base_url"]["visible_when"] == {
+            "key": "preset",
+            "values": ["custom"],
+        }
+        assert fields["key"]["visible_when"] == {
+            "key": "preset",
+            "values": ["deepseek", "custom"],
+        }
+
+        result = runtime.ui.dispatch_action(
+            "llm.provider.save",
+            {"values": {"preset": "opencode-go", "provider": "", "key": ""}},
+        )
+        assert result.ok, result.message
+        assert backend.calls[-1] == (
+            IpcMethod.PROVIDER_SET,
+            {
+                "id": "opencode-go",
+                "base_url": "https://opencode.ai/inference/go/openai/v1",
+                "api": "openai-completions",
+                "auth": "oauth",
+            },
+        )
+        assert [m["id"] for m in backend.providers["opencode-go"]["models"]] == [
+            "extra",
+            "plain",
+        ]
+    finally:
+        runtime.stop()
+
+
+def test_endpoint_check_reports_gaps_then_adds_selected_models(tmp_path, monkeypatch):
+    runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        result = runtime.ui.dispatch_action(
+            "llm.check", {"values": {"provider": "lecture"}}
+        )
+        assert result.ok, result.message
+        assert backend.calls[-1][0] == IpcMethod.DISCOVER
+        assert not any(call[0] == IpcMethod.MODELS_SET for call in backend.calls)
+
+        blocks = llm_tabs(runtime)["模型"]
+        table = _table(blocks, "llm.model.add")
+        assert [row["model"] for row in table["rows"]] == ["extra", "plain"]
+        assert table["rows"][0]["context"] == "100K"
+
+        added = runtime.ui.dispatch_action(
+            "llm.model.add", {"values": {"provider": "lecture", "model": "extra"}}
+        )
+        assert added.ok, added.message
+        method, params = backend.calls[-1]
+        assert method == IpcMethod.MODELS_SET
+        assert [model["id"] for model in params["models"]] == ["example", "extra"]
+        assert params["models"][1]["contextWindow"] == 100000
+
+        blocks = llm_tabs(runtime)["模型"]
+        assert "1 个尚未添加" in json.dumps(blocks, ensure_ascii=False)
+        everything = runtime.ui.dispatch_action(
+            "llm.model.add_all", {"values": {"provider": "lecture"}}
+        )
+        assert everything.ok, everything.message
+        assert [m["id"] for m in backend.providers["lecture"]["models"]] == [
+            "example",
+            "extra",
+            "plain",
+        ]
+        again = runtime.ui.dispatch_action(
+            "llm.model.add_all", {"values": {"provider": "lecture"}}
+        )
+        assert not again.ok
+    finally:
+        runtime.stop()
+
+
+def test_endpoint_check_failure_is_shown_inline(tmp_path, monkeypatch):
+    runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        original = backend.call
+
+        def call(method, **params):
+            if method == IpcMethod.DISCOVER:
+                backend.calls.append((method, params))
+                raise ValueError("Model discovery failed: HTTP 401")
+            return original(method, **params)
+
+        monkeypatch.setattr(backend, "call", call)
+        result = runtime.ui.dispatch_action(
+            "llm.check", {"values": {"provider": "lecture"}}
+        )
+        assert not result.ok
+        assert "HTTP 401" in result.message
+        blocks = llm_tabs(runtime)["模型"]
+        assert any(
+            "检查失败" in block.get("text", "")
+            for block in blocks
+            if block["type"] == "markdown"
+        )
+    finally:
+        runtime.stop()
+
+
+def test_model_page_selects_then_edits_one_model(tmp_path, monkeypatch):
+    runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        blocks = llm_tabs(runtime)["模型"]
+        rows = next(block for block in blocks if block["type"] == "rows")
+        assert [item["title"] for item in rows["items"]] == ["lecture", "opencode"]
+        assert rows["items"][0]["active"] is True
+        table = _table(blocks, "llm.select.model")
+        assert [row["model"] for row in table["rows"]] == ["example"]
+        assert table["rows"][0]["context"] == "32K"
+        assert table["rows"][0]["roles"] == "default、board_recognition、note_writer"
+        editor = _form(blocks, "llm.model.save")
+        values = {field["name"]: field["value"] for field in editor["fields"]}
+        assert values["model"] == "example"
+        assert values["context_window"] == 32000
+
+        runtime.ui.dispatch_action(
+            "llm.select.model", {"values": {"provider": "opencode", "model": "flash"}}
+        )
+        blocks = llm_tabs(runtime)["模型"]
+        editor = _form(blocks, "llm.model.save")
+        values = {field["name"]: field["value"] for field in editor["fields"]}
+        assert (values["provider"], values["model"]) == ("opencode", "flash")
+        assert values["context_window"] == 200000
+
+        saved = runtime.ui.dispatch_action(
+            "llm.model.save",
+            {
+                "values": {
+                    "provider": "opencode",
+                    "model": "flash",
+                    "context_window": 123000,
+                    "max_tokens": 9000,
+                    "input_text": True,
+                    "input_image": True,
+                    "reasoning": False,
+                }
+            },
+        )
+        assert saved.ok, saved.message
+        assert backend.providers["opencode"]["models"][0] == {
+            "id": "flash",
+            "contextWindow": 123000,
+            "maxTokens": 9000,
+            "input": ["text", "image"],
+            "reasoning": False,
+        }
+    finally:
+        runtime.stop()
+
+
+def test_model_delete_is_blocked_while_roles_use_it(tmp_path, monkeypatch):
+    runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        blocked = runtime.ui.dispatch_action(
+            "llm.model.remove", {"values": {"provider": "lecture", "model": "example"}}
+        )
+        assert not blocked.ok
+        assert "仍被角色" in blocked.message
+        assert "note_writer" in blocked.message
+
+        backend.selectors["note_writer"] = "opencode/flash:high"
+        backend.selectors["board_recognition"] = "opencode/flash:off"
+        backend.selectors["default"] = "opencode/flash:high"
+        backend.providers["lecture"]["models"].append(
+            {
+                "id": "spare",
+                "contextWindow": 8000,
+                "maxTokens": 1000,
+                "input": ["text"],
+                "reasoning": False,
+            }
+        )
+        allowed = runtime.ui.dispatch_action(
+            "llm.model.remove", {"values": {"provider": "lecture", "model": "example"}}
+        )
+        assert allowed.ok, allowed.message
+        assert [m["id"] for m in backend.providers["lecture"]["models"]] == ["spare"]
+    finally:
+        runtime.stop()
+
+
+def test_role_page_selects_then_edits_one_role(tmp_path, monkeypatch):
+    runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        blocks = llm_tabs(runtime)["角色"]
+        table = _table(blocks, "llm.select.role")
+        writer = next(row for row in table["rows"] if row["role"] == "note_writer")
+        assert writer["selector"] == "lecture/example:medium"
+        assert writer["active"] == "lecture/example"
+        assert [column["key"] for column in table["columns"]] == [
+            "title",
+            "role",
+            "selector",
+            "active",
+            "status",
+        ]
+        board = next(row for row in table["rows"] if row["role"] == "board_recognition")
+        assert board["status"] == "图像可用"
+
+        backend.selectors["board_recognition"] = "opencode/flash:off"
+        blocks = llm_tabs(runtime)["角色"]
+        board = next(
+            row
+            for row in _table(blocks, "llm.select.role")["rows"]
+            if row["role"] == "board_recognition"
+        )
+        assert board["status"] == "缺少 image 输入"
+        editor = _form(blocks, "llm.role.save")
+        values = {field["name"]: field["value"] for field in editor["fields"]}
+        assert (values["role"], values["model"], values["level"]) == (
+            "default",
+            "lecture/example",
+            "high",
+        )
+
+        runtime.ui.dispatch_action(
+            "llm.select.role", {"values": {"role": "note_writer"}}
+        )
+        blocks = llm_tabs(runtime)["角色"]
+        editor = _form(blocks, "llm.role.save")
+        values = {field["name"]: field["value"] for field in editor["fields"]}
+        assert (values["role"], values["level"]) == ("note_writer", "medium")
+
         rejected = runtime.ui.dispatch_action(
-            "settings.save", {"values": {"models_yaml": "duplicate"}}
+            "llm.role.save",
+            {
+                "values": {
+                    "role": "board_recognition",
+                    "model": "opencode/flash",
+                    "level": "off",
+                }
+            },
         )
         assert not rejected.ok
-        assert "models_yaml" not in service.all()
+        assert "image" in rejected.message
+
+        saved = runtime.ui.dispatch_action(
+            "llm.role.save",
+            {
+                "values": {
+                    "role": "board_recognition",
+                    "model": "lecture/example",
+                    "level": "off",
+                }
+            },
+        )
+        assert saved.ok, saved.message
+        assert backend.selectors["board_recognition"] == "lecture/example:off"
     finally:
         runtime.stop()
 
@@ -619,26 +1023,47 @@ def test_provider_credentials_are_write_only_runtime_actions(tmp_path, monkeypat
         runtime.stop()
 
 
-def test_device_login_imports_oauth_into_runtime(tmp_path, monkeypatch):
+def device_flow_fixture(monkeypatch, *, tokens=True):
     from integrations.opencode_go import DeviceFlow, TokenSet
     from plugins.llm_core import plugin as module
 
-    flow = DeviceFlow("device", "code", "https://opencode.ai/verify", 1, 60)
-    monkeypatch.setattr(module, "start_device_flow", lambda: flow)
-    monkeypatch.setattr(
-        module,
-        "poll_device_token",
-        lambda _: TokenSet("access", "refresh", 9999, "org"),
-    )
-    monkeypatch.setattr(module.webbrowser, "open", lambda _: False)
+    state = {"started": 0, "cancelled": []}
+
+    def start():
+        state["started"] += 1
+        return DeviceFlow(
+            device_code=f"device-{state['started']}",
+            user_code=f"CODE-{state['started']}",
+            verification_uri_complete=f"https://opencode.ai/verify?code=CODE-{state['started']}",
+            interval=1,
+            expires_in=600,
+        )
+
+    def poll(flow):
+        return TokenSet("access", "refresh", 9999, "org") if tokens else None
+
+    monkeypatch.setattr(module, "start_device_flow", start)
+    monkeypatch.setattr(module, "poll_device_token", poll)
+    monkeypatch.setattr(module.webbrowser, "open", lambda _url: True)
+    return state
+
+
+def test_device_login_imports_oauth_into_runtime(tmp_path, monkeypatch):
+    state = device_flow_fixture(monkeypatch)
     runtime, plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
     try:
         result = runtime.ui.dispatch_action(
             "llm.opencode_login", {"values": {"provider": "opencode"}}
         )
         assert result.ok
-        plugin._login_thread.join(timeout=2)
-        assert not plugin._login_thread.is_alive()
+        # The URL is not only in the toast: it is a page block the user can copy.
+        assert "https://opencode.ai/verify" not in result.message
+        login = plugin._login
+        assert login is not None
+        assert login.thread is not None
+        login.thread.join(timeout=2)
+        assert not login.thread.is_alive()
+        assert state["started"] == 1
         assert (
             IpcMethod.IMPORT_CREDENTIALS,
             {
@@ -652,12 +1077,91 @@ def test_device_login_imports_oauth_into_runtime(tmp_path, monkeypatch):
                 },
             },
         ) in backend.calls
+        assert plugin._login is None
+        blocks = llm_tabs(runtime)["提供方"]
+        assert "已关联 OpenCode 套餐" in json.dumps(blocks, ensure_ascii=False)
         assert runtime.services.require("settings").all() == {}
         result = runtime.ui.dispatch_action(
             "llm.logout", {"values": {"provider": "opencode"}}
         )
         assert result.ok
         assert backend.calls[-1] == (IpcMethod.LOGOUT, {"provider": "opencode"})
+    finally:
+        runtime.stop()
+
+
+def test_pending_login_keeps_a_copyable_link_on_the_page(tmp_path, monkeypatch):
+    state = device_flow_fixture(monkeypatch, tokens=False)
+    runtime, plugin, _backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        first = runtime.ui.dispatch_action(
+            "llm.opencode_login", {"values": {"provider": "opencode"}}
+        )
+        assert first.ok
+        # The browser opens this; the page keeps it as a fallback.
+        assert first.open_url == "https://opencode.ai/verify?code=CODE-1"
+        blocks = llm_tabs(runtime)["提供方"]
+        text = json.dumps(blocks, ensure_ascii=False)
+        assert "等待 OpenCode 授权" in text
+        assert "https://opencode.ai/verify?code=CODE-1" in text
+        assert "CODE-1" in text
+        assert "10 分钟内有效" in text
+        assert "重新开始授权" in text and "取消授权" in text
+        buttons = next(block for block in blocks if block["type"] == "buttons")
+        assert [button["action"] for button in buttons["buttons"]] == [
+            "llm.opencode_login",
+            "llm.opencode_cancel",
+        ]
+
+        # A second click must not silently start another flow.
+        again = runtime.ui.dispatch_action(
+            "llm.opencode_login", {"values": {"provider": "opencode"}}
+        )
+        assert again.ok
+        assert "仍在进行" in again.message
+        assert state["started"] == 1
+
+        restarted = runtime.ui.dispatch_action(
+            "llm.opencode_login",
+            {"values": {"provider": "opencode", "force": True}},
+        )
+        assert restarted.ok
+        assert state["started"] == 2
+        assert plugin._login is not None
+        assert plugin._login.flow.user_code == "CODE-2"
+        assert "CODE-2" in json.dumps(llm_tabs(runtime)["提供方"], ensure_ascii=False)
+
+        cancelled = runtime.ui.dispatch_action(
+            "llm.opencode_cancel", {"values": {"provider": "opencode"}}
+        )
+        assert cancelled.ok
+        assert plugin._login is None
+        blocks = llm_tabs(runtime)["提供方"]
+        assert "等待 OpenCode 授权" not in json.dumps(blocks, ensure_ascii=False)
+        assert "已取消授权" in json.dumps(blocks, ensure_ascii=False)
+    finally:
+        runtime.stop()
+
+
+def test_expired_login_allows_a_fresh_start(tmp_path, monkeypatch):
+    state = device_flow_fixture(monkeypatch, tokens=False)
+    runtime, plugin, _backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        runtime.ui.dispatch_action(
+            "llm.opencode_login", {"values": {"provider": "opencode"}}
+        )
+        assert plugin._login is not None
+        plugin._login.expires_at = 0.0
+        # The stale link is not rendered any more.
+        assert "opencode.ai/verify" not in json.dumps(
+            llm_tabs(runtime)["提供方"], ensure_ascii=False
+        )
+        result = runtime.ui.dispatch_action(
+            "llm.opencode_login", {"values": {"provider": "opencode"}}
+        )
+        assert result.ok
+        assert state["started"] == 2
+        assert plugin._login is not None
     finally:
         runtime.stop()
 

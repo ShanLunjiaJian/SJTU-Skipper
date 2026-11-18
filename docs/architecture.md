@@ -67,7 +67,9 @@ llm-agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 
 ### 语音识别
 
-`stt` 使用配置的兼容服务．自动转写通过 WebSocket `/v1/stream`，录播使用 `offline`，直播使用 `live`．手动范围转写使用 HTTP．声学切分、上下文和文本合并由服务端负责．
+`stt` 只保留一条流水线：worker、覆盖记录、音频门控、转写持久化、UI 和 `stt` 服务．供应商差异由适配器翻译成统一接口：批量适配器实现 `transcribe`，流式适配器额外实现 `stream`．`stt.provider` 选择供应商，缺省 `compatible`．缺少凭据或地址时 worker 停泊，不消费音频，状态页说明原因．
+
+`compatible` 使用配置的兼容服务．自动转写通过 WebSocket `/v1/stream`，录播使用 `offline`，直播使用 `live`．手动范围转写使用 HTTP．声学切分、上下文和文本合并由服务端负责．
 
 - 每次发送最多 200 ms PCM，接收线程独立处理事件．
 - `partial` 更新临时文字，`final` 写入永久转写．
@@ -78,7 +80,9 @@ llm-agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 - 输入失败后仍完成已接收音频的尾段转写；失败状态不因此改为成功．服务端等待尾段结果时继续响应 WebSocket Ping．
 - 禁用 STT 时只推进逻辑音频时间，不保留 PCM 或插入静音．
 
-`stt.server_url` 默认 `http://127.0.0.1:8766`，可由 `STT_SERVER_URL` 初始化．语言通过 `stt.language` 配置．直播与离线转写均使用当前会话的课程名，生成一句课程说明．课程名为空或超过 80 个字符时不发送提示．
+`google` 使用 Google Cloud Speech-to-Text v2 REST `recognize`，只做批量窗口，没有临时文字．窗口取 `stt.window_seconds` 并受服务商上限约束（v2 为 55 秒），输入结束后处理尾段；模型与区域不匹配时先尝试区域端点，再降级到 `long` 模型．OAuth 凭据支持服务账号 JSON、authorized_user JSON 与 ADC．
+
+`stt.server_url` 默认 `http://127.0.0.1:8766`，可由 `STT_SERVER_URL` 初始化．语言通过 `stt.language` 配置．直播与离线转写均使用当前会话的课程名，生成一句课程说明．课程名为空或超过 80 个字符时不发送提示．Google 相关设置位于 `stt.google.*`，凭据文件可用 `GOOGLE_APPLICATION_CREDENTIALS` 初始化．
 
 ### 板书识别
 
@@ -106,10 +110,13 @@ Python 与 Bun 使用带请求 ID 的 JSON Lines 通信．stdout 传 IPC 消息�
 
 每个会话保留独立工具状态．编辑默认使用 hashline，`tools.format=auto` 由 SDK 选择工具协议．同轮只读调用按 shared 规则并行执行，写入按 exclusive 规则保持顺序．写入完成后，运行时发送文件变更事件供应用更新预览．
 
-设置页编辑 `data_dir/llm_runtime/models.yml` 与 `roles.yml`．保存时同时检查两份配置．会话保留创建时的配置．
+设置页把配置分成四个可操作层级，并保留原始 YAML 入口：概览只读，提供方一张卡片一个端点，模型页按提供方展开，角色页一个编辑器．写盘统一由运行时完成：`catalog` 返回结构化配置，`provider_set`/`provider_remove`/`models_set`/`role_set` 修改后重新走 `configuration()` 校验，成功才原子替换两份文件．失败时保留上一次可用配置．会话保留创建时的配置．
 
-- `models.yml` 使用 OMP `providers` 结构，声明提供方、模型、协议和能力．仅显式配置的模型可被调用．
-- `roles.yml` 使用 `provider/model:level` 或 `@role` 选择器．未填写角色继承 `default`．
+- 设置页只看一个对象：模型页与角色页把当前选中项（提供方、模型、角色）保存在插件里，服务端渲染时就只生成那一张编辑表单，表单值与所选对象一致；表格行的按钮通过 `row_actions` 把行内标识带回来．这样避免了「N 个模型 N 张表单」和「编辑器显示的仍是上一个对象」两类问题．
+- `discover` 读取提供方已存凭据（`AuthStorage.keys`），请求 `${baseUrl}/models` 并归一化结果：OpenCode 的 `limit`、`modalities`、`capabilities` 与 OpenAI 兼容端的 `context_length`、`architecture` 都映射到 `contextWindow`、`maxTokens`、`input`、`reasoning`；缺失字段用默认值补齐．新提供方没有模型时由同一条路径取回，避免保存无模型的提供方．
+- 检查端点只报告差异：设置页缓存发现结果，列出本地尚无的模型，由用户逐个或全部添加；发现结果不覆盖已有模型的能力值，端点错误显示在该提供方下方而不是弹窗．
+- `models.yml` 使用 OMP `providers` 结构，声明提供方、模型、协议和能力．仅显式配置的模型可被调用．编辑模型时保留未在表单中出现的字段（如 `compat`、`name`）．
+- `roles.yml` 使用 `provider/model:level` 或 `@role` 选择器．未填写角色继承 `default`．删除提供方时，指向它的角色改为 `@default`；若默认角色本身指向被删提供方，删除被拒绝．
 - `board_recognition` 选择板书模型，`note_chunk` 选择片段模型，`note_writer` 选择笔记写作模型，`note_review` 选择独立审阅模型．
 - `ask_instant`、`ask_research` 选择问答模型，`compaction` 选择上下文压缩模型．
 

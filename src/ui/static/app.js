@@ -401,7 +401,7 @@
         tr.appendChild(el("td", { text: value ?? "" }));
       }
       if (rowActions.length) {
-        const td = el("td");
+        const td = el("td", { class: "row-actions" });
         for (const action of rowActions) {
           let value = action.value ? { ...action.value } : {};
           if (Array.isArray(action.keys)) {
@@ -573,19 +573,26 @@
     const action = block.action || submitSpec.action || "";
     const form = el("form", { class: "form" });
     if (action) form.dataset.action = action;
+    const conditionalRows = [];
     for (const field of block.fields || []) {
       const row = el("div", { class: "form-row" });
+      if (field.visible_when) {
+        row._visibleWhen = field.visible_when;
+        conditionalRows.push(row);
+      }
       const id = `f-${Math.random().toString(36).slice(2)}`;
       const fieldName = field.name || field.key;
       row.appendChild(el("label", { for: id, text: field.label || fieldName }));
       if (field.type === SETTING_TYPE.ACTION || field.input === FIELD_INPUT.BUTTON) {
         row.appendChild(
-          actionButton(
-            field.button_label || field.label || "执行",
-            field.action,
-            {},
-            "btn btn-sm btn-primary",
-          ),
+          el("div", { class: "form-inline" }, [
+            actionButton(
+              field.button_label || field.label || "执行",
+              field.action,
+              field.value && typeof field.value === "object" ? field.value : undefined,
+              field.button_class || "btn btn-sm btn-primary",
+            ),
+          ]),
         );
         if (field.description)
           row.appendChild(el("div", { class: "hint", text: field.description }));
@@ -603,6 +610,7 @@
           placeholder: field.placeholder || "",
         });
         input.value = field.value ?? "";
+        if (field.rows) input.rows = Number(field.rows);
       } else if (type === FIELD_INPUT.SELECT) {
         input = el("select", { class: "select", id, name: fieldName });
         const options = field.option_items || field.options || [];
@@ -690,6 +698,26 @@
     });
     actions.appendChild(submit);
     form.appendChild(actions);
+    const applyVisibility = () => {
+      const controls = new Map();
+      for (const control of Array.from(form.elements)) {
+        if (control.name) controls.set(control.name, control);
+      }
+      for (const row of conditionalRows) {
+        const condition = row._visibleWhen;
+        const controller = controls.get(condition.key);
+        const value = controller
+          ? String(controller.type === FIELD_INPUT.CHECKBOX ? controller.checked : controller.value)
+          : "";
+        const visible = (condition.values || []).map(String).includes(value);
+        row.style.display = visible ? "" : "none";
+        row.dataset.hidden = visible ? "0" : "1";
+      }
+    };
+    applyVisibility();
+    form.addEventListener("change", (event) => {
+      if (event.target && event.target.tagName === "SELECT") applyVisibility();
+    });
     return form;
   }
 
@@ -2092,17 +2120,32 @@
     return root;
   }
 
+  // A link to another site must not navigate the single-page app away.
+  function openLinksInNewTab(node) {
+    for (const link of node.querySelectorAll("a[href]")) {
+      const href = link.getAttribute("href") || "";
+      if (/^(https?:)?\/\//i.test(href)) {
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+      }
+    }
+    return node;
+  }
+
   function renderBlock(block) {
     if (!block || typeof block !== "object") return null;
     const type = block.type || BLOCK_TYPE.TEXT;
     if (type === BLOCK_TYPE.AGENT_ACTIVITY) return renderAgentActivity(block);
     if (type === BLOCK_TYPE.TASK_QUEUE) return renderTaskQueue();
-    if (type === BLOCK_TYPE.HTML) return el("div", { class: "block", html: block.html || "" });
+    if (type === BLOCK_TYPE.HTML)
+      return openLinksInNewTab(el("div", { class: "block", html: block.html || "" }));
     if (type === BLOCK_TYPE.MARKDOWN) {
-      return el("div", {
-        class: "block markdown",
-        html: block.html || escapeHtml(block.text || ""),
-      });
+      return openLinksInNewTab(
+        el("div", {
+          class: "block markdown",
+          html: block.html || escapeHtml(block.text || ""),
+        }),
+      );
     }
     if (type === BLOCK_TYPE.TEXT) return el("pre", { class: "block pre", text: block.text ?? "" });
     if (type === BLOCK_TYPE.KEYVALUE) {
@@ -3025,6 +3068,7 @@
     for (const field of Array.from(form.elements)) {
       if (!field.name || field.type === FIELD_INPUT.SUBMIT || field.type === FIELD_INPUT.BUTTON)
         continue;
+      if (field.closest('[data-hidden="1"]')) continue;
       if (field.type === FIELD_INPUT.CHECKBOX) {
         values[field.name] = field.checked;
       } else if (field.dataset.fieldType === SETTING_TYPE.JSON) {
@@ -3066,6 +3110,10 @@
           }),
         });
         if (result.message) toast(result.message, result.ok ? TOAST_KIND.OK : TOAST_KIND.ERR);
+        if (result.open_url && /^https?:\/\//i.test(result.open_url)) {
+          const opened = window.open(result.open_url, "_blank", "noopener");
+          if (opened) opened.opener = null;
+        }
         if (result.open_page) {
           await api(`/api/ui/pages/${encodeURIComponent(result.open_page)}/open`, {
             method: "POST",

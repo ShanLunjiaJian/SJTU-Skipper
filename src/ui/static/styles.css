@@ -756,6 +756,14 @@ summary.execution-header:hover {
   color: var(--muted);
   font-weight: 600;
 }
+/* Column labels stay on one line; wrapping moved "上下文" onto two rows. */
+.data-table th {
+  white-space: nowrap;
+}
+/* Row actions sit side by side instead of stacking inside a narrow cell. */
+.data-table td.row-actions {
+  white-space: nowrap;
+}
 .pre {
   margin: 0;
   padding: 10px 12px;

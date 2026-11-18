@@ -213,6 +213,8 @@ class ActionResult:
     message: str = ""
     refresh: bool = True
     open_page: str | None = None
+    # External page the browser should open (device authorizations and the like).
+    open_url: str | None = None
     data: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -227,6 +229,7 @@ class ActionResult:
                 message=str(value.get("message", "")),
                 refresh=bool(value.get("refresh", True)),
                 open_page=value.get("open_page"),
+                open_url=value.get("open_url"),
                 data=dict(value.get("data", {}) or {}),
             )
         return cls(message=str(value))

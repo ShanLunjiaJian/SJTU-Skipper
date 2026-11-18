@@ -16,6 +16,12 @@ export enum IpcMethod {
   PING = "ping",
   INFO = "info",
   CONFIGURE = "configure",
+  CATALOG = "catalog",
+  DISCOVER = "discover",
+  MODELS_SET = "models_set",
+  PROVIDER_SET = "provider_set",
+  PROVIDER_REMOVE = "provider_remove",
+  ROLE_SET = "role_set",
   GENERATE = "generate",
   CREATE_SESSION = "create_session",
   REOPEN_SESSION = "reopen_session",
@@ -185,6 +191,7 @@ export const modelsConfigurationSchema = type({
   ),
   "[string]": "unknown",
 });
+export type ModelsConfiguration = typeof modelsConfigurationSchema.infer;
 export const rolesConfigurationSchema = type({
   default: nonemptyString,
   "[string]": nonemptyString,
@@ -197,12 +204,40 @@ export const openCodeTokenResponseSchema = type({
   "org_id?": "string",
   "token_type?": "string",
 });
-
 const emptyParams = type({ "+": "reject" }).default(() => ({}));
 const configurationParams = type({
   "+": "reject",
   models: nonemptyString,
   roles: nonemptyString,
+});
+
+/** Model capability fields the configuration UI edits per model. */
+export const modelSettingsSchema = type({
+  "+": "reject",
+  id: nonemptyString,
+  "contextWindow?": "number.integer > 0",
+  "maxTokens?": "number.integer > 0",
+  "input?": type.enumerated("text", "image").array(),
+  "reasoning?": "boolean",
+});
+export type ModelSettings = typeof modelSettingsSchema.infer;
+
+const modelsSetParams = type({
+  "+": "reject",
+  provider: nonemptyString,
+  models: modelSettingsSchema.array(),
+});
+const providerSetParams = type({
+  "+": "reject",
+  id: nonemptyString,
+  "base_url?": "string",
+  "api?": nonemptyString,
+  "auth?": type.enumerated("apiKey", "oauth", "none"),
+});
+const roleSetParams = type({
+  "+": "reject",
+  role: agentRoleSchema,
+  selector: nonemptyString,
 });
 export const createSessionInputSchema = type({
   "+": "reject",
@@ -288,6 +323,36 @@ export const ipcRequestSchema = type({
     id: nonemptyString,
     method: type.enumerated(IpcMethod.IMPORT_CREDENTIALS),
     params: providerParams.merge({ credential: credentialSchema }),
+  })
+  .or({
+    "+": "reject",
+    id: nonemptyString,
+    method: type.enumerated(IpcMethod.CATALOG),
+    params: emptyParams,
+  })
+  .or({
+    "+": "reject",
+    id: nonemptyString,
+    method: type.enumerated(IpcMethod.PROVIDER_REMOVE, IpcMethod.DISCOVER),
+    params: providerParams,
+  })
+  .or({
+    "+": "reject",
+    id: nonemptyString,
+    method: type.enumerated(IpcMethod.MODELS_SET),
+    params: modelsSetParams,
+  })
+  .or({
+    "+": "reject",
+    id: nonemptyString,
+    method: type.enumerated(IpcMethod.PROVIDER_SET),
+    params: providerSetParams,
+  })
+  .or({
+    "+": "reject",
+    id: nonemptyString,
+    method: type.enumerated(IpcMethod.ROLE_SET),
+    params: roleSetParams,
   });
 export type IpcRequest = typeof ipcRequestSchema.infer;
 

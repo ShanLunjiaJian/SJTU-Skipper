@@ -35,6 +35,49 @@ def test_start_device_flow(monkeypatch) -> None:
     assert flow.interval == 2
 
 
+def test_device_flow_resolves_relative_verification_uri(monkeypatch) -> None:
+    """The device endpoint returns "/console/device?...", not an absolute URL."""
+
+    def fake_post(url, *, json, timeout):
+        return httpx2.Response(
+            200,
+            json={
+                "device_code": "dev",
+                "user_code": "ABCD",
+                "verification_uri": "/console/device",
+                "verification_uri_complete": (
+                    "/console/device?user_code=ABCD&client_id=opencode-cli"
+                ),
+                "interval": 5,
+                "expires_in": 600,
+            },
+        )
+
+    monkeypatch.setattr(opencode_go.httpx2, "post", fake_post)
+    flow = start_device_flow()
+    assert flow.verification_uri_complete == (
+        "https://opencode.ai/console/device?user_code=ABCD&client_id=opencode-cli"
+    )
+
+
+def test_device_flow_falls_back_to_the_plain_verification_uri(monkeypatch) -> None:
+    def fake_post(url, *, json, timeout):
+        return httpx2.Response(
+            200,
+            json={
+                "device_code": "dev",
+                "user_code": "ABCD",
+                "verification_uri": "/console/device",
+                "interval": 5,
+                "expires_in": 600,
+            },
+        )
+
+    monkeypatch.setattr(opencode_go.httpx2, "post", fake_post)
+    flow = start_device_flow()
+    assert flow.verification_uri_complete == "https://opencode.ai/console/device"
+
+
 def test_poll_pending_then_token(monkeypatch) -> None:
     flow = DeviceFlow(
         device_code="dev",

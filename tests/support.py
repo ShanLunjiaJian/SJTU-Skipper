@@ -77,6 +77,16 @@ class FakeSettings:
         self.changes.append((key, old, value))
         return value
 
+    def reset(self, key: str) -> Any:
+        """Drop a stored value so the spec default applies again."""
+
+        old = self.get(key)
+        self.values.pop(key, None)
+        new = self.get(key)
+        if old != new:
+            self.changes.append((key, old, new))
+        return new
+
     def set_many(self, values: dict[str, Any]) -> dict[str, Any]:
         out = {}
         for key, value in values.items():

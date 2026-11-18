@@ -113,8 +113,8 @@ ctx.register_service("my.service", my_object)
 约定：
 
 - 服务名包括 `settings`、`llm`、`agent`、`input`、`stt`、`vlm`、`notes-pipeline`、`summarize`、`instant-summarize` 和 `reader`．
-- `stt.status()` 返回服务地址、模型、语言、会话 ID、音频时长、处理游标、覆盖时长、片段数、临时文字和失败区间等状态．
-- `stt.transcribe(start=None, end=None)` 同步处理保留 PCM 中尚未覆盖的区间．`start` 缺省为已调度游标，`end` 缺省为 `start + 120` 秒，并限制在音频终点内．调用会追加转写、记录覆盖并推进已调度游标，返回 `ok/start/end/segments/chars/items`．
+- `stt.status()` 返回供应商、服务地址/端点、模型、语言、会话 ID、音频时长、处理游标、覆盖时长、片段数、临时文字和失败区间等状态．
+- `stt.transcribe(start=None, end=None)` 同步处理保留 PCM 中尚未覆盖的区间．`start` 缺省为已调度游标，`end` 缺省为 `start + 120` 秒，并限制在音频终点内；区间按供应商单次请求上限切分（兼容服务 120 秒，Google v2 55 秒）．调用会追加转写、记录覆盖并推进已调度游标，返回 `ok/start/end/segments/chars/items`．
 - 服务调用使用公开服务对象，不导入插件实现．共享类型与枚举（`Side`、`BlockType`、`FormInputType`、`TaskState`、`StreamKind`、`MediaKind`、`SettingType`）从 `core` 导入．
 - `requires` 声明必需插件，控制加载顺序和服务访问权限．缺失必需插件时加载失败．`optional_requires` 声明可选插件；调用 `ctx.service(name)` 可取得服务或 `None`．
 
@@ -137,11 +137,12 @@ for frame in ctx.llm.stream(IpcMethod.GENERATE, role="board_recognition", messag
 ```
 
 - `llm` 服务提供项目 OMP 运行时的 `call`、`stream`、`cancel`、`close` 和 `session_transcript`．单次生成、交互会话、配置和鉴权共用该接口．文件任务由 `agent` 服务管理应用状态．
-- `call`/`stream` 的方法参数必须是 `IpcMethod` 成员（`generate`、`info`、`configure` 等）．
+- `call`/`stream` 的方法参数必须是 `IpcMethod` 成员（`generate`、`info`、`configure`、`catalog` 等）．配置读写必须走运行时方法，插件不直接解析或写入 `models.yml`/`roles.yml`．
 - `ctx.llm.session_transcript(session_id)` 返回可恢复会话的记录路径．会话仍活动、记录缺失或记录无法恢复时，返回 `None`．插件不能直接读取运行时目录．
 - 模型和思考级别来自 `roles.yml`．提供方、模型能力与兼容参数来自 `models.yml`．`api` 的可选值由安装的 OMP SDK 决定．
 - `ctx.llm.call(IpcMethod.INFO)` 返回角色、提供方状态和用量．Agent 会话创建时固定配置．
-- `stt` 使用独立 HTTP/WebSocket 服务协议．
+- `IpcMethod.CATALOG` 返回结构化配置（提供方、模型能力、角色选择器、原始 YAML）．`PROVIDER_SET`、`PROVIDER_REMOVE`、`MODELS_SET`、`ROLE_SET` 提交结构化修改，校验通过才写盘并返回新的 catalog．`DISCOVER` 请求端点 `${baseUrl}/models`，返回归一化后的候选模型，不修改配置．
+- `stt` 通过供应商适配器使用独立协议：兼容 HTTP/WebSocket 服务，或 Google Cloud Speech-to-Text v2 REST．
 
 ## 6. UI
 
@@ -167,12 +168,23 @@ Block：
 {"type": "text", "text": "..."}
 {"type": "keyvalue", "items": [["课程", "复分析"], ["日期", "2026-11-01"]]}
 {"type": "table", "columns": ["节次", "时间"], "rows": [["第 9 节", "15:55"]]}
+# row_actions 为每一行生成按钮；keys 把该行字段并入 action 的 values
+{"type": "table", "columns": [{"key": "id", "label": "模型"}], "rows": [{"id": "flash"}],
+ "row_actions": [{"label": "删除", "action": "llm.model.remove", "keys": ["id"],
+                  "value": {"provider": "opencode-go"}, "class": "btn btn-sm btn-danger"}]}
 {"type": "cards", "items": [{"title": "...", "subtitle": "...", "actions": [...]}]}
 {"type": "list", "items": [{"text": "...", "action": "x", "value": {...}}]}
 {"type": "buttons", "buttons": [{"label": "刷新", "action": "input.refresh"}]}
 {"type": "form", "fields": [
     {"name": "url", "label": "直播 URL", "type": "text", "placeholder": "https://..."}
 ], "action": "input.play_url", "submit_label": "开始"}
+# 字段可选：visible_when 按同表单字段值显隐；rows 指定 textarea 行数；
+# type=action 的字段渲染按钮，value 作为按钮数据，button_class 覆盖样式
+{"type": "form", "fields": [
+    {"name": "auth", "label": "鉴权", "type": "select", "options": ["apiKey", "oauth"]},
+    {"name": "key", "label": "API Key", "type": "password",
+     "visible_when": {"key": "auth", "values": ["apiKey"]}},
+], "action": "llm.provider.save"}
 {"type": "log", "lines": [{"time": "12:00", "text": "..."}]}
 {"type": "image", "src": "/api/artifacts/<session>/vlm/000030-000060.jpg"}
 {"type": "tabs", "tabs": [{"title": "知识", "active": True, "blocks": [...],
@@ -203,9 +215,15 @@ ctx.ui.register_action("my.action", handler)
 def handler(payload: dict):
     # payload 还包含 page_id / item_id
     return {"ok": True, "message": "...", "refresh": True, "open_page": "my:page"}
+
+
+def device_login(payload: dict):
+    # open_url 让浏览器新开一个外部标签页（设备授权等），页面里仍需给出可复制链接
+    return {"ok": True, "message": "已生成授权链接", "refresh": True,
+            "open_url": "https://example.com/device?code=ABCD"}
 ```
 
-返回 `refresh=True` 会让前端重新拉取 state．长任务需在后台执行，action 立即返回．
+返回 `refresh=True` 会让前端重新拉取 state．长任务需在后台执行，action 立即返回．`open_page` 打开应用内页面，`open_url` 打开外部链接（仅 `http`/`https`），两者可同时使用．
 
 Action 归属：
 

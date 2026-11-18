@@ -220,6 +220,12 @@ class SettingsPlugin(Plugin):
             "readonly": bool(spec.readonly),
             "order": spec.order,
         }
+        if spec.visible_when is not None:
+            controller, allowed = spec.visible_when
+            base["visible_when"] = {
+                "key": controller,
+                "values": [str(value) for value in allowed],
+            }
         if spec.type == SettingType.ACTION:
             base.update(
                 {
