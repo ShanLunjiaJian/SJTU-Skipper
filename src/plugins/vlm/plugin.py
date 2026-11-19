@@ -511,7 +511,7 @@ class VlmPlugin(Plugin):
                 blocks.append(
                     {
                         "type": BlockType.HTML,
-                        "html": '<pre class="log vlm-raw-reply" aria-label="模型原始回复">'
+                        "html": '<pre class="vlm-raw-reply" aria-label="模型原始回复">'
                         + escape(f"模型原始回复：\n{last['text']}")
                         + "</pre>",
                     }
