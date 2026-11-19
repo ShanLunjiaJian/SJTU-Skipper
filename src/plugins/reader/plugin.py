@@ -599,8 +599,10 @@ class ReaderPlugin(Plugin):
         if not docs:
             return [{"type": BlockType.TEXT, "text": "没有可显示的文稿"}]
 
-        active = str(state.get("active") or "")
-        sequence = int(state.get("sequence") or 0)
+        navigation = current_navigation()
+        active = navigation.doc if navigation.page == page_id else ""
+        if active not in {doc["key"] for doc in docs}:
+            active = docs[0]["key"]
 
         tabs: list[dict[str, Any]] = []
         with ExitStack() as stack:

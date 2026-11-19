@@ -274,14 +274,10 @@ class InputPlugin(Plugin):
             "next_boundary": 0.0,
         }
         self._tree_ttl = 30.0
-        self._expanded: set[str] = set()
 
         # Course media records and the engine queue do not store browser selection.
         self._class_lock = threading.RLock()
-        self._class_index = 0
-        self._class_streams: dict[StreamView, str] = {}
-        self._streams_loading = False
-        self._streams_error = ""
+        self._courses: dict[str, _Course] = {}
         # Processing queue: one engine slot, FIFO, live classes jump ahead.
         self._jobs: dict[str, _Job] = {}
         self._queue: list[str] = []
@@ -290,8 +286,6 @@ class InputPlugin(Plugin):
         self._processing = False
         self._playback_class_id = ""
         self._processing_started = 0.0
-        self._class_session_meta: dict[str, Any] = {}
-        self._class_session_id: str = ""
         # Gap-fill pass state (see _fill_gaps): remaining recording parts.
         self._fill_queue: list[dict[str, Any]] = []
         self._fill_target = ""
@@ -602,15 +596,11 @@ class InputPlugin(Plugin):
 
     @property
     def _current_class(self) -> dict[str, Any] | None:
-        return self._ctx.streams.selected_class_meta or None
-
-    @_current_class.setter
-    def _current_class(self, value: dict[str, Any] | None) -> None:
-        self._ctx.streams.select_class(str((value or {}).get("id") or ""), value)
+        return current_navigation().class_meta or None
 
     @property
     def _current_class_id(self) -> str:
-        return self._ctx.streams.selected_class_id
+        return current_navigation().class_id
 
     def _session_meta_path(self, session_id: str) -> Path:
         return self._ctx.data_dir / "sessions" / session_id / "meta.json"
@@ -890,6 +880,11 @@ class InputPlugin(Plugin):
         self._fill_queue = parts[1:]
         self._fill_course = dict(meta)
         with self._class_lock:
+            self._playback_class_id = ""
+            course = self._courses.get(live_session_id)
+            if course is not None:
+                course.finished = False
+                course.download = {}
             self._processing = True
             self._processing_started = time.time()
         self._jobs_changed("input.class.processing")
@@ -1031,65 +1026,11 @@ class InputPlugin(Plugin):
 
                 return plugin._load_session_meta(session_id)
 
-            def selected_class(self):
-                return plugin._ctx.streams.selected_class_id
+            def resolve_class(self, class_id: str) -> dict[str, Any]:
+                return plugin._resolve_class(class_id)
 
-            def clear_class(self):
-                with plugin._class_lock:
-                    plugin._current_class = None
-                    plugin._class_streams = {}
-                    plugin._class_session_id = ""
-                    plugin._class_session_meta = {}
-                    plugin._class_finished = False
-                plugin._apply_tree_state()
-
-            def open_class(self, class_id):
-                with plugin._class_lock:
-                    job = plugin._jobs.get(class_id)
-                    selected = (
-                        dict(job.cls) if job else dict(plugin._current_class or {})
-                    )
-                if selected.get("id") != class_id:
-                    with plugin._tree_lock:
-                        nodes = list(plugin._tree["nodes"])
-
-                    def find(items):
-                        for node in items:
-                            if node.get("id") == class_id:
-                                return node.get("action", {}).get("value")
-                            result = find(node.get("children", []))
-                            if result:
-                                return result
-                        return None
-
-                    meta = plugin._load_session_meta(class_id)
-                    selected = (
-                        {
-                            **meta,
-                            "id": class_id,
-                            "course": str(meta.get("course_id") or ""),
-                            "name": str(meta.get("course_name") or ""),
-                            "label": str(meta.get("class_label") or ""),
-                            "videos": [
-                                str(part["video_id"])
-                                for part in meta.get("media_parts") or []
-                                if part.get("video_id")
-                            ]
-                            or (
-                                [str(meta["video_id"])] if meta.get("video_id") else []
-                            ),
-                            "live_id": str(meta.get("live_id") or ""),
-                        }
-                        if meta
-                        else find(nodes)
-                    )
-                    if selected is None:
-                        plugin._load_tree()
-                        with plugin._tree_lock:
-                            selected = find(plugin._tree["nodes"])
-                if not selected:
-                    raise KeyError("Class not found")
-                result = plugin._act_open_class(selected)
+            def open_class(self, class_id: str) -> None:
+                result = plugin._act_open_class(plugin._resolve_class(class_id))
                 if not result.get("ok"):
                     raise ValueError(result.get("message", "Cannot open class"))
 
@@ -1305,29 +1246,28 @@ class InputPlugin(Plugin):
             }
         current = current_navigation().class_id
 
-        def walk(items: list[dict[str, Any]]) -> None:
-            for node in items:
-                node_id = str(node.get("id", ""))
-                if node_id.startswith("course:"):
-                    cid = node_id.split(":", 1)[1]
-                    node["expanded"] = cid in expanded
-                if node.get("action"):
-                    node["active"] = node_id == current
-                    value = node["action"].get("value") or {}
-                    job_state = job_states.get(str(value.get("id", "")))
-                    if job_state:
-                        node["badge"] = {
-                            JobState.QUEUED: "排队",
-                            JobState.PREPARING: "准备中",
-                            JobState.RUNNING: "处理中",
-                            JobState.PAUSED: "已暂停",
-                        }.get(job_state, "")
-                        node["badge_class"] = (
-                            TreeBadge.LIVE
-                            if job_state in {JobState.PREPARING, JobState.RUNNING}
-                            else TreeBadge.UPCOMING
-                        )
-                walk(node.get("children", []) or [])
+        def decorate(node: dict[str, Any]) -> dict[str, Any]:
+            node = dict(node)
+            node_id = str(node.get("id", ""))
+            if node.get("action"):
+                node["active"] = node_id == current
+                value = node["action"].get("value") or {}
+                job_state = job_states.get(str(value.get("id", "")))
+                if job_state:
+                    node["badge"] = {
+                        JobState.QUEUED: "排队",
+                        JobState.PREPARING: "准备中",
+                        JobState.RUNNING: "处理中",
+                        JobState.PAUSED: "已暂停",
+                    }.get(job_state, "")
+                    node["badge_class"] = (
+                        TreeBadge.LIVE
+                        if job_state in {JobState.PREPARING, JobState.RUNNING}
+                        else TreeBadge.UPCOMING
+                    )
+            if "children" in node:
+                node["children"] = [decorate(child) for child in node["children"]]
+            return node
 
         return [decorate(node) for node in nodes]
 
@@ -1467,6 +1407,7 @@ class InputPlugin(Plugin):
             job = self._selected_job_locked()
             job_state = job.state if job is not None else None
             job_error = job.error if job is not None else ""
+            course = self._courses.get(self._current_class_id)
             finished = (job is not None and job.state == JobState.DONE) or (
                 job is None and course is not None and course.finished
             )
@@ -1511,12 +1452,12 @@ class InputPlugin(Plugin):
                 {
                     "label": "暂停处理" if self._processing else "继续处理",
                     "action": "input.pause_processing" if self._processing else "input.resume",
-                    "class": "btn btn-ghost",
+                    "class": "btn-subtle theme-secondary",
                 },
                 {
                     "label": "停止处理",
                     "action": "input.stop",
-                    "class": "btn btn-danger",
+                    "class": "btn-outline theme-danger",
                 },
             ])
         elif job is not None and job_state == JobState.RUNNING:
@@ -1607,13 +1548,16 @@ class InputPlugin(Plugin):
         return [
             {
                 "type": BlockType.HTML,
-                "html": f"""<section class="p-3 border-bottom" aria-label="处理状态">
+                "html": f"""<section class="p-3 border-bottom" aria-label="课程处理">
           <div class="d-flex align-items-center justify-content-between gap-2">
-            <h3 class="fs-md fw-semibold mb-0">处理状态</h3>
+            <h3 class="fs-md fw-semibold mb-0">课程处理</h3>
             <span role="status">{escape(state_label)}</span>
           </div>
           {detail_html}
-          {f'<div class="d-flex flex-wrap gap-2 mt-3">{controls}</div>' if controls else ""}
+          <div class="d-flex flex-wrap align-items-center gap-2 mt-3">
+            <button type="button" class="btn-outline theme-primary" data-action="ui.open_page" data-value='{{"page_id":"input:session"}}'>打开课程</button>
+            {controls}
+          </div>
         </section>""",
             }
         ]
@@ -2138,31 +2082,23 @@ class InputPlugin(Plugin):
             or class_id in {".", "..", "boot"}
         ):
             return {"ok": False, "message": "无效的课次 ID"}
-        kind = SourceKind(payload.get("kind") or SourceKind.RECORDING)
-        videos = payload.get("videos") or []
-        if isinstance(videos, str):
-            videos = [part for part in videos.split(",") if part]
-        videos = [str(video) for video in videos if str(video)]
-        live_id = str(payload.get("live_id", ""))
-
-        if kind == SourceKind.RECORDING and not videos:
-            return {"ok": False, "message": "缺少录播 ID"}
-        if kind == SourceKind.LIVE and not live_id:
-            return {"ok": False, "message": "缺少直播 ID"}
-
-        with self._class_lock:
-            if (
-                self._current_class is not None
-                and self._current_class.get("id") == class_id
-                and not self._class_finished
-            ):
-                # Re-selecting the same class must not reset it.
-                return {"ok": True, "open_page": "input:session"}
-
-        record = self._find_finished_class(class_id)
-        with self._class_lock:
-            self._current_class = {
-                **((record.get("meta") or {}) if record else {}),
+        if "kind" not in payload:
+            try:
+                cls = self._resolve_class(class_id)
+            except KeyError:
+                return {"ok": False, "message": "未找到课程"}
+        else:
+            kind = SourceKind(payload.get("kind") or SourceKind.RECORDING)
+            videos = payload.get("videos") or []
+            if isinstance(videos, str):
+                videos = [part for part in videos.split(",") if part]
+            videos = [str(video) for video in videos if str(video)]
+            live_id = str(payload.get("live_id", ""))
+            if kind == SourceKind.RECORDING and not videos:
+                return {"ok": False, "message": "缺少录播 ID"}
+            if kind == SourceKind.LIVE and not live_id:
+                return {"ok": False, "message": "缺少直播 ID"}
+            cls = {
                 "id": class_id,
                 "kind": kind,
                 "course": str(payload.get("course", "")),
@@ -2172,40 +2108,11 @@ class InputPlugin(Plugin):
                 "recording_parts": list(payload.get("recording_parts") or []),
                 "live_id": live_id,
             }
-            job = self._jobs.get(class_id)
-            if job is not None and job.state not in _JOB_TERMINAL:
-                self._class_index = job.input_part_index
-                self._class_streams = dict(job.streams)
-                self._streams_loading = bool(job.streams_loading and not job.streams)
-                self._streams_error = job.error
-                self._class_finished = False
-                self._class_session_meta = dict(job.session_meta)
-                self._class_session_id = job.session_id
-            else:
-                self._class_index = (len(videos) - 1) if record else 0
-                self._class_streams = {}
-                self._streams_loading = record is None
-                self._streams_error = ""
-                self._class_finished = record is not None
-                self._class_session_meta = dict(record["meta"]) if record else {}
-                self._class_session_id = record["session_id"] if record else ""
-            self._part_durations = dict(job.part_durations) if job else {}
-            self._recording_streams = dict(job.recording_streams) if job else {}
-            self._total_seconds = job.total_seconds if job else 0.0
-            if self._active_job is None:
-                self._download = {}
-            should_resolve = record is None and (
-                job is None
-                or job.state in _JOB_TERMINAL
-                or not job.streams.get(StreamView.MAIN)
-            )
-        self._apply_tree_state()
-
-        if should_resolve:
-            threading.Thread(
-                target=self._resolve_class_streams, name="class-streams", daemon=True
-            ).start()
-        self._ctx.ui.refresh("input.class.opened")
+            self._remember_class(cls)
+        navigation = current_navigation()
+        navigation.class_id = class_id
+        navigation.class_meta = cls
+        self._ctx.ui.open_page("input:session")
         return {"ok": True, "open_page": "input:session"}
 
     def _end_open_session(self, reason: str) -> None:
@@ -2536,20 +2443,7 @@ class InputPlugin(Plugin):
                 self._jobs.pop(job.id, None)
                 while job.id in self._queue:
                     self._queue.remove(job.id)
-            self._class_finished = False
-            self._class_index = 0
-            self._class_session_meta = {}
-            self._class_session_id = ""
-            self._session_started = False
-            self._part_durations = {}
-            self._total_seconds = 0.0
-            # The streams already resolved may belong to a later part (they are
-            # kept when a finished class is reopened); reusing them would
-            # re-download part N while the UI says "第 1 节".
-            self._class_streams = {}
-            self._streams_loading = True
-            self._streams_error = ""
-            self._want_processing = True
+            self._courses[str(cls["id"])] = _Course(cls=dict(cls))
         sid = str(cls["id"])
         session = self._ctx.streams.get_session(sid)
         if session is not None:
@@ -2725,20 +2619,7 @@ class InputPlugin(Plugin):
         job = self._job_from_payload(payload)
         if job is None:
             return {"ok": False, "message": "任务记录已清理"}
-        with self._class_lock:
-            self._current_class = dict(job.cls)
-            self._class_index = 0
-            self._class_streams = {}
-            self._streams_loading = True
-            self._streams_error = ""
-            self._class_finished = False
-            self._class_session_id = ""
-            self._class_session_meta = {}
-            while job.id in self._queue:
-                self._queue.remove(job.id)
-            self._jobs.pop(job.id, None)
-        self._apply_tree_state()
-        return self._act_reprocess({})
+        return self._act_reprocess({"id": job.id})
 
     def _act_queue_clear(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._class_lock:

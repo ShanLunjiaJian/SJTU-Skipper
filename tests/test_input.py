@@ -1395,40 +1395,6 @@ class TestClassPlayer:
         resolve = mock.Mock()
         monkeypatch.setattr(plugin, "_resolve_class_streams", resolve)
         try:
-            assert ctx.streams.selected_class_id == ""
-            assert ctx.ui.state()["context"] is None
-            result = ctx.ui.dispatch_action(
-                "input.open_class",
-                {
-                    "id": class_id,
-                    "course": "1",
-                    "name": "高等数学",
-                    "kind": SourceKind.RECORDING,
-                    "videos": ["v1", "v2"],
-                },
-            )
-            assert result.ok
-            assert plugin._class_finished
-            assert plugin._class_session_id == ctx.streams.selected_class_id == class_id
-            ctx.streams.start_session("other-class", meta={"course_name": "后台课程"})
-            assert ctx.streams.selected_class_id == class_id
-            assert ctx.service("input").selected_class() == class_id
-            assert ctx.ui.state()["context"]["title"] == "高等数学"
-            assert plugin._render_session()[0]["text"].startswith("### 高等数学")
-            assert plugin._class_session_meta == meta
-            resolve.assert_not_called()
-        finally:
-            plugin.teardown()
-
-    def test_reprocess_restarts_from_the_first_part(self, monkeypatch, tmp_path):
-        """Reprocessing starts at the first recording part."""
-
-        ctx = _make_context(tmp_path)
-        plugin = InputPlugin()
-        plugin.setup(ctx)
-        resolve = mock.Mock()
-        monkeypatch.setattr(plugin, "_resolve_class_streams", resolve)
-        try:
             assert current_navigation().class_id == ""
             assert ctx.ui.state()["context"] is None
             result = ctx.ui.dispatch_action(
@@ -1453,6 +1419,23 @@ class TestClassPlayer:
             resolve.assert_not_called()
             from core.navigation import Navigation, navigation_scope
 
+            with navigation_scope(Navigation(class_id="other-browser")) as other:
+                resolved = ctx.service("input").resolve_class(class_id)
+                assert resolved["id"] == class_id
+                assert other.class_id == "other-browser"
+                assert other.class_meta == {}
+            assert current_navigation().class_id == class_id
+        finally:
+            plugin.teardown()
+
+    def test_reprocess_restarts_from_the_first_part(self, monkeypatch, tmp_path):
+        """Reprocessing starts at the first recording part."""
+
+        ctx = _make_context(tmp_path)
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
+
         directory = tmp_path / "sessions" / "1-20261105-0800"
         directory.mkdir(parents=True, exist_ok=True)
         for name in ("transcript.jsonl", "visual.jsonl", "coverage.json"):
@@ -1467,10 +1450,9 @@ class TestClassPlayer:
 
         result = ctx.ui.dispatch_action("input.reprocess", {})
         assert result.ok
-        assert plugin._class_index == 0
-        assert plugin._class_streams == {}, "stale streams would re-download part 2"
-        assert plugin._streams_loading is True, "part 1 streams must be re-resolved"
-        assert plugin._class_finished is False
+        assert plugin._jobs["1-20261105-0800"].input_part_index == 0
+        assert plugin._jobs["1-20261105-0800"].streams == {}
+        assert plugin._jobs["1-20261105-0800"].streams_loading is True
         reset.assert_called_once_with("1-20261105-0800")
         assert not any(
             (directory / name).exists()
@@ -1508,7 +1490,6 @@ class TestClassPlayer:
         _course(plugin).streams = {StreamView.MAIN: "https://example.com/main.mp4"}
         _course(plugin).streams_loading = False
         plugin._processing = True
-        plugin._playback_class_id = current_navigation().class_id
         _course(plugin).session_meta["total_media_seconds"] = 3600.0
         _course(plugin).session_id = current_navigation().class_id
         session = ctx.streams.start_session(current_navigation().class_id)
@@ -1939,7 +1920,8 @@ class TestProcessingQueue:
             plugin._processing = True
             plugin._enqueue_job_locked(last)
             plugin._enqueue_job_locked(first)
-            plugin._current_class = dict(plugin._jobs[selected].cls, id=selected)
+            current_navigation().class_id = selected
+            current_navigation().class_meta = dict(plugin._jobs[selected].cls, id=selected)
 
             html = plugin._render_queue_item()[0]["html"]
             rows = BeautifulSoup(html, "html.parser").select("li")

@@ -379,8 +379,27 @@ class AskPlugin(Plugin):
                         return title
         return _DEFAULT_DOC_LABELS.get(name, Path(name).stem)
 
-    def _course_name(self) -> str:
-        meta = self.ctx.streams.selected_class_meta or {}
+    def _course_name(self, path: str) -> str:
+        navigation = current_navigation()
+        meta = navigation.class_meta
+        try:
+            relative = Path(path).resolve().relative_to(
+                (self.ctx.data_dir / "sessions").resolve()
+            )
+        except ValueError:
+            pass
+        else:
+            sid = relative.parts[0]
+            session = self.ctx.streams.get_session(sid)
+            if session is not None:
+                meta = session.meta
+            else:
+                metadata_path = self.ctx.data_dir / "sessions" / sid / "meta.json"
+                if metadata_path.exists():
+                    raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    meta = raw.get("meta", raw)
+                elif navigation.class_id != sid:
+                    meta = {}
         name: Any = meta.get("course_name") or meta.get("course")
         if isinstance(name, dict):
             name = name.get("course_name") or name.get("name") or ""

@@ -389,7 +389,7 @@ class AgentService:
 
 class AgentPlugin(Plugin):
     id = "agent"
-    requires = ("settings", "llm")
+    requires = ("llm",)
     provides = ("agent",)
 
     def __init__(self) -> None:

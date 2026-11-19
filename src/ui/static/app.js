@@ -131,7 +131,6 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     lastLoad: 0,
     ws: null,
     wsRetry: 0,
-    wsOpened: false,
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -258,16 +257,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         if (version !== state.navigationVersion) return;
         if (JSON.stringify(navigationFromUrl()) !== JSON.stringify(navigation)) return;
         if (navigationVersion === null && state.navigationPending) return;
-        const navigation = navigationFromUrl();
-        if (
-          navigationVersion === null &&
-          ["page", "class", "doc"].some(
-            (key) => (ui.navigation?.[key] || "") !== (navigation[key] || ""),
-          )
-        ) {
-          return true;
-        }
-        const previousPage = state.ui?.navigation?.page;
+        const previousPage = state.ui?.active_page;
         state.ui = ui;
         state.lastLoad = Date.now();
         if (previousPage !== ui.active_page) {
@@ -287,10 +277,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         state.loading = null;
       }
     })();
-    const restore = await state.loading;
-    if (restore && version === state.navigationVersion && !state.navigationPending) {
-      await restoreNavigation();
-    }
+    await state.loading;
   }
 
   function changeNavigation(callback, historyMode = HISTORY_MODE.PUSH) {
@@ -317,13 +304,6 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
   async function restoreNavigation() {
     state.navigationVersion += 1;
     const navigation = navigationFromUrl();
-    if (
-      !("class" in navigation) &&
-      !navigation.page.startsWith("reader:notes:") &&
-      !navigation.page.startsWith("notes:logs:")
-    ) {
-      navigation.class = "";
-    }
     try {
       await changeNavigation(
         () =>
@@ -386,7 +366,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
   }
 
   function renderLog(block) {
-    const pre = el("pre", { class: "log bg-2 border rounded p-3 overflow-auto" });
+    const pre = el("pre", { class: "log bg-2 border p-3 overflow-auto" });
     const lines = Array.isArray(block.lines) ? block.lines : [];
     for (const line of lines) {
       if (typeof line === "string") {
@@ -495,26 +475,26 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       caret.title = expanded ? "折叠" : "展开";
       caret.setAttribute("aria-expanded", String(expanded));
       if (expanded && !kids) {
-        kids = el("div", { class: "tree-children" });
+        kids = el("div", { class: "ms-2 border-start ps-1" });
         for (const child of children) kids.appendChild(renderTreeNode(child));
         box.appendChild(kids);
       }
       if (kids) kids.hidden = !expanded;
     };
     const row = el("div", {
-      class: `d-flex flex-nowrap align-items-center gap-1 rounded p-1 ${node.active ? "bg-subtle-primary" : ""}`,
+      class: `d-flex flex-nowrap align-items-center gap-1 p-1 ${node.active ? "bg-subtle-primary" : ""}`,
     });
     if (canExpand) {
-      const caret = el("button", {
+      caret = el("button", {
         class: "btn-text btn-sm flex-shrink-0",
         type: FIELD_INPUT.BUTTON,
-        text: node.expanded ? "▾" : "▸",
-        title: node.expanded ? "折叠" : "展开",
-        "aria-expanded": String(Boolean(node.expanded)),
+        text: expanded ? "▾" : "▸",
+        title: expanded ? "折叠" : "展开",
+        "aria-expanded": String(expanded),
       });
       caret.addEventListener("click", (event) => {
         event.stopPropagation();
-        runNodeAction(node.toggle);
+        toggle();
       });
       row.appendChild(caret);
     }
@@ -547,11 +527,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       else if (canExpand) toggle();
     });
     box.appendChild(row);
-    if (hasChildren && node.expanded) {
-      const kids = el("div", { class: "ms-2 border-start ps-1" });
-      for (const child of children) kids.appendChild(renderTreeNode(child));
-      box.appendChild(kids);
-    }
+    updateExpansion();
     return box;
   }
 
@@ -832,13 +808,11 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     if (focusedView && data.active !== active) active = data.active;
     const show = (target, remember = true) => {
       if (documentTabs) {
-        const current = navigationFromUrl();
-        const currentTab =
-          tabs.find(
-            (tab) =>
-              tab.meta?.doc_key === current.doc && tab.meta?.page_id === current.page,
-          ) || tabs[0];
-        target = currentTab ? tabKey(currentTab, tabs.indexOf(currentTab)) : null;
+        const navigation = navigationFromUrl();
+        const selected = tabs.find(
+          (tab) => tab.meta?.doc_key === navigation.doc && tab.meta?.page_id === navigation.page,
+        ) || tabs[0];
+        target = selected ? tabKey(selected, tabs.indexOf(selected)) : null;
       }
       const index = tabs.findIndex((tab, index) => tabKey(tab, index) === target);
       if (index < 0) return;
@@ -1829,7 +1803,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         "aria-label": "Execution metrics",
       });
       const log = el("div", {
-        class: "execution-log border rounded p-2 flex-grow-1 min-h-0 overflow-auto",
+        class: "execution-log border p-2 flex-grow-1 min-h-0 overflow-auto",
         tabindex: "0",
         "aria-label": "Execution blocks",
       });
@@ -2212,12 +2186,12 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     }
     if (type === BLOCK_TYPE.TEXT)
       return el("pre", {
-        class: "block bg-2 border rounded p-3 overflow-auto",
+        class: "block bg-2 border p-3 overflow-auto",
         text: block.text ?? "",
       });
     if (type === BLOCK_TYPE.KEYVALUE) {
       const items = Array.isArray(block.items) ? block.items : Object.entries(block.items || {});
-      const grid = el("dl", { class: "row g-0 border rounded" });
+      const grid = el("dl", { class: "row g-0 border" });
       for (const [k, v] of items) {
         grid.appendChild(el("dt", { class: "col-4 bg-2 p-2", text: k }));
         grid.appendChild(
@@ -2269,7 +2243,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     if (type === BLOCK_TYPE.LOG) return el("div", { class: "block" }, [renderLog(block)]);
     if (type === BLOCK_TYPE.IMAGE) {
       return el("div", { class: "block" }, [
-        el("img", { class: "img-fluid rounded", src: block.src, alt: block.alt || "" }),
+        el("img", { class: "img-fluid", src: block.src, alt: block.alt || "" }),
       ]);
     }
     if (type === BLOCK_TYPE.VIDEO) {
@@ -2313,7 +2287,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         text: block.text || "",
       });
     return el("pre", {
-      class: "block bg-2 border rounded p-3 overflow-auto",
+      class: "block bg-2 border p-3 overflow-auto",
       text: JSON.stringify(block, null, 2),
     });
   }
@@ -3177,8 +3151,13 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       const navigation = JSON.stringify(navigationFromUrl());
       const version = state.navigationVersion;
       const result = await request();
-      if (result?.refresh !== false || result?.open_page) {
-        await loadState({ quiet: true, navigationVersion: state.navigationVersion });
+      if (
+        version === state.navigationVersion &&
+        !state.navigationPending &&
+        navigation === JSON.stringify(navigationFromUrl())
+      ) {
+        syncNavigation(result?.navigation, HISTORY_MODE.PUSH);
+        if (result?.refresh !== false || result?.navigation) await loadState({ quiet: true });
       }
       return result;
     } catch (err) {
@@ -3240,8 +3219,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       state.wsRetry = 0;
       setConnection(true);
       ws.send("hello");
-      if (state.wsOpened || !state.ui) restoreNavigation();
-      state.wsOpened = true;
+      loadState({ quiet: true });
     });
     ws.addEventListener("message", (event) => {
       try {

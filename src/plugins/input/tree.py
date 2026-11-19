@@ -12,7 +12,7 @@ from enum import StrEnum
 
 from core.media import SourceKind
 
-from typing import Any, Iterable
+from typing import Any
 from core.lecture import lecture_id, source_id
 
 
@@ -415,7 +415,6 @@ def build_tree(
                     )
                     if part
                 ),
-                "expanded": cid in expanded_ids,
                 "live": is_live,
                 "children": child_nodes,
             }

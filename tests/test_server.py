@@ -75,6 +75,12 @@ def test_state_and_action(client) -> None:
     assert payload["message"] == "pong"
 
 
+def state_for(test_client, route):
+    return test_client.get(
+        "/api/ui/state", params={**route, "pages": json.dumps(route["pages"])}
+    )
+
+
 @pytest.fixture()
 def navigation_client(client):
     from types import SimpleNamespace
@@ -83,25 +89,20 @@ def navigation_client(client):
     runtime = test_client.app.state.runtime
     sid = "lecture-test"
     (cfg.data_dir / "sessions" / sid).mkdir(parents=True)
-    selected = {"class_id": "", "opened": []}
+    opened = []
 
     def notes(session_id, doc):
-        selected.update(session=session_id, doc=doc)
         page = f"reader:notes:{session_id}:notes"
-        if not runtime.ui.has_page(page):
-            runtime.ui.add_page(page, "Notes")
+        opened.append((page, doc))
+        runtime.ui.add_page(page, "Notes")
 
     def logs(session_id):
-        selected["session"] = session_id
-        page = f"notes:logs:{session_id}"
-        if not runtime.ui.has_page(page):
-            runtime.ui.add_page(page, "Logs")
+        runtime.ui.add_page(f"notes:logs:{session_id}", "Logs")
 
     def chunk_notes(session_id, doc):
-        selected.update(session=session_id, doc=doc)
         page = f"reader:notes:{session_id}:chunk-notes"
-        if not runtime.ui.has_page(page):
-            runtime.ui.add_page(page, "Draft notes")
+        opened.append((page, doc))
+        runtime.ui.add_page(page, "Draft notes")
         return {"ok": True}
 
     runtime.services.register(
@@ -109,21 +110,7 @@ def navigation_client(client):
         SimpleNamespace(open_notes=notes, open_logs=logs, open_chunk_notes=chunk_notes),
     )
     runtime.services.register(
-        "notes",
-        SimpleNamespace(open_notes=notes, open_logs=logs, open_chunk_notes=chunk_notes),
-    )
-
-    def open_class(key):
-        selected["class_id"] = key
-        selected["opened"].append(key)
-
-    runtime.services.register(
-        "input",
-        SimpleNamespace(
-            open_class=open_class,
-            clear_class=lambda: selected.update(class_id=""),
-            selected_class=lambda: selected["class_id"],
-        ),
+        "input", SimpleNamespace(resolve_class=lambda key: {"course_name": key})
     )
 
     def reader_navigation(page):
@@ -136,133 +123,62 @@ def navigation_client(client):
 
     runtime.services.register("reader", SimpleNamespace(navigation=reader_navigation))
     runtime.ui.add_page("input:session", "Class")
-    return test_client, sid, selected
+    return test_client, sid, opened
 
 
 def test_navigation_restores_dynamic_pages(navigation_client):
-    test_client, sid, selected = navigation_client
-    for route in [
-        {"page": "input:session", "class": sid},
-        {"page": f"reader:notes:{sid}:notes", "class": sid, "doc": "knowledge"},
-        {
-            "page": f"reader:notes:{sid}:chunk-notes",
-            "class": sid,
-            "doc": "notice",
-        },
-        {"page": f"notes:logs:{sid}", "class": sid},
-        {"page": "test.page", "class": sid},
-        {"page": "", "class": sid},
+    test_client, sid, _opened = navigation_client
+    for page, doc in [
+        ("input:session", ""),
+        (f"reader:notes:{sid}:notes", "knowledge"),
+        (f"reader:notes:{sid}:chunk-notes", "notice"),
+        (f"notes:logs:{sid}", ""),
+        ("test.page", ""),
+        ("", ""),
     ]:
-        selected["class_id"] = ""
+        route = {"page": page, "class": sid, "doc": doc, "pages": [page] if page else []}
         response = test_client.post("/api/ui/navigate", json=route)
         assert response.status_code == 200
         assert response.json()["navigation"] == route
-        assert test_client.get("/api/ui/state").json()["navigation"] == route
-        assert selected["class_id"] == sid
-    assert (
-        test_client.post("/api/ui/navigate", json={"page": "missing"}).status_code
-        == 404
-    )
-    assert (
-        test_client.post(
-            "/api/ui/navigate", json={"page": "notes:logs:../secret"}
-        ).status_code
-        == 400
-    )
+        state = state_for(test_client, route).json()
+        assert "navigation" not in state
+        assert state["active_page"] == page
+        assert state["open_pages"] == route["pages"]
+    assert test_client.post("/api/ui/navigate", json={"page": "missing"}).status_code == 404
+    assert test_client.post(
+        "/api/ui/navigate", json={"page": "notes:logs:../secret"}
+    ).status_code == 400
 
 
-@pytest.mark.parametrize(
-    "page",
-    [
-        "reader:notes:{sid}:notes",
-        "reader:notes:{sid}:chunk-notes",
-        "notes:logs:{sid}",
-    ],
-)
-def test_notes_navigation_selects_class(navigation_client, page):
-    test_client, sid, selected = navigation_client
+@pytest.mark.parametrize("page", ["reader:notes:{sid}:notes", "reader:notes:{sid}:chunk-notes", "notes:logs:{sid}"])
+def test_notes_navigation_resolves_class(navigation_client, page):
+    test_client, sid, _opened = navigation_client
     page = page.format(sid=sid)
-    selected["class_id"] = "other-class"
-    route = {"page": page}
-    if page.startswith("reader:"):
-        route["doc"] = "notice"
+    route = {"page": page, "class": "other-class", "doc": "notice" if page.startswith("reader:") else "", "pages": []}
     response = test_client.post("/api/ui/navigate", json=route)
     assert response.status_code == 200
-    assert response.json()["navigation"] == {**route, "class": sid}
-    assert selected["class_id"] == sid
-    assert test_client.get("/api/ui/state").json()["navigation"] == {
-        **route,
-        "class": sid,
-    }
+    assert response.json()["navigation"] == {**route, "class": sid, "pages": [page]}
 
 
-@pytest.mark.parametrize("page", ["", "test.page", "reader:notes:{sid}:notes"])
-def test_navigation_clears_explicit_class(navigation_client, page):
-    test_client, sid, selected = navigation_client
-    selected["class_id"] = sid
-    response = test_client.post(
-        "/api/ui/navigate", json={"page": page.format(sid=sid), "class": ""}
-    )
-    assert response.status_code == 200
-    assert response.json()["navigation"]["class"] == ""
-    assert test_client.get("/api/ui/state").json()["navigation"]["class"] == ""
-    assert selected["class_id"] == ""
+def test_navigation_does_not_retain_request_state(navigation_client):
+    test_client, sid, _opened = navigation_client
+    route = {"page": "input:session", "class": sid, "doc": "", "pages": ["input:session"]}
+    assert test_client.post("/api/ui/navigate", json=route).status_code == 200
+    home = {"page": "", "class": "", "doc": "", "pages": []}
+    assert test_client.post("/api/ui/navigate", json=home).json()["navigation"] == home
+    assert state_for(test_client, route).json()["active_page"] == "input:session"
+    assert state_for(test_client, home).json()["open_pages"] == []
+    assert state_for(test_client, route).json()["active_page"] == "input:session"
 
 
-@pytest.mark.parametrize("page", ["", "test.page"])
-def test_navigation_preserves_missing_class(navigation_client, page):
-    test_client, sid, selected = navigation_client
-    selected["class_id"] = sid
-    response = test_client.post("/api/ui/navigate", json={"page": page})
-    assert response.status_code == 200
-    assert response.json()["navigation"] == {"page": page, "class": sid}
-    assert selected["opened"] == []
-
-
-def test_state_does_not_reopen_class(navigation_client):
-    test_client, sid, selected = navigation_client
-    selected["class_id"] = sid
-    for _ in range(3):
-        response = test_client.get("/api/ui/state")
-        assert response.status_code == 200
-        assert response.json()["navigation"]["class"] == sid
-    assert selected["opened"] == []
-
-
-def test_navigation_restores_notes_after_reset(navigation_client):
-    test_client, sid, selected = navigation_client
-    route = {
-        "page": f"reader:notes:{sid}:notes",
-        "class": sid,
-        "doc": "notice",
-    }
-    runtime = test_client.app.state.runtime
+def test_navigation_registers_notes_only_once(navigation_client):
+    test_client, sid, opened = navigation_client
+    page = f"reader:notes:{sid}:notes"
+    route = {"page": page, "class": sid, "doc": "notice", "pages": [page]}
     for _ in range(2):
-        runtime.ui.show_home()
-        selected.update(class_id="", doc="knowledge")
-        response = test_client.post("/api/ui/navigate", json=route)
-        assert response.status_code == 200
-        assert response.json()["navigation"] == route
-        assert test_client.get("/api/ui/state").json()["navigation"] == route
-        assert selected["session"] == sid
-
-
-def test_root_navigation_clears_hub_selection(client):
-    test_client, _cfg = client
-    runtime = test_client.app.state.runtime
-    runtime.hub.select_class("stored-class", {"course_name": "Stored course"})
-    assert test_client.get("/api/ui/state").json()["navigation"] == {
-        "page": "test.page",
-        "class": "stored-class",
-    }
-    response = test_client.post("/api/ui/navigate", json={"page": "", "class": ""})
-    assert response.status_code == 200
-    assert response.json()["navigation"] == {"page": "", "class": ""}
-    assert test_client.get("/api/ui/state").json()["navigation"] == {
-        "page": "",
-        "class": "",
-    }
-    assert runtime.hub.selected_class_id == ""
+        assert test_client.post("/api/ui/navigate", json=route).json()["navigation"] == route
+        assert state_for(test_client, route).json()["active_page"] == page
+    assert opened == [(page, "notice")]
 
 
 def test_open_close_page(client) -> None:
