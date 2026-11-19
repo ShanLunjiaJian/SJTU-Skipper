@@ -71,9 +71,10 @@ class NotesView:
                 SettingsSpec(
                     key=f"notes.{key}",
                     default=default,
-                    type=kind,
-                    label=key,
+                    type=SettingType.INT,
+                    label=label,
                     group="笔记",
+                    order=order,
                 ),
                 plugin_id=self.id,
             )
@@ -85,6 +86,7 @@ class NotesView:
                 label="课后处理",
                 options=list(self.ON_STOP_LABELS),
                 group="笔记",
+                order=100,
             ),
             plugin_id=self.id,
         )

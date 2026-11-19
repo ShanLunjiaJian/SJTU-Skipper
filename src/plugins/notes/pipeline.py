@@ -77,61 +77,6 @@ class NotesPipeline:
                 SettingsSpec(
                     key=f"notes.{key}",
                     default=default,
-                    type=SettingType.INT,
-                    label=label,
-                    group="笔记",
-                    description="修改后重启服务生效" if key == "concurrency" else "",
-                ),
-                plugin_id=self.id,
-            )
-        for key, default, kind, label, group in (
-            (
-                "notes.system_prompt",
-                SYSTEM,
-                SettingType.TEXT,
-                "system_prompt",
-                "笔记",
-            ),
-            (
-                "notes.reviewer_prompt",
-                REVIEW_SYSTEM,
-                SettingType.TEXT,
-                "reviewer_prompt",
-                "笔记",
-            ),
-            (
-                "notes.review_enabled",
-                True,
-                SettingType.BOOL,
-                "review_enabled",
-                "笔记",
-            ),
-            (
-                "notes.review_max_rounds",
-                0,
-                SettingType.INT,
-                "review_max_rounds",
-                "笔记",
-            ),
-            (
-                "notes.chunk_system_prompt",
-                SYSTEM,
-                SettingType.TEXT,
-                "系统提示词",
-                "分段笔记",
-            ),
-            (
-                "notes.chunks_enabled",
-                True,
-                SettingType.BOOL,
-                "分段笔记",
-                "分段笔记",
-            ),
-        ):
-            self.settings.register(
-                SettingsSpec(
-                    key=key,
-                    default=default,
                     type=kind,
                     label=label,
                     group="笔记",
