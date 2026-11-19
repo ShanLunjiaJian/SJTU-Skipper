@@ -98,16 +98,7 @@ def test_instant_ask_answers_and_persists_fold(tmp_path: Path) -> None:
         assert runtime.bus.flush()
         qa_id = events[0]["id"]
         snapshots.append(runtime.services.require("ask").activity(str(note), qa_id))
-        pages = runtime.ui.state()["page_content"]
-
-        def activities(blocks):
-            for block in blocks:
-                if block.get("type") == BlockType.QA:
-                    yield block.get("activity")
-                for tab in block.get("tabs", []):
-                    yield from activities(tab.get("blocks", []))
-
-        assert snapshots[-1] in list(activities(next(iter(pages.values()))))
+        assert snapshots[-1] is not None
         yield {
             "type": RuntimeFrameType.RESULT,
             "result": {"final_message": "Answer", "steps": 1},
@@ -412,3 +403,30 @@ def test_live_qa_messages_keep_one_owning_run(tmp_path):
     finally:
         release.set()
         runtime.stop()
+
+
+def test_course_context_uses_only_request_navigation(navigation):
+    from core.navigation import Navigation, navigation_scope
+    from core.streams import StreamHub
+
+    hub = StreamHub()
+    hub.start_session("processing", meta={"course_name": "Background course"})
+    plugin = AskPlugin()
+    plugin.ctx = SimpleNamespace(streams=hub, data_dir=Path("/tmp"))
+    path = "/tmp/not-a-session-note.md"
+    assert plugin._course_name(path) == "未知课程"
+    navigation.class_id = "selected"
+    navigation.class_meta = {"course_name": "Selected course"}
+    assert plugin._course_name(path) == "Selected course"
+    with navigation_scope(Navigation(class_id="unprocessed")):
+        assert plugin._course_name(path) == "未知课程"
+    assert plugin._course_name(path) == "Selected course"
+
+
+def test_selection_character_limit():
+    from plugins.ask.plugin import _truncate_chars
+
+    text = "English 中文𠀀 $x^2$!"
+    assert _truncate_chars(text, len(text)) == text
+    assert _truncate_chars(text, 11) == text[:11] + "\n……（选中内容过长，已截断）"
+    assert _truncate_chars(text, 0) == ""

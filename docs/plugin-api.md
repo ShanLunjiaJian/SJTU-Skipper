@@ -10,9 +10,8 @@ from core.ui import Side
 
 
 class MyPlugin(Plugin):
-    id = "my-plugin"
+    id = "my"
     requires = ("settings", "llm")   # 插件 id，不是服务名
-    action_namespace = "my"          # 可选；UI action 前缀，缺省等于 id
 
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
@@ -154,7 +153,14 @@ item = ctx.ui.add_toolbox_item("courses", "courses.list", "我的课程", render
                                page_id="input:course:123")
 page = ctx.ui.add_page("input:course:123", "课程详情", render=render_page, closable=True)
 page.open()
-ctx.ui.register_command("input.manual", "手动播放", category="调试", page_id="input:manual")
+ctx.ui.register_command(
+    "input.manual",
+    "手动播放",
+    subtitle="HLS / FLV / mp4 / 本地文件",
+    category="调试",
+    icon="🔗",
+    page_id="input:manual",
+)
 ctx.ui.refresh("reason")
 # 右侧面板顶部显示课程上下文
 ctx.ui.set_context_provider(lambda: {"title": "高等数学", "subtitle": "11-05 录播 处理中",
@@ -203,8 +209,7 @@ Block：
 # player：两路视频（m3u8 走 hls.js，flv 走 mpegts.js，其余原生播放）
 {"type": "player", "sources": [{"key": "main", "label": "课堂", "src": "https://.../main.m3u8"},
                               {"key": "screen", "label": "屏幕", "src": "...", "muted": True}],
- "live": False, "processing": False, "finished": False, "queued": False,
- "start_action": "input.start_processing", "pause_action": "input.pause_processing"}
+ "live": False, "processing": False, "finished": False, "queued": False}
 ```
 
 Action：
@@ -225,9 +230,13 @@ def device_login(payload: dict):
 
 返回 `refresh=True` 会让前端重新拉取 state．长任务需在后台执行，action 立即返回．`open_page` 打开应用内页面，`open_url` 打开外部链接（仅 `http`/`https`），两者可同时使用．
 
+浏览器是导航的唯一来源．`GET /api/ui/state` 接收 `page`、`class`、`doc` 和 JSON 数组 `pages` 查询参数．`POST /api/ui/action` 的请求体必须包含同名字段组成的 `navigation` 对象．页面打开、关闭接口也接收 `{navigation: {...}}`．命令响应返回目标 `navigation`，浏览器负责更新 URL．服务端不保存导航，UI 状态响应不能覆盖浏览器导航．
+
+插件在 UI 请求内通过 `core.navigation.current_navigation()` 读取临时导航．`ctx.ui.open_page()`、`close_page()` 和 `show_home()` 只修改该请求的导航．这些方法不能为后台任务保存选择．后台工作必须使用显式课程 ID、文稿路径和任务 ID．`StreamHub` 只管理媒体与处理会话，不提供所选课程接口．
+
 Action 归属：
 
-- action id 必须以插件的命名空间开头，后接 `.`．命名空间默认是插件 id，可用 `action_namespace` 指定．插件不能以其他插件的 id 注册 action，也不能重复注册同一个 action id．
+- action id 必须以插件 `id` 开头，后接 `.`．插件不能以其他插件的 id 注册 action，也不能重复注册同一个 action id．
 - `ctx.ui.unregister_action(action_id)` 只允许移除本插件注册的 action．
 - `ctx.ui.action_owner(action_id)` 返回注册方插件 id 或 `None`，`ctx.ui.has_action(action_id)` 判断是否存在．
 - 驱动其他插件的 action 时，用 `uses_actions = ("other.action",)` 声明．如果声明的 action 不存在，或注册方未加载，插件加载失败．
@@ -256,7 +265,7 @@ page_id = reader.show(title="笔记", docs=docs, active="knowledge",
 # 页面级菜单项按页面和 owner 匹配
 reader.register_selection_action(
     page_id,
-    {"id": "my.ask", "label": "提问", "icon": "💬", "kind": "prompt",
+    {"id": "my.ask", "label": "提问", "kind": "prompt",
      "action": "my.ask", "placeholder": "针对选中的内容提问"},
     owner="my-plugin",
 )
@@ -284,7 +293,7 @@ reader.qa_set_collapsed(path, created["id"], False)
 - `docs` 中每项包含 `key`、`label` 和 `path`．`path` 指向文稿文件，`owner` 可按文稿覆盖．
 - `kind="prompt"` 先显示输入框．配置 `intensities` 时显示强度选择．提交的 values 包含 `{doc_key, path, selection, question, intensity, page_id}`．
 - `qa_begin` 在选中段落下方插入 `pending` 块．未找到选中内容时，问答块追加到文末．`qa_finish` 更新同一块的回答、`status` 和 `collapsed`．
-- `reader.qa_collapse` 接收 `{path, id, collapsed}`，返回 `refresh=false`．`reader.qa_delete` 接收 `{path, id}`．
+- `reader.qa_collapse` 接收 `{path, id, collapsed}`，保存后刷新展示．`reader.qa_delete` 接收 `{path, id}`．
 - 页面级项按文档 owner 过滤．全局项不按 owner 过滤，action 需检查文档是否可用．
 - 流式展示使用 `ctx.ui.notify("qa.live", payload)`．payload 包含 `path`、`id` 和流式增量，结束时包含 `status`、`answer_html` 和 `collapsed`．前端直接更新问答块．
 

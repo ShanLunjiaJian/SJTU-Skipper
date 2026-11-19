@@ -2344,3 +2344,15 @@ code {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
+
+/* Blocks added after the original frontend: error details and raw VLM replies. */
+.form-status.err {
+  color: #d93025;
+}
+.session-errors {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.vlm-raw-reply {
+  max-height: 18rem;
+}

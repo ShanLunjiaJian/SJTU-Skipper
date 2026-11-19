@@ -19,6 +19,7 @@ def test_tabs_items_pages_and_state() -> None:
     )
     ui.add_page("home", "首页", render=lambda: "# Hello\n\n$E=mc^2$", order=1)
     ui.open_page("home")
+    ui.refresh("test")
     state = ui.state()
     assert [t["id"] for t in state["left_tabs"]] == ["courses"]
     assert state["left_tabs"][0]["toolbox"][0]["id"] == "list"
@@ -106,10 +107,27 @@ def test_close_page_and_tab_removal() -> None:
     ui.add_page("p", "P")
     ui.open_page("p")
     ui.close_page("p")
-    assert ui.state()["active_page"] is None
+    assert ui.state()["active_page"] == ""
     ui.remove_tab("a")
     assert ui.state()["left_tabs"] == []
     assert ui.state()["pages"][0]["id"] == "p"
+
+
+def test_page_navigation_is_request_scoped(navigation) -> None:
+    from core.navigation import Navigation, navigation_scope
+
+    ui = UIManager()
+    ui.add_page("first", "First")
+    ui.add_page("second", "Second")
+    ui.open_page("first")
+    with navigation_scope(Navigation()):
+        ui.open_page("second")
+        assert ui.state()["active_page"] == "second"
+        assert ui.state()["open_pages"] == ["second"]
+        ui.show_home()
+        assert ui.state()["active_page"] == ""
+    assert ui.state()["active_page"] == "first"
+    assert ui.state()["open_pages"] == ["first"]
 
 
 def test_status_provider() -> None:

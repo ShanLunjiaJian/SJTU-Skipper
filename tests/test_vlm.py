@@ -623,6 +623,18 @@ class TestVlmPlugin:
         assert seg["start"] == 10.0
         assert seg["end"] == 11.0
 
+    def test_full_reply(self, vlm_plugin, vlm_ctx):
+        from html import unescape
+
+        text = "\n\n".join(f"公式 {i}: $x_{{{i}}} = {i}$" for i in range(50))
+        vlm_plugin._commit_window(0, 18, {"text": text})
+        vlm_plugin._commit_window(20, 38, {"text": text})
+        assert vlm_plugin.status()["last_window"]["text"] == text
+        blocks = vlm_plugin._render_board_page()
+        reply = next(b for b in blocks if b["type"] == "html")
+        assert text in unescape(reply["html"])
+        assert len(vlm_ctx.streams.current.visual) == 1
+
     def test_process_window_skips_blank_board(
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
     ):
@@ -793,7 +805,9 @@ class TestVlmPlugin:
         assert not vlm_plugin._cancelled_sessions
 
     def test_worker_failure_releases_input(self, vlm_plugin, vlm_ctx):
-        session = vlm_ctx.streams.start_session(meta={"mode": ProcessingMode.FAST})
+        session = vlm_ctx.streams.start_session(
+            "worker-failure", meta={"mode": ProcessingMode.FAST}
+        )
         session.input_done = True
         session.video_gate.configure(1.0)
         failures = []
@@ -906,7 +920,7 @@ def test_prepare_overlaps_recognition(vlm_plugin, vlm_ctx, monkeypatch):
 def test_idle_session_does_not_block_recording():
     hub = StreamHub()
     old = hub.current
-    current = hub.start_session(meta={"mode": ProcessingMode.FAST})
+    current = hub.start_session("recording", meta={"mode": ProcessingMode.FAST})
     plugin = VlmPlugin()
     plugin._ctx = SimpleNamespace(streams=hub)
     plugin._sessions = {old.session_id: old, current.session_id: current}
@@ -920,7 +934,7 @@ def test_idle_session_does_not_block_recording():
 
 
 def test_cancel_releases_preparation_pool(vlm_plugin, vlm_ctx):
-    session = vlm_ctx.streams.start_session()
+    session = vlm_ctx.streams.start_session("preparation-cancel")
     vlm_plugin._processing_session = session
     waiting = threading.Event()
     wait_for = session.video.wait_for
@@ -940,3 +954,43 @@ def test_cancel_releases_preparation_pool(vlm_plugin, vlm_ctx):
             vlm_plugin._prepare_pool.submit(lambda: "available").result(timeout=3)
             == "available"
         )
+
+
+def test_same_id_reprocess_resets_board(vlm_plugin, vlm_ctx):
+    plugin = vlm_plugin
+    old = vlm_ctx.streams.start_session("same-class")
+    vlm_ctx.events.flush(timeout=1)
+    frames = [_make_video_frame(_to_jpeg(_synthetic_frame()), 0, 2)]
+    plugin._run_window = lambda *args: {
+        "text": "Complete board theorem",
+        "image_path": "",
+    }
+    plugin.process_window(0, 2, frames)
+    plugin._last_session = old.session_id
+    plugin._recording_cursor[old.session_id] = 100
+    plugin.cancel(old.session_id)
+    for name in ("visual.jsonl", "coverage.json"):
+        (vlm_ctx.data_dir / "sessions" / old.session_id / name).unlink()
+
+    session = vlm_ctx.streams.start_session(old.session_id)
+    vlm_ctx.events.flush(timeout=1)
+    assert old.session_id not in plugin._cancelled_sessions
+    assert old.session_id not in plugin._recording_cursor
+    assert plugin.status()["cursor"] == 0
+    assert plugin._coverage(session).covered_seconds(MediaKind.VIDEO) == 0
+    plugin.process_window(0, 2, frames)
+    assert [item.text for item in session.visual] == ["Complete board theorem"]
+    rows = [json.loads(line) for line in plugin.visual_path().read_text().splitlines()]
+    assert [row["text"] for row in rows] == ["Complete board theorem"]
+
+
+def test_same_id_fill_preserves_board(vlm_plugin, vlm_ctx):
+    old = vlm_ctx.streams.start_session("fill-class")
+    vlm_ctx.events.flush(timeout=1)
+    vlm_plugin._commit_window(0, 2, {"text": "Valid board theorem"})
+    session = vlm_ctx.streams.start_session(
+        old.session_id, meta={"fill_for": old.session_id}
+    )
+    vlm_ctx.events.flush(timeout=1)
+    assert vlm_plugin._coverage(session).covers(MediaKind.VIDEO, 0, 2)
+    assert "Valid board theorem" in vlm_plugin.visual_path().read_text()

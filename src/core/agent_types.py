@@ -14,7 +14,6 @@ class AgentRole(StrEnum):
     NOTE_CHUNK = "note_chunk"
     NOTE_WRITER = "note_writer"
     NOTE_REVIEW = "note_review"
-    NOTE_REVISION = "note_revision"
     BOARD_RECOGNITION = "board_recognition"
     COMPACTION = "compaction"
 
@@ -139,8 +138,8 @@ class AgentEvent:
 class AgentSessionInfo:
     """Immutable snapshot of one agent session, safe across plugin boundaries.
 
-    The live session object stays inside the ``llm-agent`` plugin; consumers
-    read this snapshot instead of poking at mutable session state.
+    The live session object stays inside the ``agent`` plugin. Consumers
+    read this snapshot instead of the mutable session state.
     """
 
     id: str

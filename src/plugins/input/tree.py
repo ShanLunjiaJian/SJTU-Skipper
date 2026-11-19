@@ -12,7 +12,8 @@ from enum import StrEnum
 
 from core.media import SourceKind
 
-from typing import Any, Iterable
+from typing import Any
+from core.lecture import lecture_id, source_id
 
 
 class LiveState(StrEnum):
@@ -23,7 +24,6 @@ class LiveState(StrEnum):
 
 
 class TreeBadge(StrEnum):
-    DONE = "done"
     LIVE = "live"
     UPCOMING = "upcoming"
 
@@ -161,7 +161,11 @@ def _recording_overlaps(
         return False
     window = timedelta(minutes=40)
     for group in groups:
-        if abs(group["begin"] - live_begin) <= window:
+        if (
+            group["begin"] - window
+            <= live_begin
+            < group.get("end", group["begin"] + window)
+        ):
             return True
     return False
 
@@ -180,6 +184,7 @@ def _recording_child(
     classroom = next((c for c in classrooms if c), "")
     video_ids = [str(p.get("video_id", "")) for p in parts if p.get("video_id")]
     label = _class_label(group["begin"], group["end"])
+    class_id = lecture_id(course_id, group["begin"])
     subtitle = ", ".join(
         part
         for part in (
@@ -189,15 +194,13 @@ def _recording_child(
         if part
     )
     return {
-        "id": f"class:{course_id}:rec:{video_ids[0] if video_ids else ''}",
+        "id": class_id,
         "label": label,
         "subtitle": subtitle,
-        "badge": "录播",
-        "badge_class": TreeBadge.DONE,
         "action": {
             "action": "input.open_class",
             "value": {
-                "id": f"class:{course_id}:rec:{video_ids[0] if video_ids else ''}",
+                "id": class_id,
                 "kind": SourceKind.RECORDING,
                 "course": course_id,
                 "name": str(course.get("name", "")),
@@ -290,14 +293,15 @@ def _live_group_child(
     subtitle = ", ".join(
         part
         for part in (
-            state,
             next((c for c in classrooms if c), ""),
             f"{len(parts)} 节" if len(parts) > 1 else "",
         )
         if part
     )
     live_id = str(active.get("id", ""))
-    child_id = f"class:{course_id}:live:{live_id}"
+    child_id = lecture_id(
+        source_id(course_name) if course_id == "other" else course_id, begin
+    )
     return {
         "id": child_id,
         "label": label,
@@ -328,14 +332,11 @@ def build_tree(
     lives: list[dict[str, Any]] | None = None,
     *,
     now: datetime | None = None,
-    expanded: Iterable[str] = (),
-    current_class_id: str = "",
     max_gap_minutes: int = DEFAULT_MAX_GAP_MINUTES,
     max_parts: int = DEFAULT_MAX_PARTS,
 ) -> list[dict[str, Any]]:
 
     now = now or datetime.now()
-    expanded_ids = {str(item) for item in expanded}
     lives = list(lives or [])
 
     groups_by_course: dict[str, list[dict[str, Any]]] = {}
@@ -356,9 +357,6 @@ def build_tree(
             unmatched.append(live)
             continue
         cid = str(matched.get("id", ""))
-        begin = parse_time(live.get("begin"))
-        if _recording_overlaps(begin, groups_by_course.get(cid, [])):
-            continue
         lives_by_course.setdefault(cid, []).append(live)
         names_by_course[cid] = str(matched.get("name", ""))
 
@@ -366,9 +364,27 @@ def build_tree(
         for group in merge_live_periods(
             items, max_gap_minutes=max_gap_minutes, max_parts=max_parts
         ):
-            child = _live_group_child(cid, names_by_course.get(cid, ""), group, now=now)
+            remaining = [
+                part
+                for part in group["parts"]
+                if not _recording_overlaps(
+                    parse_time(part.get("begin")), groups_by_course.get(cid, [])
+                )
+            ]
+            if not remaining:
+                continue
+            child = _live_group_child(
+                cid,
+                names_by_course.get(cid, ""),
+                {**group, "parts": remaining},
+                now=now,
+            )
             if child is not None:
-                groups_by_course.setdefault(cid, [])
+                groups_by_course[cid] = [
+                    recording
+                    for recording in groups_by_course.get(cid, [])
+                    if not (group["begin"] <= recording["begin"] < group["end"])
+                ]
                 groups_by_course[cid].append(
                     {"__live__": child, "begin": group["begin"]}
                 )
@@ -386,9 +402,6 @@ def build_tree(
         children.sort(key=lambda item: item[0], reverse=True)
         child_nodes = [node for _begin, node in children]
         is_live = any(node.get("live") for node in child_nodes)
-        if current_class_id:
-            for node in child_nodes:
-                node["active"] = node.get("id") == current_class_id
 
         nodes.append(
             {
@@ -402,13 +415,8 @@ def build_tree(
                     )
                     if part
                 ),
-                "expanded": (cid in expanded_ids) or is_live,
                 "live": is_live,
                 "children": child_nodes,
-                "toggle": {
-                    "action": "input.toggle_course",
-                    "value": {"course": cid},
-                },
             }
         )
 
@@ -421,10 +429,10 @@ def build_tree(
             for group in merge_live_periods(
                 items, max_gap_minutes=max_gap_minutes, max_parts=max_parts
             ):
-                child = _live_group_child("other", "其他直播", group, now=now)
+                child = _live_group_child(
+                    "other", str(items[0].get("name") or "其他直播"), group, now=now
+                )
                 if child is not None:
-                    if current_class_id:
-                        child["active"] = child.get("id") == current_class_id
                     children.append(child)
         if children:
             nodes.append(
@@ -432,13 +440,8 @@ def build_tree(
                     "id": "course:other",
                     "label": "其他直播",
                     "subtitle": "未匹配到 Canvas 课程",
-                    "expanded": "other" in expanded_ids,
                     "live": any(c.get("live") for c in children),
                     "children": children,
-                    "toggle": {
-                        "action": "input.toggle_course",
-                        "value": {"course": "other"},
-                    },
                 }
             )
 

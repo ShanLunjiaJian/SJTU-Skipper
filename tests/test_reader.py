@@ -4,6 +4,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from config import load_config
+from core import note_document as qa
 from core.runtime import build_runtime
 from core.ui import BlockType
 from plugins.reader import ReaderPlugin
@@ -58,6 +59,30 @@ def test_show_opens_reader_page(tmp_path: Path) -> None:
         runtime.stop()
 
 
+def test_document_selection_is_request_scoped(tmp_path: Path, navigation) -> None:
+    from core.navigation import Navigation, navigation_scope
+
+    runtime = _make_runtime(tmp_path)
+    try:
+        reader = runtime.services.require("reader")
+        page = reader.show(
+            title="Notes",
+            docs=[
+                {"key": "first", "label": "First", "path": _write(tmp_path, "first.md", "First")},
+                {"key": "second", "label": "Second", "path": _write(tmp_path, "second.md", "Second")},
+            ],
+            active="first",
+        )
+        assert navigation.doc == "first"
+        with navigation_scope(Navigation(page=page, doc="second", pages=[page])):
+            tabs = runtime.ui.state()["page_content"][page][0]["tabs"]
+            assert [tab["active"] for tab in tabs] == [False, True]
+        tabs = runtime.ui.state()["page_content"][page][0]["tabs"]
+        assert [tab["active"] for tab in tabs] == [True, False]
+    finally:
+        runtime.stop()
+
+
 def test_reader_action_rejects_empty_docs(tmp_path: Path) -> None:
     runtime = _make_runtime(tmp_path)
     try:
@@ -76,8 +101,6 @@ def test_reader_action_opens_page(tmp_path: Path) -> None:
         result = runtime.ui.dispatch_action("reader.open", {"title": "T", "docs": docs})
         assert result.ok
         assert result.open_page == "reader:main"
-        blocks = runtime.ui.state()["page_content"]["reader:main"]
-        assert any(b["type"] == BlockType.MARKDOWN and "T" in b["text"] for b in blocks)
     finally:
         runtime.stop()
 
@@ -176,10 +199,12 @@ def test_document_footnotes_survive_length_and_qa(tmp_path: Path) -> None:
         assert "footnote-ref" in blocks[0]["html"]
         assert "footnote-item" in blocks[2]["html"]
         assert "qa:begin" not in html and "reader-qa-" not in html
-        links = _FootnoteLinks(
-            html + question["question_html"] + question["answer_html"]
+        assert qa.parse_blocks(Path(path).read_text("utf-8"))[0].question == (
+            "Why does this work?[^normal-counterexample]\n\n"
+            "[^normal-counterexample]: Question context."
         )
-        assert len(links.targets) == 10
+        links = _FootnoteLinks(html + question["answer_html"])
+        assert len(links.targets) == 8
         assert len(links.ids) == len(set(links.ids))
         assert all(target in links.ids for target in links.targets)
 

@@ -53,24 +53,22 @@ devShell 提供 Python、Bun、uv、ffmpeg 和动态库路径．非 Nix 系统�
 
 录播下载与音视频解码共用本地字节缓存．支持 Range 的来源可在完整下载前开始处理．不支持 Range 且索引位于文件尾时，解码等待下载．完整录像下载成功后才显示本地播放链接．
 
-LLM 配置保存在 `data/agent/llm_runtime/models.yml` 和 `roles.yml`．设置页提供图形化编辑，并保留一份原始 YAML 供批量修改．配置变更只影响随后创建的模型会话．
+LLM 模型和角色配置保存在 `data/agent/settings.json` 的 `llm.models` 与 `llm.roles` 中．设置页提供图形化编辑与 YAML 编辑器．运行时从 JSON 生成临时文件，退出后清理；LLM 对话不跨服务重启恢复．
 
 设置页按「概览 / 提供方 / 模型 / 角色 / 原始配置」组织，每页只处理一件事：
 
 - 「概览」列出默认模型、提供方与模型数量、缺少的凭据和角色分配；待处理项直接指向要改的页面．
-- 「提供方」一张卡片一个端点，端点地址、协议、鉴权与 API Key 在同一张表单里保存；内置预设 `opencode-go`（`https://opencode.ai/inference/go/openai/v1`，OAuth）与 `deepseek`（API Key），也可填写自定义 OpenAI 兼容端点．新提供方保存时请求 `${baseUrl}/models`，把返回的模型写入 `models.yml`．
+- 「提供方」一张卡片一个端点，端点地址、协议、鉴权与 API Key 在同一张表单里保存；内置预设 `opencode-go`（`https://opencode.ai/inference/go/openai/v1`，OAuth）与 `deepseek`（API Key），也可填写自定义 OpenAI 兼容端点．新提供方保存时请求 `${baseUrl}/models`，把返回的模型写入配置．
 - OpenCode Go 用设备授权：点「关联套餐」后，授权链接、验证码与有效期固定显示在「提供方」页顶部（新标签页打开，可复制），并带「重新开始授权」「取消授权」．服务端通常没有浏览器，所以不会替客户端打开页面；授权完成后页面自动刷新．
 - 「模型」先选提供方，再「检查端点模型」读取 `${baseUrl}/models`：只列出本地尚未添加的模型，可逐个或全部添加；已配置模型以表格展示上下文、输出、输入格式、推理能力与使用角色，选中一行在下方编辑器里修改，删除前会提示仍在使用该模型的角色．
 - 「角色」一表列出设置值与生效模型；选中某个角色后在下方选择模型与思考级别．`board_recognition` 会校验 `image` 输入，缺少时拒绝保存．
 - 「原始配置」保留两份 YAML，整体替换并交由运行时校验．
 - 端点未公布的限制按默认值落库（上下文 128000、输出 8192、`text` 输入），随后在「模型」逐个调整．OpenCode 等端点公布 `limit.context`、`limit.output`、`modalities.input` 与 `capabilities.reasoning` 时按其填写．
-- `models.yml` 使用 OMP `providers` 结构．提供方配置 `baseUrl`、`api`、鉴权和 headers，模型配置 `contextWindow`、`maxTokens`、`input`（`text`/`image`）与 `reasoning`．`api` 接受已安装 OMP SDK 支持的协议，包括 `openai-completions` 和 `openai-responses`．
-- `roles.yml` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、笔记写作、审阅、修订、问答与上下文压缩．未填写的角色继承 `default`．
+- `llm.models` 使用 OMP `providers` 结构．提供方配置 `baseUrl`、`api`、鉴权和 headers，模型配置 `contextWindow`、`maxTokens`、`input`（`text`/`image`）与 `reasoning`．`api` 接受已安装 OMP SDK 支持的协议，包括 `openai-completions` 和 `openai-responses`．
+- `llm.roles` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、笔记写作、审阅、问答与上下文压缩．`note_writer` 负责写作和修订，`note_review` 负责独立审阅．未填写的角色继承 `default`．
 - 板书角色 `board_recognition` 必须选择支持图像输入的模型．无效选择器、角色循环或不支持的思考级别会阻止保存．
 - 默认模型为 `deepseek-flash`．省略 `maxTokens` 时继承 OMP 模型能力信息；显式填写时使用配置值．
-- 提供方凭据由项目 OMP `AuthStorage` 管理，保存在 `data/agent/llm_runtime/credentials.db`．API key 与 OpenCode OAuth 凭据分别保存，设置页只显示配置状态．无鉴权服务设置 `auth: none`．
-
-模型与角色由设置页的图形表单保存到 YAML（`llm.catalog`/`models_set`/`provider_set`/`role_set` 等运行时方法负责校验与写盘），凭据写入项目 `AuthStorage`．普通插件设置保存在 `data/agent/settings.json`．首次使用时在设置页配置提供方、角色与密钥．
+- 提供方凭据保存在 `data/agent/auth.json` 的 `llm` 字段中．API Key、OAuth 登录与刷新即时保存，设置页只显示配置状态．无鉴权服务设置 `auth: none`．
 
 ## 架构一览
 
@@ -80,33 +78,31 @@ LLM 配置保存在 `data/agent/llm_runtime/models.yml` 和 `roles.yml`．设置
         ├──────────────► STT 插件 ──► TextStream(transcript)
         └──────────────► VLM 插件 ──► TextStream(visual)
                                       │
-行为层（llm-agent / summarize / instant-summarize / 自定义插件）
+行为层（agent / notes / 自定义插件）
   事件总线、时钟、服务注册、UI、项目 OMP SDK 运行时
                                       │
 Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 ```
 
 - **流**：音频是 PCM s16le；视频是 JPEG 帧；文字是不断增长的 `TextItem` 列表。`len(stream)` 是整秒/片段数，精确时长用 `stream.duration`。
-- **事件**：`clock.tick`、`session.*`、`stream.appended`、`settings.changed`、`agent.*`、`stt.*`、`vlm.*`、`summarize.*`、`instant-summarize.*`、`input.*`。
+- **事件**：`clock.tick`、`session.*`、`stream.appended`、`settings.changed`、`agent.*`、`stt.*`、`vlm.*`、`notes.*`、`input.*`．
 - **插件**：`id` + `requires` 组成 DAG，拓扑序加载；插件之间只通过 `ctx.services` 调用。
 - **LLM 层**：Python 通过私有 JSON Lines IPC 调用一个常驻 Bun 进程．OMP SDK 管理模型请求、工具执行、会话与上下文压缩．取消会终止实际模型流和工具执行．
 - **UI**：声明式 block + action；插件不写前端代码。
 
 内置插件：
 
-| 插件 ID             | 作用                                                                                                    |
-| ------------------- | ------------------------------------------------------------------------------------------------------- |
-| `settings`          | 设置注册、持久化、设置页                                                                                |
-| `llm`               | 项目 Bun 运行时、模型角色配置与提供方鉴权                                                               |
-| `input`             | Canvas/SJTU 录播、直播、ffmpeg 源                                                                       |
-| `stt`               | 供应商适配：兼容 HTTP/WebSocket 服务（流式临时文字、定稿）或 Google Cloud Speech-to-Text v2（批量窗口） |
-| `vlm`               | 视频流 -> 融合板书 -> 文字流                                                                            |
-| `llm-agent`         | SDK 多会话助手，原生 read/grep/glob/edit/write，流式事件与文件授权                                      |
-| `notes-pipeline`    | 按来源完成位置整理片段，汇总文稿后审阅，通过后发布笔记                                                  |
-| `summarize`         | 笔记页面与课后 direct/fill/skip 策略                                                                    |
-| `ask`               | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存                                     |
-| `reader`            | 通用 Markdown 阅读页（每门课程一页），持有选中菜单与内联问答块                                          |
-| `instant-summarize` | 分段笔记页面与预览开关，直播和录播均可使用                                                              |
+| 插件 ID    | 作用                                                                                                    |
+| ---------- | ------------------------------------------------------------------------------------------------------- |
+| `settings` | 设置注册、持久化、设置页                                                                                |
+| `llm`      | 项目 Bun 运行时、模型角色配置与提供方鉴权                                                               |
+| `input`    | Canvas/SJTU 录播、直播、ffmpeg 源                                                                       |
+| `stt`      | 供应商适配：兼容 HTTP/WebSocket 服务（流式临时文字、定稿）或 Google Cloud Speech-to-Text v2（批量窗口） |
+| `vlm`      | 视频流 -> 融合板书 -> 文字流                                                                            |
+| `agent`    | SDK 多会话助手，原生 read/grep/glob/edit/write，流式事件与文件授权                                      |
+| `notes`    | 整理分段笔记、汇总与审阅，提供笔记页面及课后 direct/fill/skip 策略                                      |
+| `ask`      | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存                                     |
+| `reader`   | 通用 Markdown 阅读页（每门课程一页），持有选中菜单与内联问答块                                          |
 
 分段核心区间由 `notes.chunk_seconds` 设置，`notes.overlap_seconds` 提供左侧原文上下文．重叠原文不重复计入正文．`notes.concurrency` 限制笔记 agent 并发数．分段预览标为未审阅；`note_review` 统一检查完整笔记的来源覆盖与正确性．
 
@@ -125,7 +121,7 @@ src/                              # 课堂 Agent
 ├── core/                         # 流、事件、插件、服务、UI、runtime
 ├── agent_runtime/                # Bun OMP SDK、IPC、配置、鉴权与授权工作区
 ├── llm/                          # Python 角色请求与用量适配
-├── plugins/                      # settings/llm/input/stt/vlm/agent/summarize/instant_summarize
+├── plugins/                      # settings/llm/input/stt/vlm/agent/notes
 ├── integrations/                 # vendored SJTU Canvas/视频客户端
 └── ui/                           # FastAPI + 静态前端
 tests/

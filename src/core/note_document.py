@@ -26,8 +26,8 @@ class AskIntensity(StrEnum):
     RESEARCH = "research"
 
 
-QUESTION_PREFIX = "❓ 提问"
-ANSWER_PREFIX = "🤖 回答"
+QUESTION_PREFIX = "提问"
+ANSWER_PREFIX = "回答"
 
 _BLOCK_RE = re.compile(
     r"<!--\s*qa:begin\s*(?P<meta>\{.*?\})\s*-->(?P<body>.*?)<!--\s*qa:end\s*-->",
@@ -126,10 +126,6 @@ def parse_blocks(text: str) -> list[QABlock]:
             )
         )
     return blocks
-
-
-def has_blocks(text: str) -> bool:
-    return _BLOCK_RE.search(text) is not None
 
 
 def segments(text: str) -> list[tuple[BlockType, object]]:
@@ -255,38 +251,6 @@ def insert_block(text: str, block: str, selection: str = "") -> tuple[str, bool]
     if tail:
         pieces.append(tail)
     return "\n\n".join(pieces) + "\n", True
-
-
-# CJK characters count as one word each.
-_WORD_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]|[A-Za-z]+|[0-9]+")
-
-
-def word_count(text: str) -> int:
-    return sum(1 for _ in _WORD_RE.finditer(text or ""))
-
-
-def tail_words(text: str, limit: int) -> str:
-    """Return roughly the last *limit* words of *text*."""
-
-    if limit <= 0 or not text:
-        return ""
-    matches = list(_WORD_RE.finditer(text))
-    if len(matches) <= limit:
-        return text.strip("\n")
-    start = matches[len(matches) - limit].start()
-    return text[start:].strip("\n")
-
-
-def head_words(text: str, limit: int) -> str:
-    """Return roughly the first *limit* words of *text*."""
-
-    if limit <= 0 or not text:
-        return ""
-    matches = list(_WORD_RE.finditer(text))
-    if len(matches) <= limit:
-        return text.strip("\n")
-    end = matches[limit - 1].end()
-    return text[:end].strip("\n")
 
 
 def _split_body(body: str) -> tuple[str, str]:

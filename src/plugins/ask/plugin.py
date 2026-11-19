@@ -1,13 +1,13 @@
 """Ask plugin: in-note question answering with streaming and two intensities.
 
-The plugin owns *questions*, not the agent loop: the ``llm-agent`` plugin runs
+The plugin owns *questions*, not the agent loop: the ``agent`` plugin runs
 the model, builds the tools from the declarations below and streams deltas
 back.  Answers live in the note as ``qa`` markdown blocks (owned by ``reader``).
 """
 
 from __future__ import annotations
 
-import re
+import json
 import threading
 import time
 import tempfile
@@ -26,19 +26,20 @@ from core.agent_types import (
     ExecutionStatus,
 )
 from core.note_document import AskIntensity, QaStatus
+from core.navigation import current_navigation
 from core.plugin import Plugin, PluginContext
 from core.settings_spec import SettingsSpec, SettingType
 from core.ui import render_markdown
 from core.file_access import publication_lock
 from core.workspace import FileWorkspace
-from plugins.notes_pipeline.types import NotePublication
+from plugins.notes.types import NotePublication
 from plugins.reader.types import SelectionKind
 
 from .prompts import ASK_PROMPT_TEMPLATE, INSTANT_SYSTEM_PROMPT, RESEARCH_SYSTEM_PROMPT
 
 ACTION = "ask.ask"
 SELECTION_ID = "ask.ask"
-# Follow-up channel owned by the llm-agent plugin; advertised only while present.
+# The agent plugin owns this channel. Show it only when the action exists.
 MESSAGE_ACTION = "agent.message"
 
 
@@ -59,8 +60,8 @@ class AskService:
 
 class AskPlugin(Plugin):
     id = "ask"
-    requires = ("settings", "llm-agent", "reader")
-    optional_requires = ("notes-pipeline",)
+    requires = ("settings", "agent", "reader")
+    optional_requires = ("notes",)
     provides = ("ask",)
     uses_actions = (MESSAGE_ACTION,)
 
@@ -86,7 +87,6 @@ class AskPlugin(Plugin):
             {
                 "id": SELECTION_ID,
                 "label": "提问",
-                "icon": "💬",
                 "kind": SelectionKind.PROMPT,
                 "action": ACTION,
                 "placeholder": "针对选中的内容提问，Enter 发送",
@@ -128,20 +128,20 @@ class AskPlugin(Plugin):
         return self._settings.get(f"ask.{key}", default)
 
     @property
-    def _before_words(self) -> int:
-        return max(0, int(self._setting("before_words", 2000)))
+    def _before_chars(self) -> int:
+        return max(0, int(self._setting("before_chars", 2000)))
 
     @property
-    def _after_words(self) -> int:
-        return max(0, int(self._setting("after_words", 2000)))
+    def _after_chars(self) -> int:
+        return max(0, int(self._setting("after_chars", 2000)))
 
     @property
-    def _history_words(self) -> int:
-        return max(0, int(self._setting("history_words", 1000)))
+    def _history_chars(self) -> int:
+        return max(0, int(self._setting("history_chars", 1000)))
 
     @property
-    def _selection_words(self) -> int:
-        return max(50, int(self._setting("selection_words", 800)))
+    def _selection_chars(self) -> int:
+        return max(0, int(self._setting("selection_chars", 800)))
 
     @property
     def _instant_prompt(self) -> str:
@@ -175,9 +175,10 @@ class AskPlugin(Plugin):
             intensity=intensity,
         )
         qa_id = str(created.get("id", "") or "")
+        course_name = self._course_name(path)
         threading.Thread(
             target=self._run,
-            args=(path, qa_id, selection, intensity),
+            args=(path, qa_id, selection, intensity, course_name),
             name=f"ask-{qa_id}",
             daemon=True,
         ).start()
@@ -188,7 +189,12 @@ class AskPlugin(Plugin):
         return {"ok": True, "message": message, "refresh": True}
 
     def _run(
-        self, path: str, qa_id: str, selection: str, intensity: AskIntensity
+        self,
+        path: str,
+        qa_id: str,
+        selection: str,
+        intensity: AskIntensity,
+        course_name: str,
     ) -> None:
         live = _Live(self, path, qa_id)
         key = (str(Path(path).resolve()), qa_id)
@@ -198,7 +204,7 @@ class AskPlugin(Plugin):
         answer = ""
         started = time.time()
         try:
-            answer = self._answer(path, qa_id, selection, intensity, live)
+            answer = self._answer(path, qa_id, selection, intensity, live, course_name)
         except Exception as exc:  # noqa: BLE001 - the failure belongs in the note
             self.ctx.logger.exception("ask %s failed", qa_id)
             status = QaStatus.ERROR
@@ -224,15 +230,16 @@ class AskPlugin(Plugin):
         selection: str,
         intensity: AskIntensity,
         live: "_Live",
+        course_name: str,
     ) -> str:
         context = self._reader.qa_context(
             path,
             qa_id,
-            before_words=self._before_words,
-            after_words=self._after_words,
-            history_words=self._history_words,
+            before_chars=self._before_chars,
+            after_chars=self._after_chars,
+            history_chars=self._history_chars,
         )
-        prompt = self._build_prompt(path, context, selection, intensity)
+        prompt = self._build_prompt(path, context, selection, intensity, course_name)
         files = (
             self._workspace_files(path) if intensity == AskIntensity.RESEARCH else {}
         )
@@ -306,6 +313,7 @@ class AskPlugin(Plugin):
         context: Mapping[str, Any],
         selection: str,
         intensity: AskIntensity,
+        course_name: str,
     ) -> str:
         name = Path(path).name
         if intensity == AskIntensity.RESEARCH:
@@ -316,16 +324,16 @@ class AskPlugin(Plugin):
         else:
             instructions = "材料已经足够，直接回答；本题没有工具可用。"
         return ASK_PROMPT_TEMPLATE.format(
-            course_name=self._course_name(),
+            course_name=course_name,
             file_label=self._doc_label(name),
             file_name=name,
-            selection=_truncate_words(selection, self._selection_words)
-            or "（浏览器没有回传选中文本）",
-            before_words=self._before_words,
+            selection=_truncate_chars(selection, self._selection_chars)
+            or "（未提供选中内容）",
+            before_chars=self._before_chars,
             before=context.get("before") or "（无）",
-            after_words=self._after_words,
+            after_chars=self._after_chars,
             after=context.get("after") or "（无）",
-            history_words=self._history_words,
+            history_chars=self._history_chars,
             history=_format_history(context.get("history") or []),
             question=context.get("question") or "",
             instructions=instructions,
@@ -335,7 +343,7 @@ class AskPlugin(Plugin):
         note = Path(path)
         names = set()
         names.add(note.name)
-        pipeline = self.ctx.service("notes-pipeline")
+        pipeline = self.ctx.service("notes")
         if pipeline is not None:
             for kind in NotePublication:
                 names.update(name for name, _ in pipeline.note_files(kind).values())
@@ -352,7 +360,7 @@ class AskPlugin(Plugin):
     def _source_file(self, note: Path) -> Path | None:
         """Locate the complete source through its owning pipeline."""
 
-        pipeline = self.ctx.service("notes-pipeline")
+        pipeline = self.ctx.service("notes")
         if pipeline is not None:
             found = pipeline.source_path(note.parent.parent.name)
             if found is not None and Path(found).exists():
@@ -363,7 +371,7 @@ class AskPlugin(Plugin):
     def _doc_label(self, name: str) -> str:
         """Human title of a note file, asked from the plugin that writes it."""
 
-        pipeline = self.ctx.service("notes-pipeline")
+        pipeline = self.ctx.service("notes")
         if pipeline is not None:
             for kind in NotePublication:
                 for filename, title in pipeline.note_files(kind).values():
@@ -371,8 +379,27 @@ class AskPlugin(Plugin):
                         return title
         return _DEFAULT_DOC_LABELS.get(name, Path(name).stem)
 
-    def _course_name(self) -> str:
-        meta = self.ctx.streams.notes_meta or self.ctx.streams.current.meta or {}
+    def _course_name(self, path: str) -> str:
+        navigation = current_navigation()
+        meta = navigation.class_meta
+        try:
+            relative = Path(path).resolve().relative_to(
+                (self.ctx.data_dir / "sessions").resolve()
+            )
+        except ValueError:
+            pass
+        else:
+            sid = relative.parts[0]
+            session = self.ctx.streams.get_session(sid)
+            if session is not None:
+                meta = session.meta
+            else:
+                metadata_path = self.ctx.data_dir / "sessions" / sid / "meta.json"
+                if metadata_path.exists():
+                    raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    meta = raw.get("meta", raw)
+                elif navigation.class_id != sid:
+                    meta = {}
         name: Any = meta.get("course_name") or meta.get("course")
         if isinstance(name, dict):
             name = name.get("course_name") or name.get("name") or ""
@@ -511,23 +538,19 @@ _DEFAULT_DOC_LABELS = {
     "note_knowledge.md": "知识",
     "note_gossip.md": "闲话与分享",
     "note_notice.md": "通知",
-    "instant_note_knowledge.md": "即时知识",
-    "instant_note_gossip.md": "即时闲话",
-    "instant_note_notice.md": "即时通知",
+    "chunk_note_knowledge.md": "分段知识",
+    "chunk_note_gossip.md": "分段闲话",
+    "chunk_note_notice.md": "分段通知",
 }
 
 
-_WORD_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]|[A-Za-z]+|[0-9]+")
-
-
-def _truncate_words(text: str, limit: int) -> str:
+def _truncate_chars(text: str, limit: int) -> str:
     text = (text or "").strip()
-    if limit <= 0 or not text:
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
         return text
-    matches = list(_WORD_RE.finditer(text))
-    if len(matches) <= limit:
-        return text
-    return text[: matches[limit - 1].end()] + "\n……（选中内容过长，已截断）"
+    return text[:limit] + "\n……（选中内容过长，已截断）"
 
 
 def _format_history(entries: list[dict[str, str]]) -> str:
@@ -544,32 +567,32 @@ def _format_history(entries: list[dict[str, str]]) -> str:
 
 _SETTING_SPECS: list[SettingsSpec] = [
     SettingsSpec(
-        key="ask.before_words",
-        label="选中前文词数",
+        key="ask.before_chars",
+        label="选中前文字符数",
         type=SettingType.INT,
         default=2000,
         group="提问",
-        description="上下文里选中段落之前的笔记内容（按词计，中文按字计）",
+        description="选中段落之前的笔记内容上限，包含标点、空格和换行",
     ),
     SettingsSpec(
-        key="ask.after_words",
-        label="选中后文词数",
+        key="ask.after_chars",
+        label="选中后文字符数",
         type=SettingType.INT,
         default=2000,
         group="提问",
         description="上下文里选中段落之后的笔记内容",
     ),
     SettingsSpec(
-        key="ask.history_words",
-        label="历史问答词数",
+        key="ask.history_chars",
+        label="历史问答字符数",
         type=SettingType.INT,
         default=1000,
         group="提问",
         description="同一条笔记中此前问答记录的独立限额",
     ),
     SettingsSpec(
-        key="ask.selection_words",
-        label="选中内容词数",
+        key="ask.selection_chars",
+        label="选中内容字符数",
         type=SettingType.INT,
         default=800,
         group="提问",

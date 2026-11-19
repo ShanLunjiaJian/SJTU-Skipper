@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -291,6 +292,39 @@ def test_continuous_stream_and_subsecond_tail(
     assert "confidence" not in session.transcript[0].meta
 
 
+def test_stream_window_releases_producer_gate(app, monkeypatch):
+    plugin, ctx = app
+    stream = Stream()
+    stream.metadata["max_audio_ms"] = 1000
+    monkeypatch.setattr(plugin, "_new_client", lambda: Client([stream]))
+    session = ctx.streams.current
+    session.meta["mode"] = ProcessingMode.FAST
+    session.audio_gate.configure(0.2, fail_closed=True)
+    ctx.service("settings").set_many({"stt.buffer_seconds": 0.2, "stt.enabled": True})
+
+    def produce():
+        for _ in range(10):
+            if not session.audio_gate.wait(session.audio.duration + 0.2):
+                return
+            session.audio.append(b"\x01\x00" * 3200)
+        session.audio_input_done = True
+
+    producer = threading.Thread(target=produce, daemon=True)
+    producer.start()
+    try:
+        wait_until(
+            lambda: session.audio_input_done
+            and len(session.transcript) == 1
+            and plugin.status()["cursor"] >= 2.0 - 1e-6
+        )
+        assert session.audio_gate.limit >= 12
+        assert plugin.status()["cursor"] == pytest.approx(2.0)
+        assert b"".join(stream.frames) == b"\x01\x00" * 32000
+    finally:
+        session.audio_gate.close()
+        producer.join(timeout=1)
+
+
 def test_accepted_and_partial_do_not_commit_or_trim(
     app: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -374,7 +408,7 @@ def test_old_session_event_does_not_write_new_session(app: Any) -> None:
     plugin, ctx = app
     old = ctx.streams.current
     old.audio.append(b"\x00\x00" * 16000)
-    ctx.streams.start_session()
+    ctx.streams.start_session("replacement")
     ctx.events.flush(timeout=1)
     plugin._cancel.clear()
     plugin._live_event(
@@ -463,7 +497,7 @@ def test_session_topic(app: Any) -> None:
     plugin, ctx = app
     old = ctx.streams.current
     old.meta["course_name"] = " 数学分析\n（荣誉）III "
-    ctx.streams.start_session(meta={"course_name": "复分析"})
+    ctx.streams.start_session("complex-analysis", meta={"course_name": "复分析"})
     assert plugin._context_hint(old) == "这是一堂数学分析 （荣誉）III课程。"
     assert plugin._context_hint(ctx.streams.current) == "这是一堂复分析课程。"
 
@@ -569,7 +603,9 @@ def test_stop_callback_does_not_wait_for_tail(app):
     returned = threading.Event()
 
     def stop():
-        plugin._on_session_stopped({"session_id": session.session_id})
+        plugin._on_session_stopped(
+            {"session_id": session.session_id, "started_at": session.started_at}
+        )
         returned.set()
 
     thread = threading.Thread(target=stop)
@@ -581,3 +617,53 @@ def test_stop_callback_does_not_wait_for_tail(app):
         state.active = False
         state.done.set()
         thread.join()
+
+
+def test_same_id_reprocess_starts_at_zero(app):
+    plugin, ctx = app
+    old = ctx.streams.start_session("same-class")
+    ctx.events.flush(timeout=1)
+    plugin._append(old, 0, 2, "Old transcript", {})
+    plugin._success(old, 0, 2)
+    plugin._state(old).scheduled = 2
+    ctx.streams.seal_text(old.session_id, StreamKind.TRANSCRIPT, 2, final=True)
+    plugin._disabled_at[old.session_id] = 2
+    for name in ("transcript.jsonl", "coverage.json"):
+        (ctx.data_dir / "sessions" / old.session_id / name).unlink()
+
+    session = ctx.streams.start_session(old.session_id)
+    ctx.events.flush(timeout=1)
+    plugin._on_session_stopped(
+        {"session_id": old.session_id, "started_at": old.started_at}
+    )
+    assert not plugin.flushing()
+    plugin._append(old, 0, 2, "Late old transcript", {})
+    plugin._success(old, 0, 2)
+    plugin._append(session, 0, 1, "Fresh transcript", {})
+
+    status = plugin.status()
+    assert status["scheduled_cursor"] == 0
+    assert status["covered_seconds"] == 0
+    assert old.session_id not in plugin._disabled_at
+    assert not session.transcript_progress.final
+    assert [item.text for item in session.transcript] == ["Fresh transcript"]
+    records = [
+        json.loads(line) for line in plugin.transcript_path().read_text().splitlines()
+    ]
+    assert [record["text"] for record in records] == ["Fresh transcript"]
+
+
+def test_same_id_fill_reloads_coverage(app):
+    plugin, ctx = app
+    old = ctx.streams.start_session("fill-class")
+    ctx.events.flush(timeout=1)
+    plugin._append(old, 0, 2, "Valid transcript", {})
+    plugin._success(old, 0, 2)
+    plugin._state(old).scheduled = 2
+    session = ctx.streams.start_session(
+        old.session_id, meta={"fill_for": old.session_id}
+    )
+    ctx.events.flush(timeout=1)
+    assert plugin._state(session).scheduled == 0
+    assert plugin._covered(session).covers(0, 2)
+    assert "Valid transcript" in plugin.transcript_path().read_text()

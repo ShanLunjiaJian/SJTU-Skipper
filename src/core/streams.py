@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import bisect
 import logging
-import secrets
+import re
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -685,10 +685,6 @@ class StreamHub:
         self._lock = threading.RLock()
         self._sessions: list[StreamSet] = []
         self._last_emit: dict[tuple[str, StreamKind], float] = {}
-        # Session whose notes the UI should show.  Normally the live session;
-        # after a restart it points at the most recent session on disk.
-        self._notes_session_id: str = ""
-        self._notes_meta: dict[str, Any] = {}
         # (plugin_id, kind) -> callbacks describing one media consumer.
         # Producers ask the hub about cursors/backpressure instead of reaching
         # into the consumer plugins directly (no ``input -> stt/vlm`` imports).
@@ -732,65 +728,49 @@ class StreamHub:
         with self._lock:
             return self._current
 
-    @property
-    def notes_session_id(self) -> str:
-        """Session id used by the notes pages (may differ from ``current``)."""
-
-        with self._lock:
-            if self._notes_session_id:
-                return self._notes_session_id
-            return self._current.session_id
-
-    @property
-    def notes_meta(self) -> dict[str, Any]:
-        with self._lock:
-            return dict(self._notes_meta)
-
-    def set_notes_session(
-        self, session_id: str, meta: Mapping[str, Any] | None = None
-    ) -> None:
-        with self._lock:
-            self._notes_session_id = str(session_id or "")
-            if meta is not None:
-                self._notes_meta = dict(meta)
-
-    def start_session(self, *, meta: Mapping[str, Any] | None = None) -> StreamSet:
-        previous_stopped: StreamSet | None = None
+    def start_session(
+        self, session_id: str, *, meta: Mapping[str, Any] | None = None
+    ) -> StreamSet:
+        if not isinstance(session_id, str):
+            raise TypeError("session_id must be a string")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", session_id) is None:
+            raise ValueError("session_id must be a safe path component")
+        stopped_payload: dict[str, Any] | None = None
         with self._lock:
             previous = self._current
+            previous_id = previous.session_id if previous.session_id != "boot" else None
             has_content = (
                 previous.duration > 0
                 or len(previous.transcript) > 0
                 or len(previous.visual) > 0
             )
-            if previous.ended_at is None and has_content:
+            if previous.ended_at is None and (previous_id is not None or has_content):
                 self._end_locked(previous, "replaced by new session")
-                previous_stopped = previous
-                previous_id = previous.session_id
-            else:
-                previous_id = (
-                    previous.session_id if previous.session_id != "boot" else None
-                )
-            new_set = self._create(self._new_session_id(), meta or {})
+                stopped_payload = {
+                    "session_id": previous.session_id,
+                    "reason": previous.end_reason,
+                    "ended_at": previous.ended_at,
+                    "started_at": previous.started_at,
+                    "meta": dict(previous.meta),
+                }
+            new_set = self._create(session_id, meta or {})
             self._current = new_set
-            self._notes_session_id = new_set.session_id
-            self._notes_meta = dict(new_set.meta)
+            self._sessions[:] = [
+                session
+                for session in self._sessions
+                if session.session_id != session_id
+            ]
             self._sessions.append(new_set)
-        if previous_stopped is not None and self._emit is not None:
-            self._emit(
-                "session.stopped",
-                session_id=previous_stopped.session_id,
-                reason=previous_stopped.end_reason,
-                ended_at=previous_stopped.ended_at,
-            )
+            started_payload = {
+                "session_id": new_set.session_id,
+                "meta": dict(new_set.meta),
+                "previous_session_id": previous_id,
+                "started_at": new_set.started_at,
+            }
         if self._emit is not None:
-            self._emit(
-                "session.started",
-                session_id=new_set.session_id,
-                meta=dict(new_set.meta),
-                previous_session_id=previous_id,
-                started_at=new_set.started_at,
-            )
+            if stopped_payload is not None:
+                self._emit("session.stopped", **stopped_payload)
+            self._emit("session.started", **started_payload)
         return new_set
 
     def end_session(self, reason: str = "") -> None:
@@ -805,6 +785,8 @@ class StreamHub:
                 session_id=current.session_id,
                 reason=reason,
                 ended_at=current.ended_at,
+                started_at=current.started_at,
+                meta=dict(current.meta),
             )
 
     def _end_locked(self, session: StreamSet, reason: str) -> None:
@@ -833,9 +815,6 @@ class StreamHub:
                 self._last_emit[key] = new_len
         self._last_emit.pop((session.session_id, StreamKind.AUDIO), None)
         self._last_emit.pop((session.session_id, StreamKind.VIDEO), None)
-
-    def _new_session_id(self) -> str:
-        return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
 
     def _on_append(
         self,
