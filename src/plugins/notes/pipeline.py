@@ -26,7 +26,7 @@ from core.file_access import publication_lock
 from core.events import Event
 from core.navigation import current_navigation
 from core.streams import StreamKind
-from core.ui import TaskState
+from core.ui import StatusLabel, TaskState
 from core.settings_spec import SettingsSpec, SettingType
 from core.workspace import FileWorkspace
 from core.note_document import parse_blocks, strip_blocks
@@ -648,7 +648,7 @@ class NotesPipeline:
                     "id": f"notes:{sid}:{kind}:{index}",
                     "session_id": sid,
                     "label": f"笔记 {sid}",
-                    "detail": f"排队；{kind}；片段 {index}",
+                    "detail": f"{StatusLabel.QUEUED}；{kind}；片段 {index}",
                     "phase": kind,
                     "state": TaskState.PENDING,
                     "cancel": {

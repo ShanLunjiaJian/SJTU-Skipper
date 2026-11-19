@@ -14,7 +14,7 @@ from core.media import MediaKind, ProcessingMode
 from core.plugin import Plugin, PluginContext
 from core.settings_spec import SettingsSpec, SettingType
 from core.streams import StreamKind, TextSource
-from core.ui import BlockType
+from core.ui import BlockType, StatusLabel
 
 from . import providers
 from .client import SttEventType, retryable
@@ -1214,7 +1214,15 @@ class STTPlugin(Plugin):
     def _render_page(self) -> list[dict[str, Any]]:
         status = self.status()
         rows = [
-            ["状态", status["state"]],
+            [
+                "状态",
+                {
+                    SttState.DISABLED: StatusLabel.DISABLED,
+                    SttState.ERROR: StatusLabel.FAILED,
+                    SttState.RUNNING: StatusLabel.RUNNING,
+                    SttState.IDLE: StatusLabel.IDLE,
+                }[status["state"]],
+            ],
             [
                 "供应商",
                 status["provider_label"]

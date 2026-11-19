@@ -1771,7 +1771,8 @@ class TestClassPlayer:
         result = ctx.ui.dispatch_action("input.stop", {})
         assert result.ok
         assert plugin._processing is False
-        assert job.state is JobState.CANCELED
+        assert job.id not in plugin._jobs
+        assert plugin._active_job is None
 
         plugin.teardown()
 
@@ -1977,6 +1978,9 @@ class TestProcessingQueue:
         assert result.ok
         assert plugin._queue == ["class:b"]
         assert plugin._active_job.id == "class:a"
+        tasks = {task["id"]: task for task in ctx.ui.get_tasks()}
+        assert tasks["queue:class:b"]["state"] == "pending"
+        assert tasks["input"].get("state", "running") == "running"
 
         first = plugin._active_job
         plugin._finish_job(first, "test finished")
@@ -1994,7 +1998,6 @@ class TestProcessingQueue:
 
     @pytest.mark.parametrize("selected", ["first", "last"])
     def test_queue_order_and_cancel(self, monkeypatch, selected):
-        from bs4 import BeautifulSoup
         from plugins.input.plugin import _Job
 
         ctx, plugin, _started = self._setup(monkeypatch)
@@ -2012,29 +2015,65 @@ class TestProcessingQueue:
                 plugin._jobs[selected].cls, id=selected
             )
 
-            html = plugin._render_queue_item()[0]["html"]
-            rows = BeautifulSoup(html, "html.parser").select("li")
-            assert [row.select_one("button")["data-id"] for row in rows] == [
-                "active",
-                "first",
-                "last",
-            ]
-            assert all(row.select_one("button").text == "取消" for row in rows[1:])
-            control = next(
-                row.select_one("button")
+            block = plugin._render_queue_item()[0]
+            assert block["summary"] == "处理中 1 个，排队中 2 个"
+            rows = block["items"]
+            assert [row["id"] for row in rows] == ["active", "first", "last"]
+            assert all(
+                any(
+                    action["action"] == "input.queue_cancel"
+                    for action in row["actions"]
+                )
                 for row in rows
-                if row.select_one("button")["data-id"] == selected
             )
-            result = ctx.ui.dispatch_action(control["data-action"], {"id": selected})
+            control = next(
+                action
+                for row in rows
+                if row["id"] == selected
+                for action in row["actions"]
+                if action["action"] == "input.queue_cancel"
+            )
+            result = ctx.ui.dispatch_action(control["action"], control["value"])
             assert result.ok
-            assert plugin._jobs[selected].state == JobState.CANCELED
+            assert selected not in plugin._jobs
             assert plugin._active_job is active
-            remaining = BeautifulSoup(
-                plugin._render_queue_item()[0]["html"], "html.parser"
+            remaining = plugin._render_queue_item()[0]["items"]
+            assert [row["id"] for row in remaining] == [
+                "active",
+                "last" if selected == "first" else "first",
+            ]
+        finally:
+            plugin.teardown()
+
+    def test_cancel_returns_to_start(self, monkeypatch):
+        ctx, plugin, started = self._setup(monkeypatch)
+        try:
+            self._open(ctx, plugin, "course", "复分析")
+            course = _course(plugin)
+            course.streams = {StreamView.MAIN: "https://example.com/main.mp4"}
+            course.streams_loading = False
+            monkeypatch.setattr(plugin, "_probe_job_durations", lambda job: None)
+            assert ctx.ui.dispatch_action("input.start_processing", {}).ok
+            job = plugin._active_job
+            session = ctx.streams.start_session(
+                "course", meta={"class_id": "course", "kind": SourceKind.RECORDING}
             )
-            assert [
-                row.select_one("button")["data-id"] for row in remaining.select("li")
-            ] == ["active", "last" if selected == "first" else "first"]
+            job.session_id = session.session_id
+            session.transcript.append("保留识别结果", start=0, end=1)
+            assert ctx.events.flush()
+
+            assert ctx.ui.dispatch_action("input.queue_cancel", {"id": job.id}).ok
+            assert ctx.events.flush()
+            assert job.id not in plugin._jobs
+            assert plugin._active_job is None
+            assert not course.finished
+            assert plugin._find_finished_class(job.id) is None
+            assert session.transcript[0].text == "保留识别结果"
+            assert "开始处理" in plugin._render_session_item()[0]["html"]
+
+            assert ctx.ui.dispatch_action("input.start_processing", {}).ok
+            assert plugin._active_job is not job
+            assert len(started) == 2
         finally:
             plugin.teardown()
 
@@ -2135,7 +2174,7 @@ class TestProcessingQueue:
             context = ctx.ui.state()["context"]
             assert context["title"] == "线性代数"
             assert "高等数学" not in context["subtitle"]
-            assert "高等数学" in plugin._render_queue_item()[0]["html"]
+            assert plugin._render_queue_item()[0]["items"][0]["title"] == "高等数学"
             assert context["selected"] is True
             assert not [
                 b for b in plugin._render_session() if b["type"] == BlockType.PROGRESS
@@ -2203,8 +2242,28 @@ def test_gap_fill_combines_audio_transport_and_video_consumer_gates(
 def test_fill_reuses_class_timeline(tmp_path, monkeypatch):
     from datetime import datetime
     from core.coverage import CoverageStore
+    from dataclasses import replace
+    from plugins.notes.plugin import NotesPlugin, NotesService
+    from plugins.notes.view import NotesView
 
     ctx = _make_context(tmp_path)
+    view = NotesView()
+    view.ctx = replace(
+        ctx,
+        plugin_id="notes",
+        allowed_dependencies={
+            "notes",
+            *NotesPlugin.requires,
+            *NotesPlugin.optional_requires,
+        },
+    )
+    view.settings = FakeSettings({"notes.fill_max_attempts": 1})
+    view.pipeline = SimpleNamespace(finalize=mock.Mock())
+    view.stop_event = threading.Event()
+    view.fill_threads = []
+    view.notices = {}
+    view.gap_filler = None
+    ctx.services.register("notes", NotesService(view.pipeline, view), plugin_id="notes")
     plugin = InputPlugin()
     plugin.setup(ctx)
     sid = "1-20261105-0800"
@@ -2234,7 +2293,11 @@ def test_fill_reuses_class_timeline(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(plugin, "_start_fill_part", lambda *args, **kwargs: True)
     try:
-        assert plugin._fill_gaps(sid)
+        assert view._fill_again({"session_id": sid})["ok"]
+        for thread in view.fill_threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+        view.pipeline.finalize.assert_not_called()
         record = json.loads((directory / "transcript.jsonl").read_text())
         assert (record["start"], record["end"]) == (60, 80)
         assert CoverageStore(tmp_path, sid).covers(MediaKind.AUDIO, 60, 80)

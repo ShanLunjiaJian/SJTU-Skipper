@@ -10,6 +10,9 @@ class NotesService:
         self.pipeline = pipeline
         self.view = view
 
+    def set_gap_filler(self, handler):
+        self.view.gap_filler = handler
+
     @property
     def busy(self):
         return self.pipeline.status()["generation_state"] == GenerationState.GENERATING

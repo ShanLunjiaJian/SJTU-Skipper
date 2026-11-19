@@ -17,6 +17,7 @@ from core.agent_types import (
     RuntimeFrameType,
 )
 from core.agent_types import IpcMethod
+from core.navigation import Navigation, navigation_scope
 from core.note_document import AskIntensity, QaStatus
 from core.plugin import Plugin, PluginContext
 from core.runtime import build_runtime
@@ -98,7 +99,20 @@ def test_instant_ask_answers_and_persists_fold(tmp_path: Path) -> None:
         assert runtime.bus.flush()
         qa_id = events[0]["id"]
         snapshots.append(runtime.services.require("ask").activity(str(note), qa_id))
-        assert snapshots[-1] is not None
+        page_id = "reader:notes:ask-session"
+        with navigation_scope(
+            Navigation(page=page_id, pages=[page_id], doc="knowledge")
+        ):
+            pages = runtime.ui.state()["page_content"]
+
+        def activities(blocks):
+            for block in blocks:
+                if block.get("type") == BlockType.QA:
+                    yield block.get("activity")
+                for tab in block.get("tabs", []):
+                    yield from activities(tab.get("blocks", []))
+
+        assert snapshots[-1] in list(activities(next(iter(pages.values()))))
         yield {
             "type": RuntimeFrameType.RESULT,
             "result": {"final_message": "Answer", "steps": 1},
@@ -143,6 +157,7 @@ def test_instant_ask_answers_and_persists_fold(tmp_path: Path) -> None:
         )
         final = next(item for item in events if item.get("status") == QaStatus.DONE)
         assert final["collapsed"] is True
+        assert result.data["qa_id"] == final["id"]
         assert "answer_html" in final
         activity = final["activity"]
         assert activity["id"] == f"qa-{final['id']}"

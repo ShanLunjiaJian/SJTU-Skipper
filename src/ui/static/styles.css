@@ -27,6 +27,20 @@
   padding: 0;
   cursor: pointer;
 }
+.page-tab > [data-close-page] {
+  opacity: 0;
+  pointer-events: none;
+}
+.page-tab:is(:hover, :focus-within) > [data-close-page] {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .page-tab > [data-close-page] {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
 
 @media (min-width: 1024px) {
   .workspace {
@@ -81,10 +95,14 @@ body.resizing {
 .block + .block {
   margin-block-start: 1rem;
 }
+.markdown {
+  min-width: 0;
+  max-width: none;
+  margin-inline: 0;
+}
 .markdown pre,
 .execution-body pre,
-.execution-preview,
-.ask-selection {
+.execution-preview {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -107,9 +125,6 @@ body.resizing {
   overflow-x: auto;
   overflow-y: hidden;
   padding-block: 0.5em;
-}
-.qa.collapsed .qa-body {
-  display: none;
 }
 .qa-answer .execution-log {
   max-block-size: 50vh;
@@ -140,21 +155,21 @@ body.resizing {
 .execution-block[open] .execution-preview {
   display: none;
 }
-.ask-selection {
-  max-block-size: 25vh;
-}
 .palette-list {
   max-block-size: 50vh;
 }
 
-/* Blocks added after the original frontend: error details and raw VLM replies. */
-.form-status.err {
-  color: #d93025;
+#left-toolbox:has(.nav) {
+  padding-inline: 0;
 }
-.session-errors {
-  margin: 0;
-  white-space: pre-wrap;
-}
-.vlm-raw-reply {
-  max-height: 18rem;
+
+@media (hover: hover) {
+  .queue-actions {
+    opacity: 0;
+    pointer-events: none;
+  }
+  li:is(:hover, :focus-within) > .queue-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }

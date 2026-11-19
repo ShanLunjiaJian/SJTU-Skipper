@@ -3,7 +3,7 @@ import threading
 from enum import StrEnum
 from html import escape
 from core.navigation import current_navigation
-from core.ui import BlockType, Side
+from core.ui import BlockType, Side, StatusLabel
 from core.settings_spec import SettingsSpec, SettingType
 from .types import GenerationState, NoteKind, NotePublication
 
@@ -63,6 +63,7 @@ class NotesView:
         self.stop_event = threading.Event()
         self.notices = {}
         self.fill_threads = []
+        self.gap_filler = None
         self.log_pages = set()
         for key, default, label, order in (
             ("fill_wait_minutes", 20, "补录重试间隔（分钟）", 110),
@@ -129,9 +130,14 @@ class NotesView:
             return []
         state = self.pipeline.status(sid)["generation_state"]
         state_label = {
-            GenerationState.NOT_STARTED: "未开始",
-            GenerationState.GENERATING: "正在生成",
-            GenerationState.FINISHED: "生成结束",
+            GenerationState.NOT_STARTED: StatusLabel.NOT_STARTED,
+            GenerationState.GENERATING: StatusLabel.RUNNING,
+            GenerationState.FINISHED: StatusLabel.FINISHED,
+        }[state]
+        state_theme = {
+            GenerationState.NOT_STARTED: "secondary",
+            GenerationState.GENERATING: "primary",
+            GenerationState.FINISHED: "success",
         }[state]
         generation_action = {
             GenerationState.NOT_STARTED: (
@@ -163,7 +169,7 @@ class NotesView:
                 "html": f'''<section class="p-3 border-bottom" aria-label="课后笔记">
               <div class="d-flex align-items-center justify-content-between gap-2 mb-3">
                 <h3 class="fs-md fw-semibold mb-0">课后笔记</h3>
-                <span class="fg-2" role="status">{state_label}</span>
+                <span class="badge theme-{state_theme}" role="status">{state_label}</span>
               </div>
               <div class="d-flex flex-wrap align-items-center gap-2">
                 <button type="button" class="btn-outline theme-primary" data-action="notes.read">打开笔记</button>
@@ -193,7 +199,7 @@ class NotesView:
             return {"ok": False, "message": "请先选择课程"}
         deleted = self.pipeline.delete(sid)
         if not deleted:
-            return {"ok": False, "refresh": True, "message": "仅生成结束的笔记可删除"}
+            return {"ok": False, "refresh": True, "message": "仅已结束的笔记可删除"}
         return {"ok": True, "refresh": True, "message": "已删除笔记"}
 
     def _generate(self, payload):
@@ -268,7 +274,7 @@ class NotesView:
         return blocks or [
             {
                 "type": BlockType.TEXT,
-                "text": "还没有 Agent 日志．生成笔记后，日志会显示在这里．",
+                "text": "无 Agent 日志．",
             }
         ]
 
@@ -332,13 +338,13 @@ class NotesView:
         thread.start()
 
     def _fill(self, sid):
-        service = self.ctx.service("input")
+        gap_filler = self.gap_filler
         attempts = max(1, int(self.settings.get("notes.fill_max_attempts", 6)))
         for attempt in range(attempts):
             if self.stop_event.is_set():
                 return
             try:
-                if service is not None and service.fill_gaps(sid):
+                if gap_filler is not None and gap_filler(sid):
                     return
             except Exception as exc:
                 self.notices[sid] = f"补录查询失败：{exc}"
@@ -390,7 +396,6 @@ class NotesView:
                     <input id="chunk-notes-enabled" type="checkbox" role="switch" switch
                       data-change-action="notes.chunk_toggle"{" checked" if enabled else ""}>
                   </div>
-                  <label for="chunk-notes-enabled">启用</label>
                 </div>
               </div>
               <p class="fg-2 mb-2" role="status">已发布至 {status["published_end"]:.0f} 秒{gaps}</p>

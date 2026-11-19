@@ -186,7 +186,12 @@ class AskPlugin(Plugin):
         message = "已提交，Agent 正在回答…"
         if not created.get("anchored", True):
             message += "（未能定位选中片段，已附在笔记末尾）"
-        return {"ok": True, "message": message, "refresh": True}
+        return {
+            "ok": True,
+            "message": message,
+            "refresh": True,
+            "data": {"qa_id": qa_id},
+        }
 
     def _run(
         self,

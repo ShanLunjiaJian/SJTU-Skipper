@@ -27,6 +27,8 @@ class LiveState(StrEnum):
 class TreeBadge(StrEnum):
     LIVE = "live"
     UPCOMING = "upcoming"
+    PAUSED = "paused"
+    ENDED = "ended"
 
 
 _TIME_FORMATS = (
@@ -310,6 +312,8 @@ def _live_group_child(
         "badge": state,
         "badge_class": TreeBadge.LIVE
         if state == LiveState.LIVE
+        else TreeBadge.ENDED
+        if state == LiveState.ENDED
         else TreeBadge.UPCOMING,
         "live": state == LiveState.LIVE,
         "action": {

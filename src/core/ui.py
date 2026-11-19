@@ -48,6 +48,7 @@ class BlockType(StrEnum):
     AGENT_ACTIVITY = "agent_activity"
     IMAGE = "image"
     TASK_QUEUE = "task_queue"
+    QUEUE = "queue"
     TABLE = "table"
     CARDS = "cards"
     LIST = "list"
@@ -71,6 +72,19 @@ class FormInputType(StrEnum):
 class TaskState(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
+
+
+class StatusLabel(StrEnum):
+    NOT_STARTED = "未开始"
+    QUEUED = "排队中"
+    PREPARING = "准备中"
+    RUNNING = "处理中"
+    PAUSED = "已暂停"
+    FINISHED = "已结束"
+    FAILED = "失败"
+    CANCELLED = "已取消"
+    IDLE = "空闲"
+    DISABLED = "未启用"
 
 
 Renderer = Callable[[], Any]

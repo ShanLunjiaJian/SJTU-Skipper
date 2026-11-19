@@ -15,34 +15,41 @@
   </head>
   <body class="overflow-hidden">
     <div id="app" class="d-flex flex-column vh-100 min-w-0">
-      <nav class="navbar navbar-expand border-bottom bg-body fg-body" aria-label="主导航">
+      <nav
+        class="navbar navbar-expand flex-shrink-0 border-bottom bg-body fg-body"
+        aria-label="主导航"
+      >
         <div class="container-fluid flex-wrap gap-2">
-          <span class="navbar-brand mb-0">SJTU-Skipper</span>
-          <button
-            class="btn btn-outline theme-secondary lg:d-none"
-            type="button"
-            data-bs-toggle="drawer"
-            data-bs-target="#sidebar-left"
-          >
-            课程
-          </button>
-          <button
-            class="btn btn-outline theme-secondary lg:d-none"
-            type="button"
-            data-bs-toggle="drawer"
-            data-bs-target="#sidebar-right"
-          >
-            详情
-          </button>
-          <ul id="menubar" class="nav navbar-nav flex-row flex-wrap me-auto" aria-label="菜单"></ul>
-          <div class="d-flex flex-wrap align-items-center gap-2">
-            <button id="palette-btn" class="btn btn-outline theme-secondary" type="button">
-              命令
+          <span class="navbar-brand mb-0 fw-bold">SJTU-Skipper</span>
+          <div class="nav navbar-nav flex-row lg:d-none">
+            <button
+              class="nav-link"
+              type="button"
+              data-bs-toggle="drawer"
+              data-bs-target="#sidebar-left"
+            >
+              课程
             </button>
-            <form method="post" action="/logout" class="m-0">
-              <button class="btn btn-outline theme-secondary" type="submit">退出</button>
-            </form>
+            <button
+              class="nav-link"
+              type="button"
+              data-bs-toggle="drawer"
+              data-bs-target="#sidebar-right"
+            >
+              详情
+            </button>
           </div>
+          <ul id="menubar" class="nav navbar-nav flex-row flex-wrap me-auto" aria-label="菜单"></ul>
+          <ul class="nav navbar-nav flex-row flex-wrap align-items-center" aria-label="操作">
+            <li class="nav-item">
+              <button id="palette-btn" class="nav-link" type="button">命令</button>
+            </li>
+            <li class="nav-item">
+              <form method="post" action="/logout" class="m-0">
+                <button class="nav-link" type="submit">退出</button>
+              </form>
+            </li>
+          </ul>
         </div>
       </nav>
       <div class="workspace position-relative flex-grow-1 min-h-0">
@@ -96,7 +103,11 @@
             class="drawer-body lg:d-block lg:flex-grow-1 min-w-0 min-h-0 overflow-auto"
           ></div>
         </dialog>
-        <div class="resizer d-none lg:d-block bg-2" data-side="left" title="拖动调整宽度"></div>
+        <div
+          class="resizer d-none lg:d-block bg-1 border-start border-subtle"
+          data-side="left"
+          title="拖动调整宽度"
+        ></div>
         <main class="center d-flex flex-column min-w-0 min-h-0">
           <div id="page-tabs" class="nav nav-tabs flex-shrink-0 flex-nowrap overflow-x-auto"></div>
           <div id="page-content" class="page-content flex-grow-1 min-w-0 min-h-0 overflow-auto p-3">
@@ -105,7 +116,11 @@
             </div>
           </div>
         </main>
-        <div class="resizer d-none lg:d-block bg-2" data-side="right" title="拖动调整宽度"></div>
+        <div
+          class="resizer d-none lg:d-block bg-1 border-start border-subtle"
+          data-side="right"
+          title="拖动调整宽度"
+        ></div>
         <dialog
           id="sidebar-right"
           class="lg:drawer drawer-end sidebar-right min-w-0 min-h-0 lg:flex-column lg:align-self-stretch overflow-hidden"
@@ -173,44 +188,7 @@
         </div>
       </div>
     </div>
-    <div id="selection-menu" class="menu show position-fixed" hidden></div>
-    <dialog id="ask" class="dialog dialog-instant" aria-label="针对选中的内容提问">
-      <div class="dialog-header">
-        <h2 class="dialog-title">针对选中的内容提问</h2>
-        <button
-          id="ask-close"
-          class="btn btn-text theme-secondary"
-          type="button"
-          title="关闭"
-          aria-label="关闭"
-        >
-          ×
-        </button>
-      </div>
-      <div class="dialog-body d-flex flex-column gap-3">
-        <blockquote
-          id="ask-selection"
-          class="ask-selection border-start ps-3 fg-2 overflow-auto"
-        ></blockquote>
-        <div class="form-field">
-          <label class="form-label" for="ask-intensity">强度</label>
-          <select id="ask-intensity" class="form-control"></select>
-          <div class="form-text">快速=直接回答；研究=可先检索再回答</div>
-        </div>
-        <textarea
-          id="ask-input"
-          class="form-control"
-          rows="3"
-          aria-label="问题"
-          placeholder="输入问题，Enter 发送，Shift+Enter 换行"
-        ></textarea>
-      </div>
-      <div class="dialog-footer flex-wrap">
-        <span class="fg-2 me-auto">回答会写入选中段落下方，可折叠、可删除</span>
-        <button id="ask-cancel" class="btn btn-outline theme-secondary" type="button">取消</button>
-        <button id="ask-send" class="btn btn-solid theme-primary" type="button">发送</button>
-      </div>
-    </dialog>
+    <div id="selection-anchor" class="position-fixed pe-none" aria-hidden="true"></div>
     <dialog id="palette" class="dialog dialog-instant" aria-label="命令">
       <div class="dialog-header"><h2 class="dialog-title">命令</h2></div>
       <div class="dialog-body">
@@ -219,7 +197,7 @@
           class="form-control"
           type="text"
           aria-label="搜索命令"
-          placeholder="输入命令，例如：设置 / Agent / 转写"
+          placeholder="搜索命令"
           autocomplete="off"
         >
         <div
@@ -228,7 +206,6 @@
           role="listbox"
         ></div>
       </div>
-      <div class="dialog-footer"><span class="fg-2">Esc 关闭</span></div>
     </dialog>
 
     <script src="/static/vendor/hls/hls.min.js"></script>

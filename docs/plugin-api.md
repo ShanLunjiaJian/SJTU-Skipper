@@ -212,6 +212,11 @@ Block：
 {"type": "cards", "items": [{"title": "...", "subtitle": "...", "actions": [...]}]}
 {"type": "list", "items": [{"text": "...", "action": "x", "value": {...}}]}
 {"type": "buttons", "buttons": [{"label": "刷新", "action": "input.refresh"}]}
+{"type": "queue", "title": "处理队列", "summary": "处理中 1 个，排队中 0 个", "items": [
+    {"id": "lesson-1", "title": "复分析", "detail": "11-16 07:55-09:45 录播",
+     "subtitle": "处理中", "progress": "00:20 / 1:49:56 (0%)", "theme": "primary",
+     "actions": [{"label": "暂停", "action": "input.queue_pause",
+                  "value": {"id": "lesson-1"}, "icon": "pause"}]}]}
 {"type": "form", "fields": [
     {"name": "url", "label": "直播 URL", "type": "text", "placeholder": "https://..."}
 ], "action": "input.play_url", "submit_label": "开始"}
@@ -322,7 +327,8 @@ reader.qa_set_collapsed(path, created["id"], False)
 ```
 
 - `docs` 中每项包含 `key`、`label` 和 `path`．`path` 指向文稿文件，`owner` 可按文稿覆盖．
-- `kind="prompt"` 先显示输入框．配置 `intensities` 时显示强度选择．提交的 values 包含 `{doc_key, path, selection, question, intensity, page_id}`．
+- `kind="prompt"` 在选中文段下方显示提问编辑器．提交成功后，编辑器原地变成问答块．action 返回 `data.qa_id`，用于保留同一问答组件．配置 `intensities` 时显示强度选择．提交的 values 包含 `{doc_key, path, selection, question, intensity, page_id}`．
+- 提问编辑器中，Enter 换行，Shift+Enter 或 Ctrl+Enter 发送．取消不修改文稿，提交失败时保留输入．
 - `qa_begin` 在选中段落下方插入 `pending` 块．未找到选中内容时，问答块追加到文末．`qa_finish` 更新同一块的回答、`status` 和 `collapsed`．
 - `reader.qa_collapse` 接收 `{path, id, collapsed}`，保存后刷新展示．`reader.qa_delete` 接收 `{path, id}`．
 - 页面级项按文档 owner 过滤．全局项不按 owner 过滤，action 需检查文档是否可用．

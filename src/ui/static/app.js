@@ -1,4 +1,10 @@
-import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.bundle.min.js";
+import {
+  Dialog,
+  Drawer,
+  Menu,
+  Popover,
+  Toast,
+} from "/static/vendor/bootstrap/bootstrap.bundle.min.js";
 
 (() => {
   "use strict";
@@ -13,10 +19,19 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     PENDING: "pending",
     RUNNING: "running",
   });
+  const STATUS_LABEL = Object.freeze({
+    QUEUED: "排队中",
+    RUNNING: "处理中",
+    PAUSED: "已暂停",
+    FINISHED: "已结束",
+    FAILED: "失败",
+    CANCELLED: "已取消",
+  });
 
   const BLOCK_TYPE = Object.freeze({
     AGENT_ACTIVITY: "agent_activity",
     TASK_QUEUE: "task_queue",
+    QUEUE: "queue",
     HTML: "html",
     MARKDOWN: "markdown",
     TEXT: "text",
@@ -321,7 +336,9 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
   function setConnection(ok) {
     state.connected = ok;
     const connection = $("#connection");
-    if (connection) connection.textContent = ok ? "已连接" : "连接断开";
+    if (connection) {
+      connection.textContent = ok ? "已连接" : "连接断开";
+    }
   }
 
   function typeset(node = $("#page-content")) {
@@ -441,11 +458,11 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
   }
 
   function renderTree(block) {
-    const wrap = el("div");
+    const wrap = el("ul", { class: "nav flex-column flex-nowrap gap-0 py-3" });
     const nodes = Array.isArray(block.nodes) ? block.nodes : [];
     if (!nodes.length) {
       wrap.appendChild(
-        el("div", {
+        el("li", {
           class: "fg-2 p-3",
           text: block.empty_text || "暂无内容",
         }),
@@ -456,14 +473,13 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     return wrap;
   }
 
-  function renderTreeNode(node) {
-    const box = el("div", { class: "user-select-none" });
+  function renderTreeNode(node, depth = 0) {
+    const box = el("li", { class: "nav-item d-block w-100 min-w-0" });
     const children = Array.isArray(node.children) ? node.children : [];
     const canExpand = children.length > 0;
     const empty = !canExpand && !node.action;
     const hasActive = (item) => item.active || (item.children || []).some(hasActive);
     let expanded = state.expandedTrees.get(node.id) ?? children.some(hasActive);
-    let caret;
     let kids;
     const toggle = () => {
       expanded = !expanded;
@@ -472,35 +488,26 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     };
     const updateExpansion = () => {
       if (!canExpand) return;
-      caret.textContent = expanded ? "▾" : "▸";
-      caret.title = expanded ? "折叠" : "展开";
-      caret.setAttribute("aria-expanded", String(expanded));
+      row.setAttribute("aria-expanded", String(expanded));
+      row.classList.toggle(
+        "active",
+        Boolean(node.active || (!expanded && children.some(hasActive))),
+      );
       if (expanded && !kids) {
-        kids = el("div", { class: "ms-8 border-start ps-5" });
-        for (const child of children) kids.appendChild(renderTreeNode(child));
+        kids = el("ul", { class: "nav flex-column flex-nowrap gap-0" });
+        for (const child of children) kids.appendChild(renderTreeNode(child, depth + 1));
         box.appendChild(kids);
       }
       if (kids) kids.hidden = !expanded;
     };
-    const row = el("div", {
-      class: `d-flex flex-nowrap align-items-center gap-1 p-1 ${node.active ? "bg-subtle-primary" : ""} ${empty ? "fg-2" : ""}`,
+    const row = el("button", {
+      class: `nav-link w-100 justify-content-start text-start position-relative ${canExpand || empty || node.active ? "fw-semibold" : ""} ${node.active ? "active" : ""}`,
+      type: FIELD_INPUT.BUTTON,
+      disabled: empty,
+      title: node.label || node.id || "",
+      "aria-current": node.active ? "page" : undefined,
     });
-    if (canExpand || empty) {
-      caret = el("button", {
-        class: "btn-text theme-secondary btn-sm flex-shrink-0",
-        type: FIELD_INPUT.BUTTON,
-        text: expanded ? "▾" : "▸",
-        title: canExpand ? (expanded ? "折叠" : "展开") : "暂无课次",
-        disabled: empty,
-        "aria-expanded": canExpand ? String(expanded) : undefined,
-      });
-      if (canExpand)
-        caret.addEventListener("click", (event) => {
-          event.stopPropagation();
-          toggle();
-        });
-      row.appendChild(caret);
-    }
+    row.style.paddingInlineStart = `${16 + depth * 8}px`;
     if (node.icon) row.appendChild(el("span", { text: node.icon, "aria-hidden": "true" }));
     row.appendChild(
       el("span", {
@@ -512,7 +519,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     if (node.subtitle)
       row.appendChild(
         el("span", {
-          class: "small fg-2 flex-grow-1 min-w-0 text-truncate",
+          class: "small fg-2 fw-normal flex-grow-1 min-w-0 text-truncate",
           text: node.subtitle,
           title: node.subtitle,
         }),
@@ -520,14 +527,26 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     if (node.badge) {
       row.appendChild(
         el("span", {
-          class: `badge flex-shrink-0 ${node.badge_class === "live" ? "theme-warning" : node.badge_class === "upcoming" ? "theme-primary" : "theme-secondary"}`,
+          class: `badge flex-shrink-0 ${node.badge_class === "live" ? "theme-primary" : node.badge_class === "paused" ? "theme-warning" : "theme-secondary"}`,
           text: node.badge,
+          role: "status",
         }),
       );
     }
+    if (canExpand || empty) {
+      const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      caret.setAttribute("class", "ms-auto flex-shrink-0");
+      caret.setAttribute("width", "16");
+      caret.setAttribute("height", "16");
+      caret.setAttribute("viewBox", "0 0 32 32");
+      caret.setAttribute("fill", "currentColor");
+      caret.setAttribute("aria-hidden", "true");
+      caret.innerHTML = '<path d="M16 22 6 12 7.4 10.6 16 19.2 24.6 10.6 26 12z"/>';
+      row.appendChild(caret);
+    }
     row.addEventListener("click", () => {
-      if (node.action) runNodeAction(node.action);
-      else if (canExpand) toggle();
+      if (canExpand) toggle();
+      else if (node.action) runNodeAction(node.action);
     });
     box.appendChild(row);
     updateExpansion();
@@ -725,8 +744,9 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       }
       if (input.type !== FIELD_INPUT.CHECKBOX) row.appendChild(input);
       if (field.secret) {
-        const status = el("div", {
-          class: `small ${field.is_set ? "fg-success" : "fg-2"}`,
+        const status = el("span", {
+          class: `badge ${field.is_set ? "theme-success" : "theme-secondary"}`,
+          role: "status",
           text: field.is_set ? `已配置，${field.secret_length || "?"} 字符` : "未配置",
         });
         const line = el("div", { class: "d-flex flex-wrap align-items-center gap-2" }, [status]);
@@ -1058,12 +1078,24 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     const processing = Boolean(block.processing);
 
     const stateText = () => {
-      if (finished) return "已结束";
-      if (block.queued) return live ? "直播，排队中" : "排队中";
-      if (live) return processing ? "直播，处理中" : "直播，已暂停处理";
-      return processing ? "处理中" : "已暂停";
+      if (finished) return STATUS_LABEL.FINISHED;
+      if (block.queued) return live ? `直播，${STATUS_LABEL.QUEUED}` : STATUS_LABEL.QUEUED;
+      if (live)
+        return processing ? `直播，${STATUS_LABEL.RUNNING}` : `直播，${STATUS_LABEL.PAUSED}`;
+      return processing ? STATUS_LABEL.RUNNING : STATUS_LABEL.PAUSED;
     };
-    const stateEl = el("span", { class: "badge theme-secondary", text: stateText() });
+    const stateTheme = finished
+      ? "success"
+      : block.queued
+        ? "secondary"
+        : processing
+          ? "primary"
+          : "warning";
+    const stateEl = el("span", {
+      class: `badge theme-${stateTheme}`,
+      role: "status",
+      text: stateText(),
+    });
 
     const playAll = () => {
       for (const video of videos) {
@@ -1175,16 +1207,18 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     }
     const collapsed = Boolean(block.collapsed) && !pending && !retained;
     const wrap = el("section", {
-      class: `qa card min-w-0 ${collapsed ? "collapsed" : ""}`,
+      class: "qa card min-w-0",
       dataset: {
         qaId: block.id || "",
         qaPath: block.path || "",
         qaStatus: block.status || "",
       },
     });
-    const head = el("div", { class: "card-header d-flex flex-wrap align-items-center gap-2" });
+    const head = el("div", {
+      class: "card-header d-flex flex-row flex-wrap align-items-center gap-2",
+    });
     const toggle = el("button", {
-      class: "qa-toggle btn-text theme-secondary btn-sm",
+      class: "qa-toggle btn-text btn-icon theme-secondary btn-sm",
       type: FIELD_INPUT.BUTTON,
       text: collapsed ? "▸" : "▾",
       title: "折叠 / 展开",
@@ -1195,7 +1229,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         await postAction(block.collapse_action || "reader.qa_collapse", {
           path: block.path,
           id: block.id,
-          collapsed: !wrap.classList.contains("collapsed"),
+          collapsed: !wrap.querySelector(".qa-body").hidden,
         });
       } finally {
         toggle.disabled = false;
@@ -1204,25 +1238,32 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     head.appendChild(toggle);
     head.appendChild(el("span", { class: "badge theme-primary", text: "问" }));
     head.appendChild(
-      el("span", { class: "text-break flex-grow-1", text: qaPreview(block.question) }),
+      el("span", { class: "text-break flex-grow-1 min-w-0", text: qaPreview(block.question) }),
     );
     const level = qaLevelLabel(block.intensity);
     if (level) head.appendChild(el("span", { class: "badge theme-secondary", text: level }));
     if (block.ts) head.appendChild(el("time", { class: "small fg-2", text: block.ts }));
     if (pending)
       head.appendChild(
-        el("span", { class: "qa-pending badge theme-info", role: "status", text: "回答中…" }),
+        el("span", {
+          class: "qa-pending badge theme-primary",
+          role: "status",
+          text: STATUS_LABEL.RUNNING,
+        }),
       );
-    head.appendChild(
-      actionButton(
-        "删除",
-        block.delete_action || "reader.qa_delete",
-        { path: block.path, id: block.id },
-        "btn-solid theme-danger btn-sm",
-      ),
+    const remove = actionButton(
+      "删除",
+      block.delete_action || "reader.qa_delete",
+      { path: block.path, id: block.id },
+      "btn-text btn-icon theme-danger btn-sm flex-shrink-0",
     );
+    remove.title = "删除";
+    remove.setAttribute("aria-label", "删除");
+    remove.innerHTML =
+      '<svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708"/></svg>';
+    head.appendChild(remove);
 
-    const body = el("div", { class: "qa-body card-body" });
+    const body = el("div", { class: "qa-body card-body", hidden: collapsed });
     const answerBox = el("div", {
       class: `qa-answer ${block.status === QA_STATUS.ERROR ? "fg-danger" : ""}`,
     });
@@ -1234,7 +1275,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     if (!pending) {
       answerBox.appendChild(
         el("div", {
-          class: "qa-text markdown",
+          class: "qa-text markdown prose",
           html: block.answer_html || escapeHtml(block.answer || "（无内容）"),
         }),
       );
@@ -1278,7 +1319,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       answerBox.classList.toggle("fg-danger", payload.status === QA_STATUS.ERROR);
       let answer = answerBox.querySelector(".qa-text");
       if (!answer) {
-        answer = el("div", { class: "qa-text markdown" });
+        answer = el("div", { class: "qa-text markdown prose" });
         answerBox.appendChild(answer);
       }
       const html = payload.answer_html || escapeHtml(payload.answer || "（无内容）");
@@ -1292,7 +1333,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     const pending = node.querySelector(".qa-pending");
     if (pending) pending.remove();
     const collapsed = !retained && payload.collapsed !== false;
-    node.classList.toggle("collapsed", collapsed);
+    node.querySelector(".qa-body").hidden = collapsed;
     const toggle = node.querySelector(".qa-toggle");
     if (toggle) toggle.textContent = collapsed ? "▸" : "▾";
   }
@@ -1361,7 +1402,22 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
   }
 
   function updateBlocks(parent, blocks) {
+    if (parent.querySelector("[data-ask-editor]")) {
+      parent._deferred = true;
+      return false;
+    }
     const previous = new Map(Array.from(parent.children, (node) => [node._blockKey, node]));
+    for (const block of blocks || []) {
+      if (block.type !== BLOCK_TYPE.QA) continue;
+      const key = stableBlockKey(block, 0);
+      const node = Array.from(parent.querySelectorAll("[data-ask-submitted]")).find(
+        (candidate) => candidate._blockKey === key,
+      );
+      if (node) {
+        previous.set(key, node);
+        delete node.dataset.askSubmitted;
+      }
+    }
     const wanted = new Set();
     let deferred = false;
     (blocks || []).forEach((block, index) => {
@@ -1689,8 +1745,15 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         el("span", { class: "flex-grow-1 min-w-0 text-break", text: title }),
         block.status && block.status !== EXECUTION_BLOCK_STATUS.COMPLETED
           ? el("span", {
-              class: `small ${block.status === EXECUTION_BLOCK_STATUS.FAILED ? "fg-danger" : "fg-2"}`,
-              text: block.status,
+              class: `badge ${block.status === EXECUTION_BLOCK_STATUS.FAILED ? "theme-danger" : block.status === EXECUTION_BLOCK_STATUS.CANCELLED ? "theme-secondary" : "theme-primary"} font-body`,
+              text:
+                {
+                  [EXECUTION_BLOCK_STATUS.STREAMING]: STATUS_LABEL.RUNNING,
+                  [EXECUTION_BLOCK_STATUS.RUNNING]: STATUS_LABEL.RUNNING,
+                  [EXECUTION_BLOCK_STATUS.FAILED]: STATUS_LABEL.FAILED,
+                  [EXECUTION_BLOCK_STATUS.CANCELLED]: STATUS_LABEL.CANCELLED,
+                }[block.status] || block.status,
+              role: "status",
             })
           : null,
         el("span", {
@@ -1719,8 +1782,9 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       const verdict = report.correct;
       if (typeof verdict === "boolean")
         body.appendChild(
-          el("strong", {
-            class: verdict ? "fg-success" : "fg-danger",
+          el("span", {
+            class: `badge ${verdict ? "theme-success" : "theme-danger"} font-body`,
+            role: "status",
             text: verdict ? "Correct" : "Incorrect",
           }),
         );
@@ -2104,69 +2168,92 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     });
   }
 
-  function renderTaskQueue(existing = null) {
-    const root =
-      existing ||
-      el("section", { class: "block task-queue" }, [
-        el("p", { class: "task-summary" }),
-        el("ul", { class: "task-list list-group", "aria-label": "任务队列" }),
-      ]);
-    const tasks = state.ui.tasks || [];
-    const pending = tasks.filter((task) => task.state === TASK_STATE.PENDING).length;
-    $(".task-summary", root).textContent =
-      `等待中 ${pending} 个，运行中 ${tasks.length - pending} 个`;
-    const list = $(".task-list", root);
-    const rows = new Map(Array.from(list.children, (row) => [row.dataset.taskId, row]));
-    tasks.forEach((task, index) => {
-      const key = String(task.id ?? index);
+  function renderQueue(items, existing = null) {
+    const list = existing || el("ul", { class: "queue-list list-unstyled mb-0 fs-md lh-base" });
+    const rows = new Map(Array.from(list.children, (row) => [row.dataset.queueId, row]));
+    const icons = {
+      pause:
+        "M6 3.5a.5.5 0 0 1 .5.5v8a.5.5 0 0 1-1 0V4a.5.5 0 0 1 .5-.5m4 0a.5.5 0 0 1 .5.5v8a.5.5 0 0 1-1 0V4a.5.5 0 0 1 .5-.5",
+      play: "M10.804 8 5 4.633v6.734zM12 8a1 1 0 0 1-.5.866l-6 3.5A1 1 0 0 1 4 11.5v-7a1 1 0 0 1 1.5-.866l6 3.5A1 1 0 0 1 12 8",
+      x: "M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708",
+    };
+    (items || []).forEach((item, index) => {
+      const key = String(item.id);
       let row = rows.get(key);
       if (!row) {
-        row = el(
-          "li",
-          {
-            class: "list-group-item d-flex flex-wrap align-items-center gap-3",
-            dataset: { taskId: key },
-          },
-          [
-            el("div", { class: "flex-grow-1 text-break" }, [
-              el("h3", { class: "task-label h6" }),
-              el("p", { class: "task-detail mb-1" }),
-              el("p", { class: "task-session small fg-2 mb-0" }),
-            ]),
-            el("span", { class: "badge theme-info task-state" }),
-            el("button", {
-              type: FIELD_INPUT.BUTTON,
-              class: "btn-solid theme-secondary btn-sm task-cancel",
-              text: "停止任务",
-            }),
-          ],
-        );
-        $(".task-cancel", row).addEventListener("click", async (event) => {
-          const button = event.currentTarget;
-          const cancel = row.task.cancel;
-          if (!cancel?.action || button.disabled) return;
-          button.disabled = true;
-          try {
-            await postAction(cancel.action, cancel.payload || {});
-          } finally {
-            button.disabled = false;
-          }
+        row = el("li", {
+          class:
+            "position-relative d-flex align-items-center gap-3 px-5 py-4 border-bottom border-subtle",
+          dataset: { queueId: key },
         });
       }
       rows.delete(key);
-      row.task = task;
-      $(".task-label", row).textContent = task.label || "任务";
-      $(".task-detail", row).textContent = task.detail || "";
-      const session = $(".task-session", row);
-      session.textContent = task.session_id ? `会话：${task.session_id}` : "";
-      session.hidden = !task.session_id;
-      $(".task-state", row).textContent = task.state === TASK_STATE.PENDING ? "等待中" : "运行中";
-      const button = $(".task-cancel", row);
-      button.hidden = !task.cancel?.action;
-      button.setAttribute("aria-label", `停止任务：${task.label || task.id || "任务"}`);
+      const signature = JSON.stringify(item);
+      if (row.dataset.signature !== signature) {
+        row.dataset.signature = signature;
+        row.title = item.subtitle || "";
+        const content = el("div", { class: "flex-grow-1 min-w-0" }, [
+          el("div", { class: "text-break", text: item.title }),
+          item.detail ? el("div", { class: "fg-2 text-break", text: item.detail }) : null,
+          item.progress ? el("div", { class: "fg-2 mt-1", text: item.progress }) : null,
+          item.subtitle
+            ? el("span", { class: "visually-hidden", role: "status", text: item.subtitle })
+            : null,
+        ]);
+        row.replaceChildren(
+          el("span", {
+            class: `position-absolute start-0 top-0 bottom-0 my-4 border-start border-3 border-${item.theme || "secondary"}`,
+            "aria-hidden": "true",
+          }),
+          content,
+        );
+        if (item.actions?.length) {
+          const actions = el("div", {
+            class: "queue-actions d-flex flex-row flex-shrink-0 ms-auto",
+          });
+          for (const action of item.actions) {
+            const button = actionButton(
+              action.label,
+              action.action,
+              action.value,
+              `btn-text theme-${action.theme || "secondary"} btn-sm p-2 border-0`,
+            );
+            button.title = action.label;
+            button.setAttribute("aria-label", action.label);
+            button.innerHTML = `<svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path d="${icons[action.icon]}"/></svg>`;
+            actions.appendChild(button);
+          }
+          row.appendChild(actions);
+        }
+      }
       if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null);
     });
     for (const row of rows.values()) row.remove();
+    return list;
+  }
+
+  function renderTaskQueue(existing = null) {
+    const tasks = state.ui.tasks || [];
+    const pending = tasks.filter((task) => task.state === TASK_STATE.PENDING).length;
+    const root =
+      existing ||
+      el("section", { class: "block task-queue", "aria-label": "任务队列" }, [
+        el("p", { class: "queue-summary fg-2 mb-3" }),
+        renderQueue([]),
+      ]);
+    $(".queue-summary", root).textContent =
+      `${STATUS_LABEL.RUNNING} ${tasks.length - pending} 个，${STATUS_LABEL.QUEUED} ${pending} 个`;
+    renderQueue(
+      tasks.map((task, index) => ({
+        id: task.id ?? index,
+        title: task.label || "任务",
+        detail: task.detail,
+        progress: task.session_id ? `会话：${task.session_id}` : "",
+        subtitle: task.state === TASK_STATE.PENDING ? STATUS_LABEL.QUEUED : STATUS_LABEL.RUNNING,
+        theme: task.state === TASK_STATE.PENDING ? "secondary" : "primary",
+      })),
+      $(".queue-list", root),
+    );
     return root;
   }
 
@@ -2187,12 +2274,24 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     const type = block.type || BLOCK_TYPE.TEXT;
     if (type === BLOCK_TYPE.AGENT_ACTIVITY) return renderAgentActivity(block);
     if (type === BLOCK_TYPE.TASK_QUEUE) return renderTaskQueue();
+    if (type === BLOCK_TYPE.QUEUE)
+      return el("section", { class: "block p-3", "aria-label": block.title }, [
+        el(
+          "div",
+          { class: "d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3" },
+          [
+            el("h3", { class: "fs-md fw-semibold mb-0", text: block.title }),
+            el("span", { class: "fg-2", text: block.summary }),
+          ],
+        ),
+        renderQueue(block.items),
+      ]);
     if (type === BLOCK_TYPE.HTML)
       return openLinksInNewTab(el("div", { class: "block", html: block.html || "" }));
     if (type === BLOCK_TYPE.MARKDOWN) {
       return openLinksInNewTab(
         el("div", {
-          class: "block markdown",
+          class: "block markdown prose",
           html: block.html || escapeHtml(block.text || ""),
         }),
       );
@@ -2586,10 +2685,8 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
   }
 
   function hideSelectionMenu() {
-    const menu = $("#selection-menu");
-    if (!menu) return;
-    menu.hidden = true;
-    menu.replaceChildren();
+    const anchor = $("#selection-anchor");
+    if (anchor) Popover.getInstance(anchor)?.dispose();
   }
 
   function docContext(node) {
@@ -2612,9 +2709,9 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
   }
 
   function showSelectionMenu() {
-    const menu = $("#selection-menu");
+    const anchor = $("#selection-anchor");
     const page = $("#page-content");
-    if (!menu || !page) return;
+    if (!anchor || !page) return;
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) return hideSelectionMenu();
     const text = String(sel).trim();
@@ -2623,18 +2720,21 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     if (!node || !page.contains(node)) return hideSelectionMenu();
     const ctx = docContext(node);
     if (!ctx) return hideSelectionMenu();
+    const range = sel.getRangeAt(0).cloneRange();
 
-    menu.replaceChildren();
+    hideSelectionMenu();
+    const content = el("div", { class: "d-flex flex-column" });
+    content.addEventListener("mousedown", (event) => event.preventDefault());
     for (const item of ctx.actions) {
       const btn = el("button", {
-        class: "menu-item",
+        class: "btn-text theme-secondary text-start",
         type: FIELD_INPUT.BUTTON,
         text: `${item.icon ? item.icon + " " : ""}${item.label || item.id}`,
       });
       btn.addEventListener("click", () => {
         hideSelectionMenu();
         if (item.kind === SELECTION_ACTION_KIND.PROMPT) {
-          openAskDialog(item, ctx, text);
+          openAskEditor(item, ctx, text, range);
           return;
         }
         postAction(item.action, {
@@ -2645,85 +2745,162 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
           selection: text,
         });
       });
-      menu.appendChild(btn);
+      content.appendChild(btn);
     }
-    menu.hidden = false;
     const rect = sel.getRangeAt(0).getBoundingClientRect();
-    const width = menu.offsetWidth;
-    const height = menu.offsetHeight;
-    const left = Math.min(
-      window.innerWidth - width - 10,
-      Math.max(10, rect.left + rect.width / 2 - width / 2),
-    );
-    let top = rect.top - height - 8;
-    if (top < 8) top = Math.min(window.innerHeight - height - 10, rect.bottom + 8);
-    menu.style.left = `${Math.round(left)}px`;
-    menu.style.top = `${Math.round(top)}px`;
+    Object.assign(anchor.style, {
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+    });
+    new Popover(anchor, {
+      trigger: "manual",
+      animation: false,
+      placement: "top",
+      html: true,
+      content,
+      customClass: "selection-popover",
+      template:
+        '<div class="popover" role="dialog" aria-label="选中文字操作"><div class="popover-arrow"></div><div class="popover-body p-0"></div></div>',
+    }).show();
   }
 
-  let askContext = null;
-
-  function openAskDialog(item, ctx, selection) {
-    askContext = { item, ctx, selection };
-    const modal = $("#ask");
-    if (!modal) return;
-    const preview = $("#ask-selection");
-    preview.textContent = selection.length > 800 ? `${selection.slice(0, 800)}…` : selection;
-    const levels = $("#ask-intensity");
-    if (levels) {
-      levels.replaceChildren();
-      const options =
-        Array.isArray(item.intensities) && item.intensities.length
-          ? item.intensities
-          : [
-              { value: ASK_INTENSITY.INSTANT, label: "快速" },
-              { value: ASK_INTENSITY.RESEARCH, label: "研究" },
-            ];
-      for (const option of options) {
-        const value = typeof option === "object" ? option.value : option;
-        const label = typeof option === "object" ? (option.label ?? option.value) : option;
-        levels.appendChild(el("option", { value: String(value), text: String(label) }));
-      }
-    }
-    const input = $("#ask-input");
-    input.value = "";
-    Dialog.getOrCreateInstance(modal).show(document.activeElement);
-    input.focus();
-  }
-
-  function closeAskDialog() {
-    const modal = $("#ask");
-    if (modal) Dialog.getOrCreateInstance(modal).hide();
-    askContext = null;
-  }
-
-  async function sendAsk() {
-    if (!askContext) return;
-    const input = $("#ask-input");
-    const question = (input.value || "").trim();
-    if (!question) {
-      toast("请先输入问题", TOAST_KIND.ERR);
+  function openAskEditor(item, ctx, selection, range) {
+    const panel = range.endContainer.parentElement?.closest(".tabs-body");
+    if (!panel) return;
+    const active = panel.querySelector("[data-ask-editor]");
+    if (active) {
+      active.querySelector("textarea").focus();
       return;
     }
-    const { item, ctx, selection } = askContext;
-    const intensity = ($("#ask-intensity") || {}).value || ASK_INTENSITY.INSTANT;
-    closeAskDialog();
-    await postAction(item.action, {
-      ...(item.value || {}),
-      doc_key: ctx.docKey,
-      path: ctx.path,
-      page_id: ctx.pageId,
-      selection,
-      question,
-      intensity,
+    const markdown = range.endContainer.parentElement?.closest(".markdown");
+    if (!markdown) return;
+    let anchor =
+      range.endContainer.nodeType === Node.ELEMENT_NODE
+        ? range.endContainer
+        : range.endContainer.parentElement;
+    while (anchor.parentElement !== markdown && anchor !== markdown) anchor = anchor.parentElement;
+    const editor = el("section", {
+      class: "card min-w-0 not-prose",
+      dataset: { askEditor: "" },
+      "aria-label": "提问",
     });
+    const input = el("textarea", {
+      class: "form-control",
+      rows: "3",
+      "aria-label": "问题",
+      placeholder: "输入问题",
+    });
+    const levels = el("select", { class: "form-control w-auto", "aria-label": "强度" });
+    const options = item.intensities?.length
+      ? item.intensities
+      : [
+          { value: ASK_INTENSITY.INSTANT, label: "快速" },
+          { value: ASK_INTENSITY.RESEARCH, label: "研究" },
+        ];
+    for (const option of options) {
+      const value = typeof option === "object" ? option.value : option;
+      const label = typeof option === "object" ? (option.label ?? option.value) : option;
+      levels.appendChild(el("option", { value: String(value), text: String(label) }));
+    }
+    const cancel = el("button", {
+      class: "btn-solid theme-secondary btn-sm",
+      type: "button",
+      text: "取消",
+    });
+    const send = el("button", {
+      class: "btn-solid theme-primary btn-sm",
+      type: "submit",
+      text: "发送",
+    });
+    const form = el("form", { class: "card-body d-flex flex-column gap-3" }, [
+      el("blockquote", { class: "border-start ps-3 fg-2 mb-0", text: selection }),
+      input,
+      el("div", { class: "d-flex flex-wrap align-items-center gap-2" }, [
+        levels,
+        el("div", { class: "ms-auto d-flex gap-2" }, [cancel, send]),
+      ]),
+    ]);
+    editor.append(
+      el("div", { class: "card-header flex-row align-items-center gap-2" }, [
+        el("span", { class: "badge theme-primary", text: "问" }),
+        el("span", { text: "提问" }),
+      ]),
+      form,
+    );
+    cancel.addEventListener("click", () => {
+      editor.remove();
+      state.pageKey = null;
+      loadState({ quiet: true });
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (send.disabled) return;
+      const question = input.value.trim();
+      for (const control of [input, levels, send, cancel]) control.disabled = true;
+      try {
+        const result = await api("/api/ui/action", {
+          method: "POST",
+          body: JSON.stringify({
+            action: item.action,
+            values: {
+              ...(item.value || {}),
+              doc_key: ctx.docKey,
+              path: ctx.path,
+              page_id: ctx.pageId,
+              selection,
+              question,
+              intensity: levels.value,
+            },
+            page_id: ctx.pageId,
+            navigation: navigationFromUrl(),
+          }),
+        });
+        if (!result.ok) throw new Error(result.message || "提交问题失败");
+        const block = {
+          type: BLOCK_TYPE.QA,
+          id: result.data.qa_id,
+          path: ctx.path,
+          question,
+          intensity: levels.value,
+          status: QA_STATUS.PENDING,
+          collapsed: false,
+        };
+        const answer = renderQA(block);
+        answer._blockKey = stableBlockKey(block, 0);
+        answer.dataset.askSubmitted = "";
+        editor.replaceWith(answer);
+        state.pageKey = null;
+        await loadState({ quiet: true });
+      } catch (error) {
+        toast(`提交问题失败：${error.message}`, TOAST_KIND.ERR);
+        for (const control of [input, levels, send, cancel]) control.disabled = false;
+        input.focus();
+      }
+    });
+    input.addEventListener("keydown", (event) => {
+      if (
+        event.key === "Enter" &&
+        (event.shiftKey || event.ctrlKey) &&
+        !event.isComposing &&
+        event.keyCode !== 229
+      ) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+    if (anchor === markdown) markdown.appendChild(editor);
+    else anchor.after(editor);
+    window.getSelection()?.removeAllRanges();
+    input.focus();
   }
 
   function bindSelectionMenu() {
     document.addEventListener("mouseup", (event) => {
       const target = event.target instanceof Element ? event.target : null;
-      if (target && target.closest("#selection-menu")) return;
-      if (target && target.closest("#ask")) return;
+      if (target && target.closest(".selection-popover")) return;
+      if (target && target.closest("[data-ask-editor]")) return;
       window.setTimeout(showSelectionMenu, 0);
     });
     document.addEventListener("selectionchange", () => {
@@ -2732,32 +2909,8 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     });
     document.addEventListener("scroll", hideSelectionMenu, true);
 
-    const menu = $("#selection-menu");
-    if (menu) {
-      // Keep the text selection alive while the menu is being clicked.
-      menu.addEventListener("mousedown", (event) => event.preventDefault());
-    }
-  }
-
-  function bindAskDialog() {
-    const cancel = $("#ask-cancel");
-    if (cancel) cancel.addEventListener("click", closeAskDialog);
-    const close = $("#ask-close");
-    if (close) close.addEventListener("click", closeAskDialog);
-    const send = $("#ask-send");
-    if (send) send.addEventListener("click", sendAsk);
-    const input = $("#ask-input");
-    if (input) {
-      input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-          event.preventDefault();
-          sendAsk();
-        }
-      });
-    }
-    const modal = $("#ask");
-    modal?.addEventListener("close", () => {
-      askContext = null;
+    document.addEventListener("mousedown", (event) => {
+      if (!event.target.closest(".selection-popover")) hideSelectionMenu();
     });
   }
 
@@ -2899,15 +3052,20 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       const closeButton = page.closable
         ? el("button", {
             type: FIELD_INPUT.BUTTON,
+            class: "position-absolute end-0 top-50 translate-middle-y me-2",
             text: "×",
             "aria-label": `关闭 ${page.title || page.id}`,
             dataset: { closePage: page.id },
           })
         : null;
-      const tab = el("div", { class: "page-tab nav-link d-flex align-items-center gap-2" }, [
-        open,
-        closeButton,
-      ]);
+      const tab = el(
+        "div",
+        {
+          class:
+            "page-tab nav-link position-relative d-flex align-items-center justify-content-center px-9",
+        },
+        [open, closeButton],
+      );
       tab.classList.toggle("active", active);
       tab.addEventListener("click", async (event) => {
         if (event.target.closest("[data-close-page]")) return;
@@ -3261,7 +3419,6 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     bindSidebarControls();
     bindSidebarResize();
     bindSelectionMenu();
-    bindAskDialog();
     bindPaletteTrigger();
     window.addEventListener("popstate", () => restoreNavigation());
     await restoreNavigation();
