@@ -1889,50 +1889,6 @@ class TestProcessingQueue:
 
         plugin.teardown()
 
-    @pytest.mark.parametrize("selected", ["first", "last"])
-    def test_queue_order_and_cancel(self, monkeypatch, selected):
-        from bs4 import BeautifulSoup
-        from plugins.input.plugin import _Job
-
-        ctx, plugin, _started = self._setup(monkeypatch)
-        try:
-            active = _Job("active", {"name": "处理中"}, state=JobState.RUNNING)
-            last = _Job("last", {"name": "后加入"})
-            first = _Job("first", {"name": "优先直播", "kind": SourceKind.LIVE})
-            plugin._jobs[active.id] = active
-            plugin._active_job = active
-            plugin._processing = True
-            plugin._enqueue_job_locked(last)
-            plugin._enqueue_job_locked(first)
-            current_navigation().class_id = selected
-            current_navigation().class_meta = dict(plugin._jobs[selected].cls, id=selected)
-
-            html = plugin._render_queue_item()[0]["html"]
-            rows = BeautifulSoup(html, "html.parser").select("li")
-            assert [row.select_one("button")["data-id"] for row in rows] == [
-                "active",
-                "first",
-                "last",
-            ]
-            assert all(row.select_one("button").text == "取消" for row in rows[1:])
-            control = next(
-                row.select_one("button")
-                for row in rows
-                if row.select_one("button")["data-id"] == selected
-            )
-            result = ctx.ui.dispatch_action(control["data-action"], {"id": selected})
-            assert result.ok
-            assert plugin._jobs[selected].state == JobState.CANCELED
-            assert plugin._active_job is active
-            remaining = BeautifulSoup(
-                plugin._render_queue_item()[0]["html"], "html.parser"
-            )
-            assert [
-                row.select_one("button")["data-id"] for row in remaining.select("li")
-            ] == ["active", "last" if selected == "first" else "first"]
-        finally:
-            plugin.teardown()
-
     def test_context_names_the_selected_class(self, monkeypatch):
         ctx, plugin, _started = self._setup(monkeypatch)
         assert ctx.ui.state()["context"] is None

@@ -312,11 +312,7 @@ def test_stream_window_releases_producer_gate(app, monkeypatch):
     producer = threading.Thread(target=produce, daemon=True)
     producer.start()
     try:
-        wait_until(
-            lambda: session.audio_input_done
-            and len(session.transcript) == 1
-            and plugin.status()["cursor"] >= 2.0 - 1e-6
-        )
+        wait_until(lambda: session.audio_input_done and len(session.transcript) == 1)
         assert session.audio_gate.limit >= 12
         assert plugin.status()["cursor"] == pytest.approx(2.0)
         assert b"".join(stream.frames) == b"\x01\x00" * 32000

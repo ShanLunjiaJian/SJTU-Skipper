@@ -283,9 +283,7 @@ class _Action:
 class _Command:
     id: str
     title: str
-    subtitle: str
     category: str
-    icon: str | None
     order: float
     page_id: str | None
     action: str | None
@@ -547,9 +545,7 @@ class UIManager:
         command_id: str,
         title: str,
         *,
-        subtitle: str = "",
         category: str = "",
-        icon: str | None = None,
         order: float = 0,
         page_id: str | None = None,
         action: str | None = None,
@@ -564,9 +560,7 @@ class UIManager:
             self._commands[command_id] = _Command(
                 id=command_id,
                 title=title,
-                subtitle=subtitle,
                 category=category,
-                icon=icon,
                 order=float(order),
                 page_id=page_id,
                 action=action,
@@ -598,9 +592,7 @@ class UIManager:
             {
                 "id": c.id,
                 "title": c.title,
-                "subtitle": c.subtitle,
                 "category": c.category,
-                "icon": c.icon,
                 "page": c.page_id,
                 "action": c.action,
                 "keywords": c.keywords,
@@ -791,7 +783,7 @@ class UIManager:
             return [
                 {
                     "type": BlockType.HTML,
-                    "html": f'<div class="ui-error">渲染失败：{_escape(str(exc))}</div>',
+                    "html": f'<div class="alert theme-danger" role="alert">渲染失败：{_escape(str(exc))}</div>',
                 }
             ]
 

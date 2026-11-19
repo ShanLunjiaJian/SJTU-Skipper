@@ -177,7 +177,7 @@ Block：
 # row_actions 为每一行生成按钮；keys 把该行字段并入 action 的 values
 {"type": "table", "columns": [{"key": "id", "label": "模型"}], "rows": [{"id": "flash"}],
  "row_actions": [{"label": "删除", "action": "llm.model.remove", "keys": ["id"],
-                  "value": {"provider": "opencode-go"}, "class": "btn btn-sm btn-danger"}]}
+                  "value": {"provider": "opencode-go"}, "class": "btn-outline theme-danger btn-sm"}]}
 {"type": "cards", "items": [{"title": "...", "subtitle": "...", "actions": [...]}]}
 {"type": "list", "items": [{"text": "...", "action": "x", "value": {...}}]}
 {"type": "buttons", "buttons": [{"label": "刷新", "action": "input.refresh"}]}

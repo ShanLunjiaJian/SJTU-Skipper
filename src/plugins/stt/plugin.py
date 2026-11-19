@@ -124,9 +124,7 @@ class STTPlugin(Plugin):
         ctx.ui.register_command(
             "stt.debug",
             "语音转写（调试）",
-            subtitle="查看临时文字、定稿与处理进度",
             category="调试",
-            icon="🎙",
             order=20,
             page_id=PAGE_ID,
             keywords="stt transcript debug 转写",
@@ -1268,7 +1266,7 @@ class STTPlugin(Plugin):
                         "label": "打开设置",
                         "action": "ui.open_page",
                         "value": {"page_id": "settings:main"},
-                        "class": "btn btn-ghost btn-sm",
+                        "class": "btn-text btn-sm",
                     }
                 ],
             }
