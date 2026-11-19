@@ -64,8 +64,8 @@ LLM 模型和角色配置保存在 `data/agent/settings.json` 的 `llm.models` �
 - 「角色」一表列出设置值与生效模型；选中某个角色后在下方选择模型与思考级别．`board_recognition` 会校验 `image` 输入，缺少时拒绝保存．
 - 「原始配置」保留两份 YAML，整体替换并交由运行时校验．
 - 端点未公布的限制按默认值落库（上下文 128000、输出 8192、`text` 输入），随后在「模型」逐个调整．OpenCode 等端点公布 `limit.context`、`limit.output`、`modalities.input` 与 `capabilities.reasoning` 时按其填写．
-- `models.yml` 使用 OMP `providers` 结构．提供方配置 `baseUrl`、`api`、鉴权和 headers，模型配置 `contextWindow`、`maxTokens`、`input`（`text`/`image`）与 `reasoning`．`api` 接受已安装 OMP SDK 支持的协议，包括 `openai-completions` 和 `openai-responses`．
-- `roles.yml` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、笔记写作、审阅、问答与上下文压缩．`note_writer` 负责写作和修订，`note_review` 负责独立审阅．未填写的角色继承 `default`．
+- `llm.models` 使用 OMP `providers` 结构．提供方配置 `baseUrl`、`api`、鉴权和 headers，模型配置 `contextWindow`、`maxTokens`、`input`（`text`/`image`）与 `reasoning`．`api` 接受已安装 OMP SDK 支持的协议，包括 `openai-completions` 和 `openai-responses`．
+- `llm.roles` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、笔记写作、审阅、问答与上下文压缩．`note_writer` 负责写作和修订，`note_review` 负责独立审阅．未填写的角色继承 `default`．
 - 板书角色 `board_recognition` 必须选择支持图像输入的模型．无效选择器、角色循环或不支持的思考级别会阻止保存．
 - 默认模型为 `deepseek-flash`．省略 `maxTokens` 时继承 OMP 模型能力信息；显式填写时使用配置值．
 - 提供方凭据保存在 `data/agent/auth.json` 的 `llm` 字段中．API Key、OAuth 登录与刷新即时保存，设置页只显示配置状态．无鉴权服务设置 `auth: none`．
