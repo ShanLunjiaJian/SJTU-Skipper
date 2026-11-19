@@ -1068,7 +1068,7 @@ class InputPlugin(Plugin):
         ui.add_toolbox_item(
             "session",
             "input.queue",
-            "",
+            "处理队列",
             order=1,
             render=self._render_queue_item,
             plugin_id=pid,
@@ -1582,8 +1582,31 @@ class InputPlugin(Plugin):
                     and job.state == JobState.QUEUED
                 ):
                     ordered.append(job)
-        if not ordered:
-            return []
+            terminal = sorted(
+                (
+                    job
+                    for job in self._jobs.values()
+                    if job.state in _JOB_TERMINAL and job.finished_at
+                ),
+                key=lambda job: job.finished_at,
+                reverse=True,
+            )[:3]
+        if not ordered and not terminal:
+            with self._class_lock:
+                legacy_busy = self._processing and self._active_job is None
+            if legacy_busy:
+                return [
+                    {
+                        "type": BlockType.TEXT,
+                        "text": "正在处理一节课程（补录或手动播放），进度见底部状态栏。",
+                    }
+                ]
+            return [
+                {
+                    "type": BlockType.TEXT,
+                    "text": "队列为空．选中一节课后点「开始处理」．",
+                }
+            ]
         rows: list[dict[str, Any]] = []
         for job in ordered:
             if job is active:
@@ -1907,7 +1930,7 @@ class InputPlugin(Plugin):
                     cursors[MediaKind.AUDIO],
                     min(session.audio.duration, float(partial["end_ms"]) / 1000),
                 )
-        pipeline = self._ctx.service("notes")
+        pipeline = self._ctx.service("notes-pipeline")
         notes = (
             pipeline.status(session_id) if pipeline is not None and session_id else None
         )
@@ -2031,7 +2054,7 @@ class InputPlugin(Plugin):
                 blocks.append(
                     {
                         "type": BlockType.HTML,
-                        "html": f'<div class="form-status err" role="alert"><pre class="log session-errors" aria-label="处理错误">{escape(text)}</pre></div>',
+                        "html": f'<pre class="session-errors" aria-label="处理错误">{escape(text)}</pre>',
                     }
                 )
 

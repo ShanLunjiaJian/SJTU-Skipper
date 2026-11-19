@@ -736,7 +736,9 @@ class TestInputPluginUI:
             "error": "",
             "errors": [],
         }
-        ctx.services.register("notes", SimpleNamespace(status=lambda sid: notes))
+        ctx.services.register(
+            "notes-pipeline", SimpleNamespace(status=lambda sid: notes)
+        )
         plugin = InputPlugin()
         plugin._ctx = ctx
         monkeypatch.setattr("plugins.input.plugin.time.time", lambda: 1240.0)
@@ -774,7 +776,9 @@ class TestInputPluginUI:
             "error": "",
             "errors": [],
         }
-        ctx.services.register("notes", SimpleNamespace(status=lambda sid: notes))
+        ctx.services.register(
+            "notes-pipeline", SimpleNamespace(status=lambda sid: notes)
+        )
         plugin = InputPlugin()
         plugin._ctx = ctx
         assert not any(
