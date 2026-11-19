@@ -1576,7 +1576,7 @@ class InputPlugin(Plugin):
                 buttons.append(
                     {
                         "label": "补录缺失内容",
-                        "action": "summarize.fill_again",
+                        "action": "notes.fill_again",
                         "class": "btn-subtle theme-secondary",
                     }
                 )
@@ -1960,7 +1960,7 @@ class InputPlugin(Plugin):
                     cursors[MediaKind.AUDIO],
                     min(session.audio.duration, float(partial["end_ms"]) / 1000),
                 )
-        pipeline = self._ctx.service("notes-pipeline")
+        pipeline = self._ctx.service("notes")
         notes = (
             pipeline.status(session_id) if pipeline is not None and session_id else None
         )
@@ -2564,7 +2564,7 @@ class InputPlugin(Plugin):
             session is self._ctx.streams.current and self._ctx.streams.consumers_busy()
         ):
             time.sleep(0.05)
-        notes = self._ctx.service("notes-pipeline")
+        notes = self._ctx.service("notes")
         if notes is not None:
             notes.reset(sid)
         directory = self._ctx.data_dir / "sessions" / sid

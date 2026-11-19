@@ -24,7 +24,6 @@ from core.agent_types import (
 )
 from core.file_access import publication_lock
 from core.events import Event
-from core.navigation import current_navigation
 from core.streams import StreamKind
 from core.ui import TaskState
 from core.settings_spec import SettingsSpec, SettingType
@@ -53,46 +52,8 @@ from .prompts import (
 )
 
 
-class NotesPipelineService:
-    def __init__(self, pipeline):
-        self._pipeline = pipeline
-
-    def start(self, session_id=None):
-        return self._pipeline.start(session_id)
-
-    def finalize(self, session_id=None):
-        return self._pipeline.finalize(session_id)
-
-    def status(self, session_id=None):
-        return self._pipeline.status(session_id)
-
-    def stop(self, session_id=None):
-        return self._pipeline.stop(session_id)
-
-    def reset(self, session_id=None):
-        return self._pipeline.reset(session_id)
-
-    def delete(self, session_id=None):
-        return self._pipeline.delete(session_id)
-
-    def draft_paths(self, session_id=None):
-        return self._pipeline.draft_paths(session_id)
-
-    def source_path(self, session_id=None):
-        return self._pipeline.source_path(session_id)
-
-    def note_files(self, kind):
-        return self._pipeline.note_files(kind)
-
-    def running_tasks(self):
-        return self._pipeline.running_tasks()
-
-
-class NotesPipelinePlugin(Plugin):
-    id = "notes-pipeline"
-    requires = ("settings", "llm-agent")
-    optional_requires = ("stt", "vlm")
-    provides = ("notes-pipeline",)
+class NotesPipeline:
+    id = "notes"
 
     def setup(self, ctx):
         self.ctx = ctx
@@ -115,6 +76,61 @@ class NotesPipelinePlugin(Plugin):
             self.settings.register(
                 SettingsSpec(
                     key=f"notes.{key}",
+                    default=default,
+                    type=SettingType.INT,
+                    label=label,
+                    group="笔记",
+                    description="修改后重启服务生效" if key == "concurrency" else "",
+                ),
+                plugin_id=self.id,
+            )
+        for key, default, kind, label, group in (
+            (
+                "notes.system_prompt",
+                SYSTEM,
+                SettingType.TEXT,
+                "system_prompt",
+                "笔记",
+            ),
+            (
+                "notes.reviewer_prompt",
+                REVIEW_SYSTEM,
+                SettingType.TEXT,
+                "reviewer_prompt",
+                "笔记",
+            ),
+            (
+                "notes.review_enabled",
+                True,
+                SettingType.BOOL,
+                "review_enabled",
+                "笔记",
+            ),
+            (
+                "notes.review_max_rounds",
+                0,
+                SettingType.INT,
+                "review_max_rounds",
+                "笔记",
+            ),
+            (
+                "notes.chunk_system_prompt",
+                SYSTEM,
+                SettingType.TEXT,
+                "系统提示词",
+                "分段笔记",
+            ),
+            (
+                "notes.chunks_enabled",
+                True,
+                SettingType.BOOL,
+                "分段笔记",
+                "分段笔记",
+            ),
+        ):
+            self.settings.register(
+                SettingsSpec(
+                    key=key,
                     default=default,
                     type=kind,
                     label=label,
@@ -141,7 +157,6 @@ class NotesPipelinePlugin(Plugin):
             sid = path.parent.parent.name
             if sid != "boot":
                 self._state(sid)
-        ctx.register_service(self.id, NotesPipelineService(self))
         ctx.ui.register_task_provider(self.running_tasks, plugin_id=self.id)
         ctx.ui.register_action("notes.message", self.message, plugin_id=self.id)
         for event in (
@@ -552,7 +567,7 @@ class NotesPipelinePlugin(Plugin):
                 "completed_chunks": 0,
                 "total_chunks": 0,
                 "expected_chunks": None,
-                "chunk_enabled": bool(self.setting("instant-summarize.enabled", True)),
+                "chunk_enabled": bool(self.setting("notes.chunks_enabled", True)),
                 "tasks": [],
                 "error": "",
                 "errors": [],

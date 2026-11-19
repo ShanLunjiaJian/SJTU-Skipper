@@ -56,7 +56,7 @@ class NotesService:
 
 class NotesPlugin(Plugin):
     id = "notes"
-    requires = ("settings", "agent", "reader")
+    requires = ("settings", "llm-agent", "reader")
     optional_requires = ("stt", "vlm")
     provides = ("notes",)
 

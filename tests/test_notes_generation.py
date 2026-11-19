@@ -603,7 +603,7 @@ def test_late_visual_window_blocks_chunk():
 
     hub = StreamHub()
     session = hub.start_session("late-visual-window")
-    pipeline = NotesPipelinePlugin()
+    pipeline = NotesPipeline()
     pipeline.ctx = SimpleNamespace(streams=hub, service=lambda name: object())
     hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 600)
     hub.seal_text(session.session_id, StreamKind.VISUAL, 580)
@@ -629,7 +629,7 @@ def test_disabled_source_does_not_end_lecture():
 
     hub = StreamHub()
     session = hub.start_session("disabled-source")
-    pipeline = NotesPipelinePlugin()
+    pipeline = NotesPipeline()
     pipeline.ctx = SimpleNamespace(streams=hub, service=lambda name: object())
     hub.set_text_enabled(session.session_id, StreamKind.VISUAL, False)
     hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 600, final=True)
@@ -889,7 +889,7 @@ def test_lecture_context_uses_target_session(tmp_path):
         "target-course", meta={"course_name": "Target course", "date": "2026-11-10"}
     )
     hub.start_session("other-course", meta={"course_name": "Other course"})
-    pipeline = NotesPipelinePlugin()
+    pipeline = NotesPipeline()
     pipeline.ctx = SimpleNamespace(streams=hub, data_dir=tmp_path)
     context = pipeline._lecture_context(target.session_id)
     assert "Target course" in context and "2026-11-10" in context
@@ -1436,9 +1436,7 @@ def test_same_id_reprocess_replaces_notes(tmp_path):
     def run(session, instruction):
         return write_notes(session, session.workspace.text(SOURCE_FILENAME))
 
-    with note_pipeline(
-        tmp_path, run, settings={"instant-summarize.enabled": False}
-    ) as env:
+    with note_pipeline(tmp_path, run, settings={"notes.chunks_enabled": False}) as env:
         old = env.hub.start_session("same-class")
         old.transcript.append("Old unique theorem", start=0, end=2)
         env.hub.end_session()
@@ -1479,7 +1477,7 @@ def test_same_id_fill_keeps_published_notes(tmp_path):
     with note_pipeline(
         tmp_path,
         lambda session, instruction: write_notes(session, "Valid notes"),
-        settings={"instant-summarize.enabled": False},
+        settings={"notes.chunks_enabled": False},
     ) as env:
         old = env.hub.start_session("fill-class")
         old.transcript.append("Valid theorem", start=0, end=2)
@@ -1510,7 +1508,7 @@ def test_reset_drains_running_writer(tmp_path):
     with note_pipeline(
         tmp_path,
         run,
-        settings={"instant-summarize.enabled": False},
+        settings={"notes.chunks_enabled": False},
         releases=(release,),
     ) as env:
         session = env.hub.start_session("reset-writer")
@@ -1580,7 +1578,7 @@ def test_selected_status_does_not_follow_processing(tmp_path):
     with note_pipeline(
         tmp_path,
         run,
-        settings={"instant-summarize.enabled": False},
+        settings={"notes.chunks_enabled": False},
         releases=(release_writer,),
     ) as env:
         session = env.hub.start_session("processing")

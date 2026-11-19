@@ -87,7 +87,7 @@ def test_log_pages_keep_their_session(navigation):
         result = ui.dispatch_action("notes.logs", {})
         first_page = result.open_page
         ui.open_page(first_page)
-        navigation.class_id = "second"
+        streams.selected_class_id = "second"
         second_page = ui.dispatch_action("notes.logs", {}).open_page
         ui.open_page(second_page)
         assert second_page != first_page
@@ -107,9 +107,8 @@ def test_log_pages_keep_their_session(navigation):
 
 
 @pytest.mark.parametrize("selected", ["", "boot"])
-def test_empty_selection_hides_notes(selected, navigation):
+def test_empty_selection_hides_notes(selected):
     plugin = NotesView()
-    navigation.class_id = selected
     plugin.ctx = SimpleNamespace(
         streams=SimpleNamespace(
             current=SimpleNamespace(session_id="processing"),
@@ -121,10 +120,9 @@ def test_empty_selection_hides_notes(selected, navigation):
 
 
 @pytest.mark.parametrize("target", ["", "boot"])
-def test_invalid_action_target_does_not_use_selection(target, navigation):
+def test_invalid_action_target_does_not_use_selection(target):
     plugin = NotesView()
-    navigation.class_id = "selected"
-    plugin.ctx = SimpleNamespace()
+    plugin.ctx = SimpleNamespace(streams=SimpleNamespace(selected_class_id="selected"))
     for action in ("_generate", "_stop", "_delete", "_read", "_logs", "_fill_again"):
         assert not getattr(plugin, action)({"session_id": target})["ok"]
 
@@ -132,7 +130,6 @@ def test_invalid_action_target_does_not_use_selection(target, navigation):
 def test_generation_uses_selected_or_explicit_class(navigation):
     calls = []
     plugin = NotesView()
-    navigation.class_id = "selected"
     plugin.ctx = SimpleNamespace(
         streams=SimpleNamespace(
             current=SimpleNamespace(session_id="processing"),
@@ -150,7 +147,6 @@ def test_sidebar_status_uses_selected_class(navigation):
 
     calls = []
     plugin = NotesView()
-    navigation.class_id = "selected"
     plugin.ctx = SimpleNamespace(
         streams=SimpleNamespace(
             current=SimpleNamespace(session_id="processing"),

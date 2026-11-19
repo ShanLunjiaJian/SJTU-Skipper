@@ -60,7 +60,7 @@ class AskService:
 
 class AskPlugin(Plugin):
     id = "ask"
-    requires = ("settings", "agent", "reader")
+    requires = ("settings", "llm-agent", "reader")
     optional_requires = ("notes",)
     provides = ("ask",)
     uses_actions = (MESSAGE_ACTION,)
