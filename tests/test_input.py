@@ -931,6 +931,27 @@ class TestInputPluginUI:
 
         plugin.teardown()
 
+    @pytest.mark.parametrize("live", [False, True])
+    def test_action_toggle_course(self, live):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+
+        try:
+            plugin._tree["nodes"] = [
+                {"id": "course:12345", "live": live, "children": []}
+            ]
+            for expanded in (True, False, True, False):
+                result = ctx.ui.dispatch_action(
+                    "input.toggle_course", {"course": "12345"}
+                )
+                assert result.ok
+                assert plugin._tree["nodes"][0]["expanded"] is expanded
+                plugin._apply_tree_state()
+                assert plugin._tree["nodes"][0]["expanded"] is expanded
+        finally:
+            plugin.teardown()
+
     def test_action_open_class_missing_videos(self):
         ctx = _make_context()
         plugin = InputPlugin()
@@ -1378,6 +1399,40 @@ class TestClassPlayer:
         resolve = mock.Mock()
         monkeypatch.setattr(plugin, "_resolve_class_streams", resolve)
         try:
+            assert ctx.streams.selected_class_id == ""
+            assert ctx.ui.state()["context"] is None
+            result = ctx.ui.dispatch_action(
+                "input.open_class",
+                {
+                    "id": class_id,
+                    "course": "1",
+                    "name": "高等数学",
+                    "kind": SourceKind.RECORDING,
+                    "videos": ["v1", "v2"],
+                },
+            )
+            assert result.ok
+            assert plugin._class_finished
+            assert plugin._class_session_id == ctx.streams.selected_class_id == class_id
+            ctx.streams.start_session("other-class", meta={"course_name": "后台课程"})
+            assert ctx.streams.selected_class_id == class_id
+            assert ctx.service("input").selected_class() == class_id
+            assert ctx.ui.state()["context"]["title"] == "高等数学"
+            assert plugin._render_session()[0]["text"].startswith("### 高等数学")
+            assert plugin._class_session_meta == meta
+            resolve.assert_not_called()
+        finally:
+            plugin.teardown()
+
+    def test_reprocess_restarts_from_the_first_part(self, monkeypatch, tmp_path):
+        """Reprocessing starts at the first recording part."""
+
+        ctx = _make_context(tmp_path)
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        resolve = mock.Mock()
+        monkeypatch.setattr(plugin, "_resolve_class_streams", resolve)
+        try:
             assert current_navigation().class_id == ""
             assert ctx.ui.state()["context"] is None
             result = ctx.ui.dispatch_action(
@@ -1402,29 +1457,12 @@ class TestClassPlayer:
             resolve.assert_not_called()
             from core.navigation import Navigation, navigation_scope
 
-            with navigation_scope(Navigation(class_id="other-browser")) as other:
-                resolved = ctx.service("input").resolve_class(class_id)
-                assert resolved["id"] == class_id
-                assert other.class_id == "other-browser"
-                assert other.class_meta == {}
-            assert current_navigation().class_id == class_id
-        finally:
-            plugin.teardown()
-
-    def test_reprocess_restarts_from_the_first_part(self, monkeypatch, tmp_path):
-        """Reprocessing starts at the first recording part."""
-
-        ctx = _make_context(tmp_path)
-        plugin = InputPlugin()
-        plugin.setup(ctx)
-        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
-
         directory = tmp_path / "sessions" / "1-20261105-0800"
         directory.mkdir(parents=True, exist_ok=True)
         for name in ("transcript.jsonl", "visual.jsonl", "coverage.json"):
             (directory / name).write_text("old")
         reset = mock.Mock()
-        ctx.services.register("notes", SimpleNamespace(reset=reset))
+        ctx.services.register("notes-pipeline", SimpleNamespace(reset=reset))
         self._open_class(ctx, plugin, videos=("v1", "v2"))
         monkeypatch.setattr(plugin, "_resolve_job_streams", lambda job: None)
         _course(plugin).streams = {StreamView.MAIN: "https://example.com/v2.mp4"}
@@ -1433,9 +1471,10 @@ class TestClassPlayer:
 
         result = ctx.ui.dispatch_action("input.reprocess", {})
         assert result.ok
-        assert plugin._jobs["1-20261105-0800"].input_part_index == 0
-        assert plugin._jobs["1-20261105-0800"].streams == {}
-        assert plugin._jobs["1-20261105-0800"].streams_loading is True
+        assert plugin._class_index == 0
+        assert plugin._class_streams == {}, "stale streams would re-download part 2"
+        assert plugin._streams_loading is True, "part 1 streams must be re-resolved"
+        assert plugin._class_finished is False
         reset.assert_called_once_with("1-20261105-0800")
         assert not any(
             (directory / name).exists()
@@ -1888,6 +1927,49 @@ class TestProcessingQueue:
         assert plugin._active_job.id == "class:b"
 
         plugin.teardown()
+
+    @pytest.mark.parametrize("selected", ["first", "last"])
+    def test_queue_order_and_cancel(self, monkeypatch, selected):
+        from bs4 import BeautifulSoup
+        from plugins.input.plugin import _Job
+
+        ctx, plugin, _started = self._setup(monkeypatch)
+        try:
+            active = _Job("active", {"name": "处理中"}, state=JobState.RUNNING)
+            last = _Job("last", {"name": "后加入"})
+            first = _Job("first", {"name": "优先直播", "kind": SourceKind.LIVE})
+            plugin._jobs[active.id] = active
+            plugin._active_job = active
+            plugin._processing = True
+            plugin._enqueue_job_locked(last)
+            plugin._enqueue_job_locked(first)
+            plugin._current_class = dict(plugin._jobs[selected].cls, id=selected)
+
+            html = plugin._render_queue_item()[0]["html"]
+            rows = BeautifulSoup(html, "html.parser").select("li")
+            assert [row.select_one("button")["data-id"] for row in rows] == [
+                "active",
+                "first",
+                "last",
+            ]
+            assert all(row.select_one("button").text == "取消" for row in rows[1:])
+            control = next(
+                row.select_one("button")
+                for row in rows
+                if row.select_one("button")["data-id"] == selected
+            )
+            result = ctx.ui.dispatch_action(control["data-action"], {"id": selected})
+            assert result.ok
+            assert plugin._jobs[selected].state == JobState.CANCELED
+            assert plugin._active_job is active
+            remaining = BeautifulSoup(
+                plugin._render_queue_item()[0]["html"], "html.parser"
+            )
+            assert [
+                row.select_one("button")["data-id"] for row in remaining.select("li")
+            ] == ["active", "last" if selected == "first" else "first"]
+        finally:
+            plugin.teardown()
 
     def test_context_names_the_selected_class(self, monkeypatch):
         ctx, plugin, _started = self._setup(monkeypatch)

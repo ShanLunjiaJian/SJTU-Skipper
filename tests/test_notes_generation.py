@@ -603,7 +603,7 @@ def test_late_visual_window_blocks_chunk():
 
     hub = StreamHub()
     session = hub.start_session("late-visual-window")
-    pipeline = NotesPipeline()
+    pipeline = NotesPipelinePlugin()
     pipeline.ctx = SimpleNamespace(streams=hub, service=lambda name: object())
     hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 600)
     hub.seal_text(session.session_id, StreamKind.VISUAL, 580)
@@ -629,7 +629,7 @@ def test_disabled_source_does_not_end_lecture():
 
     hub = StreamHub()
     session = hub.start_session("disabled-source")
-    pipeline = NotesPipeline()
+    pipeline = NotesPipelinePlugin()
     pipeline.ctx = SimpleNamespace(streams=hub, service=lambda name: object())
     hub.set_text_enabled(session.session_id, StreamKind.VISUAL, False)
     hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 600, final=True)
@@ -813,9 +813,7 @@ def test_final_tasks_keep_session_sources_when_selection_changes(tmp_path):
             "lecture-3", meta={"title": "Unrelated selected lecture"}
         )
         third.transcript.append("Do not copy this third lecture", start=0, end=1)
-        from core.navigation import current_navigation
-
-        current_navigation().class_id = third.session_id
+        env.hub.select_class(third.session_id)
         release_writers.set()
         env.wait_until(
             lambda: all(
@@ -891,7 +889,7 @@ def test_lecture_context_uses_target_session(tmp_path):
         "target-course", meta={"course_name": "Target course", "date": "2026-11-10"}
     )
     hub.start_session("other-course", meta={"course_name": "Other course"})
-    pipeline = NotesPipeline()
+    pipeline = NotesPipelinePlugin()
     pipeline.ctx = SimpleNamespace(streams=hub, data_dir=tmp_path)
     context = pipeline._lecture_context(target.session_id)
     assert "Target course" in context and "2026-11-10" in context
@@ -1438,7 +1436,9 @@ def test_same_id_reprocess_replaces_notes(tmp_path):
     def run(session, instruction):
         return write_notes(session, session.workspace.text(SOURCE_FILENAME))
 
-    with note_pipeline(tmp_path, run, settings={"notes.chunks_enabled": False}) as env:
+    with note_pipeline(
+        tmp_path, run, settings={"instant-summarize.enabled": False}
+    ) as env:
         old = env.hub.start_session("same-class")
         old.transcript.append("Old unique theorem", start=0, end=2)
         env.hub.end_session()
@@ -1479,7 +1479,7 @@ def test_same_id_fill_keeps_published_notes(tmp_path):
     with note_pipeline(
         tmp_path,
         lambda session, instruction: write_notes(session, "Valid notes"),
-        settings={"notes.chunks_enabled": False},
+        settings={"instant-summarize.enabled": False},
     ) as env:
         old = env.hub.start_session("fill-class")
         old.transcript.append("Valid theorem", start=0, end=2)
@@ -1510,7 +1510,7 @@ def test_reset_drains_running_writer(tmp_path):
     with note_pipeline(
         tmp_path,
         run,
-        settings={"notes.chunks_enabled": False},
+        settings={"instant-summarize.enabled": False},
         releases=(release,),
     ) as env:
         session = env.hub.start_session("reset-writer")
@@ -1568,7 +1568,7 @@ def test_empty_selection_does_not_create_note_state(tmp_path):
         assert not (tmp_path / "sessions" / "boot").exists()
 
 
-def test_selected_status_does_not_follow_processing(tmp_path, navigation):
+def test_selected_status_does_not_follow_processing(tmp_path):
     writer_started = threading.Event()
     release_writer = threading.Event()
 
@@ -1580,7 +1580,7 @@ def test_selected_status_does_not_follow_processing(tmp_path, navigation):
     with note_pipeline(
         tmp_path,
         run,
-        settings={"notes.chunks_enabled": False},
+        settings={"instant-summarize.enabled": False},
         releases=(release_writer,),
     ) as env:
         session = env.hub.start_session("processing")
@@ -1589,7 +1589,7 @@ def test_selected_status_does_not_follow_processing(tmp_path, navigation):
         env.hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 10, final=True)
         assert env.pipeline.start(session.session_id)
         assert writer_started.wait(8)
-        navigation.class_id = "unprocessed"
+        env.hub.select_class("unprocessed")
         status = env.pipeline.status()
         assert status["session_id"] == "unprocessed"
         assert status["generation_state"] == GenerationState.NOT_STARTED
@@ -1602,7 +1602,7 @@ def test_selected_status_does_not_follow_processing(tmp_path, navigation):
             assert not env.pipeline.finalize(target)
             assert not env.pipeline.stop(target)
             assert env.pipeline.status(target)["session_id"] == ""
-        navigation.class_id = ""
+        env.hub.select_class("")
         assert env.pipeline.status()["session_id"] == ""
         assert env.pipeline.source_path() is None
         release_writer.set()
@@ -1613,7 +1613,7 @@ def test_selected_status_does_not_follow_processing(tmp_path, navigation):
         )
         source = env.pipeline.source_path(session.session_id).read_text()
         assert "Background source" in source
-        assert navigation.class_id == ""
+        assert env.hub.selected_class_id == ""
 
 
 def test_startup_loads_class_state_without_boot(tmp_path):

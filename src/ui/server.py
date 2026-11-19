@@ -230,35 +230,24 @@ def create_app(runtime: Runtime) -> FastAPI:
             "plugin_order": runtime.plugins.order,
         }
 
-    def prepare_page(page: str, doc: str = "") -> str:
-        notes = page.startswith("reader:notes:") and page.endswith(
-            (":notes", ":chunk-notes")
-        )
-        logs = page.startswith("notes:logs:")
-        sid = ""
-        if notes:
-            kind = page.rsplit(":", 1)[1]
-            sid = page.removeprefix("reader:notes:").removesuffix(f":{kind}")
-        elif logs:
-            sid = page.removeprefix("notes:logs:")
-        if notes or logs:
-            if not sid or Path(sid).name != sid or sid in {".", ".."}:
-                raise ValueError("Invalid session ID")
-            if not (runtime.data_dir / "sessions" / sid).is_dir():
-                raise KeyError("Session not found")
-            if not runtime.ui.has_page(page):
-                service = runtime.services.require("notes")
-                if logs:
-                    service.open_logs(sid)
-                elif kind == "chunk-notes":
-                    result = service.open_chunk_notes(sid, doc or "knowledge")
-                    if not result.get("ok"):
-                        raise KeyError(result.get("message", "Cannot open chunk notes"))
-                else:
-                    service.open_notes(sid, doc or "knowledge")
-        if page and not runtime.ui.has_page(page):
-            raise KeyError("Page not found")
-        return sid
+    def navigation_state() -> dict[str, Any]:
+        with runtime.hub.class_selection_snapshot():
+            state = runtime.ui.state()
+            page = state.get("active_page") or ""
+            input_service = runtime.services.get("input")
+            navigation = {
+                "page": page,
+                "class": (
+                    input_service.selected_class()
+                    if input_service is not None
+                    else runtime.hub.selected_class_id
+                ),
+            }
+            reader = runtime.services.get("reader")
+            if page.startswith("reader:") and reader is not None:
+                navigation["doc"] = reader.navigation(page)
+            state["navigation"] = navigation
+            return state
 
     def resolve_navigation(request: NavigationRequest) -> Navigation:
         navigation = Navigation(
@@ -289,7 +278,56 @@ def create_app(runtime: Runtime) -> FastAPI:
 
     def request_navigation(request: NavigationRequest) -> Navigation:
         try:
-            return resolve_navigation(request)
+            notes = page.startswith("reader:notes:") and page.endswith(
+                (":summarize", ":instant-summarize")
+            )
+            logs = page.startswith("summarize:logs:")
+            sid = ""
+            if notes:
+                kind = page.rsplit(":", 1)[1]
+                sid = page.removeprefix("reader:notes:").removesuffix(f":{kind}")
+            elif logs:
+                sid = page.removeprefix("summarize:logs:")
+            if notes or logs:
+                if not sid or Path(sid).name != sid or sid in {".", ".."}:
+                    raise ValueError("Invalid session ID")
+                if not (runtime.data_dir / "sessions" / sid).is_dir():
+                    raise KeyError("Session not found")
+
+            class_id = (
+                request.class_id if "class_id" in request.model_fields_set else sid
+            )
+            if class_id:
+                runtime.services.require("input").open_class(class_id)
+            elif "class_id" in request.model_fields_set:
+                input_service = runtime.services.get("input")
+                if input_service is not None:
+                    input_service.clear_class()
+                else:
+                    runtime.hub.select_class("")
+
+            if not page:
+                runtime.ui.show_home()
+            else:
+                if notes:
+                    if kind == "instant-summarize":
+                        result = runtime.ui.dispatch_action(
+                            "instant-summarize.read",
+                            {"session_id": sid, "doc": request.doc or "knowledge"},
+                        )
+                        if not result.ok:
+                            raise KeyError(result.message)
+                    else:
+                        runtime.services.require("summarize").open_notes(
+                            sid, request.doc or "knowledge"
+                        )
+                elif logs:
+                    runtime.services.require("summarize").open_logs(sid)
+                if request.doc:
+                    runtime.services.require("reader").select_document(
+                        page, request.doc
+                    )
+                runtime.ui.open_page(page)
         except (KeyError, ServiceNotFound) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:

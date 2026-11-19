@@ -53,8 +53,46 @@ from .prompts import (
 )
 
 
-class NotesPipeline:
-    id = "notes"
+class NotesPipelineService:
+    def __init__(self, pipeline):
+        self._pipeline = pipeline
+
+    def start(self, session_id=None):
+        return self._pipeline.start(session_id)
+
+    def finalize(self, session_id=None):
+        return self._pipeline.finalize(session_id)
+
+    def status(self, session_id=None):
+        return self._pipeline.status(session_id)
+
+    def stop(self, session_id=None):
+        return self._pipeline.stop(session_id)
+
+    def reset(self, session_id=None):
+        return self._pipeline.reset(session_id)
+
+    def delete(self, session_id=None):
+        return self._pipeline.delete(session_id)
+
+    def draft_paths(self, session_id=None):
+        return self._pipeline.draft_paths(session_id)
+
+    def source_path(self, session_id=None):
+        return self._pipeline.source_path(session_id)
+
+    def note_files(self, kind):
+        return self._pipeline.note_files(kind)
+
+    def running_tasks(self):
+        return self._pipeline.running_tasks()
+
+
+class NotesPipelinePlugin(Plugin):
+    id = "notes-pipeline"
+    requires = ("settings", "llm-agent")
+    optional_requires = ("stt", "vlm")
+    provides = ("notes-pipeline",)
 
     def setup(self, ctx):
         self.ctx = ctx
@@ -103,6 +141,7 @@ class NotesPipeline:
             sid = path.parent.parent.name
             if sid != "boot":
                 self._state(sid)
+        ctx.register_service(self.id, NotesPipelineService(self))
         ctx.ui.register_task_provider(self.running_tasks, plugin_id=self.id)
         ctx.ui.register_action("notes.message", self.message, plugin_id=self.id)
         for event in (
@@ -123,7 +162,7 @@ class NotesPipeline:
         return self.settings.get(key, default)
 
     def _sid(self, sid=None):
-        sid = current_navigation().class_id if sid is None else sid
+        sid = self.ctx.streams.selected_class_id if sid is None else sid
         return "" if not sid or sid == "boot" else str(sid)
 
     def _directory(self, sid):
@@ -513,7 +552,7 @@ class NotesPipeline:
                 "completed_chunks": 0,
                 "total_chunks": 0,
                 "expected_chunks": None,
-                "chunk_enabled": bool(self.setting("notes.chunks_enabled", True)),
+                "chunk_enabled": bool(self.setting("instant-summarize.enabled", True)),
                 "tasks": [],
                 "error": "",
                 "errors": [],

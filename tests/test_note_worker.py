@@ -179,8 +179,8 @@ def test_empty_finalization_releases_generation(tmp_path):
 
 def test_chunk_only_completion_releases_generation(tmp_path):
     with pipeline_context(tmp_path, None) as (pipeline, agent, sdk):
-        pipeline.settings.set("notes.chunks_enabled", True)
-        pipeline.settings.set("notes.on_stop", OnStopAction.SKIP)
+        pipeline.settings.set("instant-summarize.enabled", True)
+        pipeline.settings.set("summarize.on_stop", OnStopAction.SKIP)
         session = pipeline.ctx.streams.start_session("chunk-completion")
         with pipeline.condition:
             state = pipeline._state(session.session_id)
