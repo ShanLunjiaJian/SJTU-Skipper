@@ -238,7 +238,11 @@ export class Runtime {
         Object.fromEntries(
           ROLE_NAMES.map((role) => [
             role,
-            `deepseek/deepseek-flash:${role === AgentRole.BOARD_RECOGNITION ? "off" : "xhigh"}`,
+            role === AgentRole.DEFAULT
+              ? "deepseek/deepseek-flash:high"
+              : role === AgentRole.BOARD_RECOGNITION
+                ? "deepseek/deepseek-flash:off"
+                : "@default",
           ]),
         );
       const config = await this.configuration(

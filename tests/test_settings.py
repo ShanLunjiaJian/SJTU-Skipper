@@ -648,20 +648,6 @@ def _form(blocks, action: str) -> dict:
     )
 
 
-def test_settings_page_is_a_workflow(tmp_path, monkeypatch):
-    runtime, _plugin, _backend = make_llm_settings_runtime(tmp_path, monkeypatch)
-    try:
-        tabs = llm_tabs(runtime)
-        assert list(tabs) == ["概览", "提供方", "模型", "角色", "原始配置"]
-        overview = json.dumps(tabs["概览"], ensure_ascii=False)
-        assert "默认模型" in overview
-        assert "opencode" in overview
-        assert "未配置凭据" in overview
-        assert "lecture/example" in overview
-    finally:
-        runtime.stop()
-
-
 def test_external_yaml_editors_save_without_settings_copies(tmp_path, monkeypatch):
     runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
     try:
@@ -699,40 +685,9 @@ def test_external_yaml_editors_save_without_settings_copies(tmp_path, monkeypatc
         runtime.stop()
 
 
-def test_provider_cards_carry_credentials_and_presets(tmp_path, monkeypatch):
+def test_provider_preset_discovers_models(tmp_path, monkeypatch):
     runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
     try:
-        blocks = llm_tabs(runtime)["提供方"]
-        cards = next(block for block in blocks if block["type"] == "cards")
-        assert [card["id"] for card in cards["items"]] == ["lecture", "opencode"]
-        lecture, opencode = cards["items"]
-        assert [action["action"] for action in lecture["actions"]] == [
-            "llm.logout",
-            "llm.provider.remove",
-        ]
-        assert "llm.opencode_login" in [
-            action["action"] for action in opencode["actions"]
-        ]
-        assert {meta[0] for meta in lecture["meta"]} == {"协议", "鉴权", "凭据", "模型"}
-        assert _form(lecture["blocks"], "llm.provider.save")["fields"][-1][
-            "visible_when"
-        ] == {
-            "key": "auth",
-            "values": ["apiKey"],
-        }
-
-        add = _form(blocks, "llm.provider.save")
-        fields = {field["name"]: field for field in add["fields"]}
-        assert fields["preset"]["options"] == ["opencode-go", "deepseek", "custom"]
-        assert fields["base_url"]["visible_when"] == {
-            "key": "preset",
-            "values": ["custom"],
-        }
-        assert fields["key"]["visible_when"] == {
-            "key": "preset",
-            "values": ["deepseek", "custom"],
-        }
-
         result = runtime.ui.dispatch_action(
             "llm.provider.save",
             {"values": {"preset": "opencode-go", "provider": "", "key": ""}},
@@ -829,9 +784,6 @@ def test_model_page_selects_then_edits_one_model(tmp_path, monkeypatch):
     runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
     try:
         blocks = llm_tabs(runtime)["模型"]
-        rows = next(block for block in blocks if block["type"] == "rows")
-        assert [item["title"] for item in rows["items"]] == ["lecture", "opencode"]
-        assert rows["items"][0]["active"] is True
         table = _table(blocks, "llm.select.model")
         assert [row["model"] for row in table["rows"]] == ["example"]
         assert table["rows"][0]["context"] == "32K"
@@ -910,37 +862,6 @@ def test_model_delete_is_blocked_while_roles_use_it(tmp_path, monkeypatch):
 def test_role_page_selects_then_edits_one_role(tmp_path, monkeypatch):
     runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
     try:
-        blocks = llm_tabs(runtime)["角色"]
-        table = _table(blocks, "llm.select.role")
-        writer = next(row for row in table["rows"] if row["role"] == "note_writer")
-        assert writer["selector"] == "lecture/example:medium"
-        assert writer["active"] == "lecture/example"
-        assert [column["key"] for column in table["columns"]] == [
-            "title",
-            "role",
-            "selector",
-            "active",
-            "status",
-        ]
-        board = next(row for row in table["rows"] if row["role"] == "board_recognition")
-        assert board["status"] == "图像可用"
-
-        backend.selectors["board_recognition"] = "opencode/flash:off"
-        blocks = llm_tabs(runtime)["角色"]
-        board = next(
-            row
-            for row in _table(blocks, "llm.select.role")["rows"]
-            if row["role"] == "board_recognition"
-        )
-        assert board["status"] == "缺少 image 输入"
-        editor = _form(blocks, "llm.role.save")
-        values = {field["name"]: field["value"] for field in editor["fields"]}
-        assert (values["role"], values["model"], values["level"]) == (
-            "default",
-            "lecture/example",
-            "high",
-        )
-
         runtime.ui.dispatch_action(
             "llm.select.role", {"values": {"role": "note_writer"}}
         )

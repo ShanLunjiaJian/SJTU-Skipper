@@ -191,7 +191,14 @@ class LLMPlugin(Plugin):
             login=self._login_state(),
             status=self._login_status,
         )
-        return [{"type": BlockType.TABS, "id": PAGE_ID, "tabs": view.blocks()}]
+        return [
+            {
+                "type": BlockType.TABS,
+                "id": PAGE_ID,
+                "layout": "settings-pages",
+                "tabs": view.blocks(),
+            }
+        ]
 
     # --------------------------------------------------------------- helpers
 

@@ -42,6 +42,20 @@ test("default configuration persists once", async () => {
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0].settings?.models.providers.deepseek.models[0].id).toBe("deepseek-flash");
     expect(snapshots[0].settings?.roles.board_recognition).toBe("deepseek/deepseek-flash:off");
+    expect(snapshots[0].settings?.roles.default).toBe("deepseek/deepseek-flash:high");
+    const catalog = await runtime.dispatch(IpcMethod.CATALOG, {}, () => {});
+    for (const role of [
+      AgentRole.NOTE_CHUNK,
+      AgentRole.NOTE_WRITER,
+      AgentRole.NOTE_REVIEW,
+      AgentRole.ASK_INSTANT,
+      AgentRole.ASK_RESEARCH,
+      AgentRole.COMPACTION,
+    ]) {
+      expect(snapshots[0].settings?.roles[role]).toBe("@default");
+      expect(catalog.roles[role]).toEqual(catalog.roles.default);
+    }
+    expect(catalog.roles.default.thinkingLevel).toBe("high");
     expect((await stat(path.join(root, "roles.yml"))).mode & 0o777).toBe(0o600);
   } finally {
     await runtime.close();

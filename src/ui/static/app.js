@@ -712,10 +712,35 @@
   function renderForm(block) {
     const submitSpec = block.submit || {};
     const action = block.action || submitSpec.action || "";
-    const form = el("form", { class: "vstack gap-3" });
+    const form = el("form", { class: "settings-form" });
+    if (block.title)
+      form.appendChild(el("h3", { class: "settings-form-title", text: block.title }));
+    if (block.description)
+      form.appendChild(el("p", { class: "form-description", text: block.description }));
+    const sections = new Map();
+    const sectionFor = (name = "") => {
+      if (!sections.has(name)) {
+        const section = el("fieldset", { class: "form-section" });
+        if (name) section.appendChild(el("legend", { text: name }));
+        form.appendChild(section);
+        sections.set(name, section);
+      }
+      return sections.get(name);
+    };
     if (action) form.dataset.action = action;
     const conditionalRows = [];
     for (const field of block.fields || []) {
+      if (field.hidden) {
+        form.appendChild(
+          el("input", {
+            type: "hidden",
+            name: field.name || field.key,
+            value: field.value ?? "",
+          }),
+        );
+        continue;
+      }
+      const section = sectionFor(field.section);
       const row = el("div", { class: "form-field" });
       if (field.visible_when) {
         row._visibleWhen = field.visible_when;
@@ -736,7 +761,7 @@
         row.appendChild(el("div", {}, [button]));
         if (field.description)
           row.appendChild(el("small", { class: "form-text", text: field.description }));
-        form.appendChild(row);
+        section.appendChild(row);
         continue;
       }
       const rawType = field.type || (field.secret ? SETTING_TYPE.SECRET : SETTING_TYPE.TEXT);
@@ -826,13 +851,18 @@
         }
         row.appendChild(line);
       }
-      if (field.description)
-        row.appendChild(el("small", { class: "form-text", text: field.description }));
-      form.appendChild(row);
+      if (field.description) {
+        const descriptionId = `${id}-description`;
+        input.setAttribute("aria-describedby", descriptionId);
+        row.appendChild(
+          el("small", { id: descriptionId, class: "form-text", text: field.description }),
+        );
+      }
+      section.appendChild(row);
     }
-    const actions = el("div", { class: "d-flex gap-2" });
+    const actions = el("div", { class: "form-actions" });
     const submit = el("button", {
-      class: "btn-solid theme-primary",
+      class: submitSpec.class || "btn-solid theme-primary",
       type: FIELD_INPUT.SUBMIT,
       text: block.submit_label || submitSpec.label || "保存",
     });
@@ -853,6 +883,10 @@
         row.hidden = !visible;
         row.dataset.hidden = visible ? "0" : "1";
       }
+      for (const section of sections.values())
+        section.hidden = !Array.from(section.querySelectorAll(".form-field")).some(
+          (row) => !row.hidden,
+        );
     };
     applyVisibility();
     form.addEventListener("change", applyVisibility);
@@ -872,6 +906,12 @@
       };
     }
     const data = wrap._tabState;
+    wrap.classList.toggle("settings-layout", block.layout === "settings");
+    wrap.classList.toggle("settings-pages", block.layout === "settings-pages");
+    data.bar.setAttribute(
+      "aria-orientation",
+      block.layout === "settings" ? "vertical" : "horizontal",
+    );
     const tabs = block.tabs || [];
     const key =
       block.id || block.key || `tabs:${tabs.map((tab) => tab.title || "").join("\u0001")}`;
@@ -922,7 +962,7 @@
       for (const [id, button] of data.buttons) {
         button.classList.toggle("active", id === target);
         button.setAttribute("aria-selected", String(id === target));
-        button.tabIndex = 0;
+        button.tabIndex = id === target ? 0 : -1;
       }
       const panel = data.panels.get(target);
       for (const view of agentViews.values())
@@ -985,6 +1025,23 @@
           } catch (err) {
             toast(`打开页面失败：${err.message}`, TOAST_KIND.ERR);
           }
+        });
+        button.addEventListener("keydown", (event) => {
+          const vertical = data.bar.getAttribute("aria-orientation") === "vertical";
+          const previous = vertical ? "ArrowUp" : "ArrowLeft";
+          const next = vertical ? "ArrowDown" : "ArrowRight";
+          if (![previous, next, "Home", "End"].includes(event.key)) return;
+          event.preventDefault();
+          const buttons = Array.from(data.bar.children);
+          const position = buttons.indexOf(button);
+          const index =
+            event.key === "Home"
+              ? 0
+              : event.key === "End"
+                ? buttons.length - 1
+                : (position + (event.key === next ? 1 : -1) + buttons.length) % buttons.length;
+          buttons[index].focus();
+          buttons[index].click();
         });
       }
       button._tab = tab;
@@ -2363,12 +2420,12 @@
       });
     if (type === BLOCK_TYPE.KEYVALUE) {
       const items = Array.isArray(block.items) ? block.items : Object.entries(block.items || {});
-      const grid = el("dl", { class: "row g-0 border" });
+      const grid = el("dl", { class: "keyvalue border" });
       for (const [k, v] of items) {
-        grid.appendChild(el("dt", { class: "col-4 bg-2 p-2", text: k }));
+        grid.appendChild(el("dt", { class: "bg-2 p-2", text: k }));
         grid.appendChild(
           el("dd", {
-            class: "col-8 p-2 mb-0 text-break",
+            class: "p-2 text-break",
             text: typeof v === "object" ? JSON.stringify(v) : String(v ?? ""),
           }),
         );

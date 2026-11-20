@@ -128,25 +128,13 @@ class SettingsPlugin(Plugin):
         if ctx is not None:
             ctx.ui.refresh(f"settings:{reason}")
 
-    def _spec_visible(self, spec: SettingsSpec) -> bool:
-        """Resolve a spec's ``visible_when`` condition against live values."""
-
-        if spec.hidden:
-            return False
-        if spec.visible_when is None:
-            return True
-        key, allowed = spec.visible_when
-        service = self.service
-        current = service.get(key) if service is not None else None
-        return current in allowed
-
     def _grouped_specs(self) -> list[tuple[str, list[SettingsSpec]]]:
         service = self.service
         if service is None:
             return []
         grouped: dict[str, list[SettingsSpec]] = {}
         for spec in service.specs():
-            if not self._spec_visible(spec):
+            if spec.hidden:
                 continue
             grouped.setdefault(spec.group, []).append(spec)
         return list(grouped.items())
@@ -163,12 +151,18 @@ class SettingsPlugin(Plugin):
             ]
         tabs: list[dict[str, Any]] = []
         for group, specs in groups:
-            blocks: list[dict[str, Any]] = []
-            note = next((spec.group_note for spec in specs if spec.group_note), "")
-            if note:
-                blocks.append({"type": BlockType.MARKDOWN, "text": note})
-            blocks.extend(self._form_blocks(specs, group))
-            tabs.append({"title": group or "General", "blocks": blocks})
+            tabs.append(
+                {
+                    "title": group or "General",
+                    "blocks": [
+                        {
+                            "type": BlockType.FORM,
+                            "fields": [self._field(spec) for spec in specs],
+                            "submit": {"label": "保存", "action": SAVE_ACTION},
+                        }
+                    ],
+                }
+            )
         for title, render in sections:
             try:
                 blocks = render()
@@ -178,17 +172,12 @@ class SettingsPlugin(Plugin):
                     {"type": BlockType.MARKDOWN, "text": "配置读取失败．请刷新后重试．"}
                 ]
             tabs.append({"title": title, "blocks": blocks})
-        return [{"type": BlockType.TABS, "id": "settings.groups", "tabs": tabs}]
-
-    def _form_blocks(
-        self, specs: list[SettingsSpec], group: str
-    ) -> list[dict[str, Any]]:
         return [
             {
-                "type": BlockType.FORM,
-                "title": group or "General",
-                "fields": [self._field(spec) for spec in specs],
-                "submit": {"label": "保存", "action": SAVE_ACTION},
+                "type": BlockType.TABS,
+                "id": "settings.groups",
+                "layout": "settings",
+                "tabs": tabs,
             }
         ]
 
@@ -214,6 +203,7 @@ class SettingsPlugin(Plugin):
             ],
             "placeholder": spec.placeholder,
             "description": spec.description,
+            "section": spec.section,
             "secret": bool(spec.secret),
             "is_set": configured,
             "readonly": bool(spec.readonly),

@@ -365,7 +365,7 @@ settings.set("my.api_key", "new")
 - secret 在 UI 和公开输出中掩码，内部 `get` 返回真实值．
 - `env=("ENV_NAME",)`：注册时，如果设置尚未存储，则读取环境变量并写入 `settings.json`．
 - `visible_when=("other.key", (value, ...))`：仅当另一个设置取指定值时显示该字段．
-- `group_note="..."`：显示在该设置分组表单上方．
+- `section="..."`：将同一分类的字段组成表单分组．
 - `hidden=True`：持久化但不在表单显示．
 - `readonly=True`：只读展示，保存时忽略．
 - `type=SettingType.ACTION, action="..."`：渲染为按钮，点击调用对应 UI action．

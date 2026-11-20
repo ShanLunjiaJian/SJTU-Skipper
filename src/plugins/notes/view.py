@@ -65,9 +65,21 @@ class NotesView:
         self.fill_threads = []
         self.gap_filler = None
         self.log_pages = set()
-        for key, default, label, order in (
-            ("fill_wait_minutes", 20, "补录重试间隔（分钟）", 110),
-            ("fill_max_attempts", 6, "补录尝试次数上限", 120),
+        for key, default, label, description, order in (
+            (
+                "fill_wait_minutes",
+                20,
+                "补录重试间隔（分钟）",
+                "未取得录播时等待的时长，至少为 1 分钟．",
+                110,
+            ),
+            (
+                "fill_max_attempts",
+                6,
+                "补录尝试上限（次）",
+                "至少尝试 1 次．达到上限仍未取得录播时，使用已有来源生成笔记．",
+                120,
+            ),
         ):
             self.settings.register(
                 SettingsSpec(
@@ -76,6 +88,8 @@ class NotesView:
                     type=SettingType.INT,
                     label=label,
                     group="笔记",
+                    section="课后处理",
+                    description=description,
                     order=order,
                 ),
                 plugin_id=self.id,
@@ -88,6 +102,8 @@ class NotesView:
                 label="课后处理",
                 options=list(self.ON_STOP_LABELS),
                 group="笔记",
+                section="课后处理",
+                description="先补全再生成会等待可用录播．不自动生成时仍可手动生成笔记．",
                 order=100,
             ),
             plugin_id=self.id,
