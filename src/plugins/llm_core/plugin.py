@@ -1,16 +1,12 @@
-"""LLM configuration: providers, models and role assignments.
+"""Manage LLM configuration, endpoint discovery, and device login.
 
-The page layout lives in :mod:`plugins.llm_core.settings_view`; this module owns
-the interaction state (which provider/model/role is being edited), the device
-login, and the actions behind the buttons.
-
-Selection is kept server-side so the editor form always carries the values of
-the item it writes.  All YAML writing still goes through the runtime's
-structured methods; this module never parses ``models.yml``/``roles.yml``.
+The client owns settings navigation. SettingsView builds the pages, and runtime
+methods write the configuration.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -30,11 +26,9 @@ from integrations.opencode_go import (
 )
 
 from .settings_view import (
-    INPUT_FORMATS,
     PAGE_ID,
     PRESETS,
     SettingsView,
-    number,
     providers,
     role_titles,
     roles_using,
@@ -53,12 +47,9 @@ _ACTIONS = (
     "llm.check",
     "llm.model.add",
     "llm.model.add_all",
-    "llm.model.save",
+    "llm.definition.save",
     "llm.model.remove",
     "llm.role.save",
-    "llm.select.provider",
-    "llm.select.model",
-    "llm.select.role",
 )
 
 
@@ -106,8 +97,6 @@ class LLMPlugin(Plugin):
         self._login_lock = threading.RLock()
         self._login: LoginFlow | None = None
         self._login_status = ""
-        # Which provider/model/role each page is editing.
-        self._selected = {"provider": "", "model": "", "role": ""}
         # Last endpoint check per provider: {"models": [...], "error": str}.
         self._checks: dict[str, dict[str, Any]] = {}
 
@@ -128,12 +117,9 @@ class LLMPlugin(Plugin):
             self._handle_check,
             self._handle_model_add,
             self._handle_model_add_all,
-            self._handle_model_save,
+            self._handle_definition_save,
             self._handle_model_remove,
             self._handle_role_save,
-            self._handle_select_provider,
-            self._handle_select_model,
-            self._handle_select_role,
         )
         for action, handler in zip(_ACTIONS, handlers):
             ctx.ui.register_action(action, handler, plugin_id=self.id)
@@ -186,7 +172,6 @@ class LLMPlugin(Plugin):
             ]
         view = SettingsView(
             catalog,
-            self._selected,
             self._checks,
             login=self._login_state(),
             status=self._login_status,
@@ -205,29 +190,13 @@ class LLMPlugin(Plugin):
     def _models_for(
         self, catalog: Mapping[str, Any], provider: str
     ) -> list[dict[str, Any]]:
-        for item in providers(catalog):
-            if item["id"] == provider:
-                return [dict(model) for model in item.get("models", [])]
-        return []
+        definitions = catalog.get("definitions", {}).get("models", {})
+        return [dict(model) for model in definitions.get("providers", {}).get(provider, {}).get("models", [])]
 
     @staticmethod
     def _model_payload(models: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
-        """Translate catalog models into the runtime's ``models_set`` rows."""
-
-        payload: list[dict[str, Any]] = []
-        for model in models:
-            row: dict[str, Any] = {"id": str(model.get("id") or "")}
-            for key in ("contextWindow", "maxTokens"):
-                value = number(model.get(key))
-                if value > 0:
-                    row[key] = value
-            formats = [
-                fmt for fmt in model.get("input", []) if str(fmt) in INPUT_FORMATS
-            ]
-            row["input"] = formats or ["text"]
-            row["reasoning"] = bool(model.get("reasoning"))
-            payload.append(row)
-        return payload
+        """Preserve complete model definitions for the runtime."""
+        return [dict(model) for model in models]
 
     def _write_models(
         self, provider: str, models: list[Mapping[str, Any]]
@@ -237,33 +206,6 @@ class LLMPlugin(Plugin):
             provider=provider,
             models=self._model_payload(models),
         )
-
-    # ------------------------------------------------------ selection actions
-
-    def _handle_select_provider(self, payload: dict[str, Any]) -> dict[str, Any]:
-        provider = str(_values(payload).get("provider") or "")
-        if provider:
-            self._selected["provider"] = provider
-            self._selected["model"] = ""
-            self._refresh()
-        return {"ok": True, "message": "", "refresh": True}
-
-    def _handle_select_model(self, payload: dict[str, Any]) -> dict[str, Any]:
-        values = _values(payload)
-        provider = str(values.get("provider") or "")
-        model = str(values.get("model") or "")
-        if provider:
-            self._selected["provider"] = provider
-            self._selected["model"] = model
-            self._refresh()
-        return {"ok": True, "message": "", "refresh": True}
-
-    def _handle_select_role(self, payload: dict[str, Any]) -> dict[str, Any]:
-        role = str(_values(payload).get("role") or "")
-        if role:
-            self._selected["role"] = role
-            self._refresh()
-        return {"ok": True, "message": "", "refresh": True}
 
     # -------------------------------------------------------- provider actions
 
@@ -302,7 +244,6 @@ class LLMPlugin(Plugin):
                 "refresh": False,
             }
         self._checks.pop(provider, None)
-        self._selected["provider"] = provider
         self._refresh()
         if provider in known:
             return {
@@ -325,9 +266,6 @@ class LLMPlugin(Plugin):
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "message": f"删除失败：{exc}．", "refresh": False}
         self._checks.pop(provider, None)
-        if self._selected["provider"] == provider:
-            self._selected["provider"] = ""
-            self._selected["model"] = ""
         self._refresh()
         return {"ok": True, "message": f"已删除 {provider}．", "refresh": True}
 
@@ -343,7 +281,6 @@ class LLMPlugin(Plugin):
             return {"ok": False, "message": f"检查端点失败：{exc}．", "refresh": True}
         models = list(found.get("models", []))
         self._checks[provider] = {"models": models, "error": ""}
-        self._selected["provider"] = provider
         self._refresh()
         return {
             "ok": True,
@@ -420,48 +357,46 @@ class LLMPlugin(Plugin):
             "refresh": True,
         }
 
-    def _handle_model_save(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _handle_definition_save(self, payload: dict[str, Any]) -> dict[str, Any]:
         values = _values(payload)
-        provider = str(values.get("provider") or "")
-        model_id = str(values.get("model") or "")
-        models = self._models_for(self._catalog(), provider)
-        if not any(model["id"] == model_id for model in models):
-            return {"ok": False, "message": "模型不存在．", "refresh": True}
-        formats = [
-            fmt
-            for fmt, key in (("text", "input_text"), ("image", "input_image"))
-            if values.get(key)
-        ]
-        updated: list[dict[str, Any]] = []
-        for model in models:
-            if model["id"] != model_id:
-                updated.append(model)
-                continue
-            updated.append(
-                {
-                    **model,
-                    "contextWindow": values.get("context_window"),
-                    "maxTokens": values.get("max_tokens"),
-                    "input": formats or ["text"],
-                    "reasoning": bool(values.get("reasoning")),
-                }
-            )
         try:
-            self._write_models(provider, updated)
+            definitions = self._catalog()["definitions"]
+            models = definitions["models"]
+            roles = definitions["roles"]
+            scope = values.get("scope")
+            definition = dict(values["definition"])
+            provider = str(values.get("provider") or "")
+            if scope == "provider":
+                if not provider:
+                    provider = str(definition.pop("_provider_id", "")).strip()
+                if not provider:
+                    raise ValueError("Provider ID is required")
+                models["providers"][provider] = definition
+                self._checks.pop(provider, None)
+            elif scope == "model":
+                rows = models["providers"][provider]["models"]
+                index = int(values["index"])
+                if index == -1:
+                    rows.append(definition)
+                elif 0 <= index < len(rows):
+                    rows[index] = definition
+                else:
+                    raise ValueError("Model index is invalid")
+            elif scope == "overrides":
+                models["providers"][provider]["modelOverrides"] = definition
+            elif scope == "models_extensions":
+                models = {**definition, "providers": models["providers"]}
+            elif scope == "roles":
+                roles = definition
+            elif scope == "models":
+                models = definition
+            else:
+                raise ValueError("Definition scope is invalid")
+            self._call(IpcMethod.CONFIGURE, models=models, roles=roles)
         except Exception as exc:  # noqa: BLE001
-            return {
-                "ok": False,
-                "message": f"保存模型失败：{exc}．",
-                "refresh": True,
-            }
-        self._selected["provider"] = provider
-        self._selected["model"] = model_id
+            return {"ok": False, "message": str(exc), "refresh": False}
         self._refresh()
-        return {
-            "ok": True,
-            "message": f"已保存 {provider}/{model_id}．",
-            "refresh": True,
-        }
+        return {"ok": True, "message": "", "refresh": True}
 
     def _handle_model_remove(self, payload: dict[str, Any]) -> dict[str, Any]:
         values = _values(payload)
@@ -497,8 +432,6 @@ class LLMPlugin(Plugin):
                 "message": f"删除模型失败：{exc}．",
                 "refresh": False,
             }
-        if self._selected["model"] == model_id:
-            self._selected["model"] = ""
         self._refresh()
         return {
             "ok": True,
@@ -512,26 +445,10 @@ class LLMPlugin(Plugin):
         values = _values(payload)
         role = str(values.get("role") or "")
         model = str(values.get("model") or "")
-        level = str(values.get("level") or "off")
+        level = str(values.get("level") or "")
         if not role or not model:
             return {"ok": False, "message": "请选择角色与模型．", "refresh": False}
-        catalog = self._catalog()
-        if role == "board_recognition" and not model.startswith("@"):
-            provider, _, model_id = model.partition("/")
-            image = any(
-                "image" in item.get("input", [])
-                for provider_item in providers(catalog)
-                if provider_item["id"] == provider
-                for item in provider_item.get("models", [])
-                if item["id"] == model_id
-            )
-            if not image:
-                return {
-                    "ok": False,
-                    "message": f"`{model}` 没有启用 `image` 输入，板书识别无法使用．",
-                    "refresh": False,
-                }
-        selector = model if model.startswith("@") else f"{model}:{level}"
+        selector = f"{model}:{level}" if level else model
         try:
             self._call(IpcMethod.ROLE_SET, role=role, selector=selector)
         except Exception as exc:  # noqa: BLE001
@@ -540,7 +457,6 @@ class LLMPlugin(Plugin):
                 "message": f"保存角色失败：{exc}．",
                 "refresh": False,
             }
-        self._selected["role"] = role
         self._refresh()
         return {"ok": True, "message": f"已设置 {role}．", "refresh": True}
 
@@ -548,16 +464,18 @@ class LLMPlugin(Plugin):
 
     def _handle_configure(self, payload: dict[str, Any]) -> dict[str, Any]:
         values = _values(payload)
-        models = values.get("models_yaml")
-        roles = values.get("roles_yaml")
+        models = values.get("models_json")
+        roles = values.get("roles_json")
         if not isinstance(models, str) or not isinstance(roles, str):
             return {
                 "ok": False,
-                "message": "请填写两份 YAML 配置后保存．",
+                "message": "请填写两份 JSON 配置后保存．",
                 "refresh": False,
             }
         try:
-            self._call(IpcMethod.CONFIGURE, models=models, roles=roles)
+            self._call(IpcMethod.CONFIGURE, models=json.loads(models), roles=json.loads(roles))
+        except json.JSONDecodeError as exc:
+            return {"ok": False, "message": f"JSON 格式无效：{exc}", "refresh": False}
         except Exception as exc:  # noqa: BLE001 - the runtime owns validation
             return {
                 "ok": False,
@@ -644,12 +562,18 @@ class LLMPlugin(Plugin):
         provider = str(values.get("provider") or "")
         force = bool(values.get("force"))
         try:
-            allowed = {
-                item["id"]
+            providers_by_id = {
+                item["id"]: item
                 for item in self._call(IpcMethod.INFO).get("providers", [])
-                if item.get("auth") == ProviderAuth.OAUTH
             }
-            if provider not in allowed:
+            item = providers_by_id.get(provider, {})
+            if item.get("configured"):
+                return {
+                    "ok": False,
+                    "message": "已有凭据．请先删除凭据再关联套餐．",
+                    "refresh": True,
+                }
+            if item.get("auth") != ProviderAuth.OAUTH:
                 return {
                     "ok": False,
                     "message": "请选择 OpenCode 提供方．",

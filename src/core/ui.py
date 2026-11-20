@@ -35,7 +35,9 @@ class BlockType(StrEnum):
     TEXT = "text"
     HTML = "html"
     TABS = "tabs"
+    DISCLOSURE = "disclosure"
     FORM = "form"
+    SCHEMA_FORM = "schema_form"
     TREE = "tree"
     BUTTONS = "buttons"
     KEYVALUE = "keyvalue"
@@ -846,7 +848,16 @@ class UIManager:
                 tab["blocks"] = self._normalize(tab.get("blocks", []))
                 tabs.append(tab)
             block["tabs"] = tabs
-        elif btype == BlockType.FORM:
+        elif btype == BlockType.DISCLOSURE:
+            block["blocks"] = self._normalize(block.get("blocks", []))
+        elif btype == BlockType.TABLE:
+            block["rows"] = [
+                {**row, "details": self._normalize(row["details"])}
+                if isinstance(row, dict) and "details" in row
+                else row
+                for row in block.get("rows", [])
+            ]
+        elif btype in (BlockType.FORM, BlockType.SCHEMA_FORM):
             block.setdefault("fields", [])
         elif btype == BlockType.TREE:
             block["nodes"] = _normalize_tree_nodes(block.get("nodes", []))

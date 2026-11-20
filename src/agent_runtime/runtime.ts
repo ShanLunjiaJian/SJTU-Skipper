@@ -3,7 +3,8 @@ import path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { createAgentSession, Settings, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resolveModelRoleValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { normalizeModelPatternList, resolveModelRoleValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { getModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema-bundle";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { parseSessionContent } from "@oh-my-pi/pi-coding-agent/session/session-loader";
@@ -27,7 +28,6 @@ import {
   workspaceToolSchema,
   agentRoleSchema,
   type Emit,
-  type ModelSettings,
   type ModelsConfiguration,
   type RuntimePersistence,
   modelsConfigurationSchema,
@@ -299,17 +299,20 @@ export class Runtime {
       )
         registerOpenCode(provider);
     }
-    for (const role of ROLE_NAMES) {
-      const seen = new Set<string>();
-      let value = selectors[role] ?? selectors.default;
-      while (value.startsWith("@")) {
-        const target = value.slice(1);
-        if (seen.has(target) || !(target in selectors))
-          throw new Error(`Invalid role alias: ${role}`);
-        seen.add(target);
-        value = selectors[target];
+    const visitRole = (role: string, seen: Set<string>) => {
+      if (seen.has(role)) throw new Error(`Invalid role alias: ${role}`);
+      const next = new Set(seen).add(role);
+      for (const pattern of normalizeModelPatternList(selectors[role] ?? selectors.default)) {
+        const alias = pattern.replace(/:(off|minimal|low|medium|high|xhigh|max|auto)$/, "");
+        const target = alias === "*" ? AgentRole.DEFAULT
+          : alias.startsWith("@") ? alias.slice(1)
+          : alias.startsWith("pi/") ? alias.slice(3) : undefined;
+        if (target === undefined) continue;
+        if (!ROLE_NAMES.includes(target as AgentRole)) throw new Error(`Invalid role alias: ${role}`);
+        visitRole(target, next);
       }
-    }
+    };
+    for (const role of ROLE_NAMES) visitRole(role, new Set());
     const candidate = path.join(this.root, `models-${crypto.randomUUID()}.yml`);
     const registryInput = structuredClone(parsed);
     for (const provider of Object.values(registryInput.providers!)) {
@@ -338,11 +341,14 @@ export class Runtime {
       allowed,
       selectors,
     };
-    for (const role of ROLE_NAMES) this.resolve(config, role);
+    if (allowed.length) {
+      for (const role of ROLE_NAMES) this.resolve(config, role);
+    }
     return config;
   }
 
   private resolve(config: Configuration, role: AgentRole) {
+    if (!config.allowed.length) throw new Error("No providers configured. Add a provider in LLM settings.");
     const result = resolveModelRoleValue(config.selectors[role] ?? "@default", config.allowed, {
       roleLookup: { getModelRole: (name: string) => config.selectors[name] },
     });
@@ -402,7 +408,7 @@ export class Runtime {
 
   /** Structured configuration view for the settings UI. */
   private async catalog() {
-    const { config, models } = await this.definitions();
+    const { config, models, roles } = await this.definitions();
     const providers = Object.entries(models.providers).map(([id, provider]) => ({
       id,
       api: String(provider.api ?? DEFAULT_API),
@@ -411,18 +417,14 @@ export class Runtime {
       configured:
         provider.auth === "none" || !!provider.apiKey || this.auth!.credentials.list(id).length > 0,
       source: provider.apiKey ? ProviderSource.CONFIG : ProviderSource.PROJECT,
-      models: provider.models.map((model) => ({
-        id: model.id,
-        contextWindow: Number(model.contextWindow ?? 0),
-        maxTokens: Number(model.maxTokens ?? 0),
-        input: Array.isArray(model.input) ? model.input.map(String) : ["text"],
-        reasoning: Boolean(model.reasoning),
-      })),
+      models: provider.models,
     }));
     return {
       providers,
+      definitions: { models, roles },
+      definition_schema: getModelsConfigSchema().in.toJsonSchema(),
       selectors: config.selectors,
-      roles: Object.fromEntries(
+      roles: config.allowed.length ? Object.fromEntries(
         ROLE_NAMES.map((role) => {
           const resolved = this.resolve(config, role);
           return [
@@ -434,9 +436,7 @@ export class Runtime {
             },
           ];
         }),
-      ),
-      models_yaml: config.models,
-      roles_yaml: config.roles,
+      ) : {},
       usage: this.usage,
     };
   }
@@ -576,7 +576,10 @@ export class Runtime {
       }
     }
     if (method === IpcMethod.CONFIGURE) {
-      const config = await this.configuration(String(params.models), String(params.roles));
+      const config = await this.configuration(
+        typeof params.models === "string" ? params.models : Bun.YAML.stringify(params.models),
+        typeof params.roles === "string" ? params.roles : Bun.YAML.stringify(params.roles),
+      );
       await this.storeConfiguration(config);
       return this.dispatch(IpcMethod.INFO, {}, emit);
     }
@@ -587,25 +590,9 @@ export class Runtime {
       const { models, roles } = await this.definitions();
       const definition = models.providers[provider];
       if (!definition) throw new Error(`Unknown provider: ${provider}`);
-      const known = new Map(definition.models.map((model) => [model.id, model]));
-      const edited = params.models as ModelSettings[];
-      const next = edited.map((row) => {
-        // Keep provider-specific fields (compat flags, aliases) the UI does not edit.
-        const merged: Record<string, unknown> = { ...(known.get(row.id) ?? {}) };
-        merged.id = row.id;
-        for (const [key, value] of [
-          ["contextWindow", row.contextWindow],
-          ["maxTokens", row.maxTokens],
-          ["input", row.input],
-          ["reasoning", row.reasoning],
-        ] as const) {
-          if (value === undefined) delete merged[key];
-          else merged[key] = value;
-        }
-        return merged;
-      });
+      const next = params.models as typeof definition.models;
       if (!next.length) throw new Error("至少保留一个模型");
-      definition.models = next as typeof definition.models;
+      definition.models = next;
       return this.applyEdited(models, roles);
     }
     if (method === IpcMethod.PROVIDER_SET) {
@@ -630,9 +617,12 @@ export class Runtime {
       const provider = String(params.provider);
       const { models, roles } = await this.definitions();
       if (!models.providers[provider]) throw new Error(`Unknown provider: ${provider}`);
-      if (Object.keys(models.providers).length === 1) throw new Error("至少保留一个提供方");
       const providers = { ...models.providers };
       delete providers[provider];
+      if (!Object.keys(providers).length) {
+        models.providers = providers;
+        return this.applyEdited(models, roles);
+      }
       const next: Record<string, string> = {};
       for (const [role, selector] of Object.entries(roles)) {
         next[role] = selector.startsWith(`${provider}/`) ? "@default" : selector;
@@ -671,7 +661,7 @@ export class Runtime {
         configured: p.auth === "none" || !!p.apiKey || this.auth!.credentials.list(id).length > 0,
         source: p.apiKey ? ProviderSource.CONFIG : ProviderSource.PROJECT,
       }));
-      const roles = Object.fromEntries(
+      const roles = config.allowed.length ? Object.fromEntries(
         ROLE_NAMES.map((role) => {
           const r = this.resolve(config, role);
           return [
@@ -679,10 +669,8 @@ export class Runtime {
             { provider: r.model!.provider, model: r.model!.id, thinkingLevel: r.thinkingLevel },
           ];
         }),
-      );
+      ) : {};
       return {
-        models_yaml: config.models,
-        roles_yaml: config.roles,
         providers,
         roles,
         usage: this.usage,

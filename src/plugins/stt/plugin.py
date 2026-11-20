@@ -1237,7 +1237,7 @@ class STTPlugin(Plugin):
                 }[status["state"]],
             ],
             [
-                "供应商",
+                "提供方",
                 status["provider_label"]
                 + ("（未配置）" if not status["configured"] else ""),
             ],

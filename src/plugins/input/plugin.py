@@ -1080,7 +1080,7 @@ class InputPlugin(Plugin):
         )
 
         # Right sidebar: functional areas for the selected class.
-        ui.add_tab(Side.RIGHT, "session", "课程", order=10, plugin_id=pid)
+        ui.add_tab(Side.RIGHT, "session", "课次", order=10, plugin_id=pid)
         ui.add_toolbox_item(
             "session",
             "input.session",
@@ -1100,7 +1100,7 @@ class InputPlugin(Plugin):
 
         ui.add_page(
             "input:session",
-            "课堂",
+            "课次",
             render=lambda: self._render_session(),
             plugin_id=pid,
         )
@@ -1580,14 +1580,14 @@ class InputPlugin(Plugin):
         return [
             {
                 "type": BlockType.HTML,
-                "html": f"""<section class="p-3 border-bottom" aria-label="课程处理">
+                "html": f"""<section class="p-3 border-bottom" aria-label="课次处理">
           <div class="d-flex align-items-center justify-content-between gap-2">
-            <h3 class="fs-md fw-semibold mb-0">课程处理</h3>
+            <h3 class="fs-md fw-semibold mb-0">课次处理</h3>
             <span class="badge theme-{state_theme}" role="status">{escape(state_label)}</span>
           </div>
           {detail_html}
           <div class="d-flex flex-wrap align-items-center gap-2 mt-3">
-            <button type="button" class="btn-outline theme-primary" data-action="ui.open_page" data-value='{{"page_id":"input:session"}}'>打开课程</button>
+            <button type="button" class="btn-outline theme-primary" data-action="ui.open_page" data-value='{{"page_id":"input:session"}}'>打开课次</button>
             {controls}
           </div>
         </section>""",
@@ -1736,13 +1736,13 @@ class InputPlugin(Plugin):
             return [
                 {
                     "type": BlockType.TEXT,
-                    "text": "未选择课程",
+                    "text": "未选择课次",
                 }
             ]
 
         parts = len(cls.get("videos") or []) or 1
         live = cls.get("kind") == SourceKind.LIVE
-        title = str(cls.get("label", "") or cls.get("name", "") or "课堂")
+        title = str(cls.get("label", "") or cls.get("name", "") or "课次")
         name = str(cls.get("name", "") or "")
         heading = f"### {name} {title}" if name else f"### {title}"
         heading += "  直播" if live else "  录播"
@@ -1827,7 +1827,7 @@ class InputPlugin(Plugin):
             sources.append(
                 {
                     "key": StreamView.MAIN,
-                    "label": "课堂",
+                    "label": "课堂画面",
                     "src": streams[StreamView.MAIN],
                 }
             )
@@ -1835,7 +1835,7 @@ class InputPlugin(Plugin):
             sources.append(
                 {
                     "key": StreamView.SCREEN,
-                    "label": "屏幕",
+                    "label": "屏幕画面",
                     "src": streams[StreamView.SCREEN],
                     "muted": True,
                 }
@@ -2048,7 +2048,7 @@ class InputPlugin(Plugin):
                     continue
                 location = str(error.get("source") or "来源读取")
                 if error.get("chunk") is not None:
-                    location = f"笔记片段 {error['chunk'] + 1}"
+                    location = f"分段笔记 第 {error['chunk'] + 1} 段"
                 if error.get("start") is not None and error.get("end") is not None:
                     location += f" {error['start']:.1f}-{error['end']:.1f}s"
                 messages.append(f"{location}：{message}")
@@ -2115,7 +2115,7 @@ class InputPlugin(Plugin):
             try:
                 cls = self._resolve_class(class_id)
             except KeyError:
-                return {"ok": False, "message": "未找到课程"}
+                return {"ok": False, "message": "未找到课次"}
         else:
             kind = SourceKind(payload.get("kind") or SourceKind.RECORDING)
             videos = payload.get("videos") or []
@@ -2462,7 +2462,7 @@ class InputPlugin(Plugin):
     def _act_delete(self, payload: dict[str, Any]) -> dict[str, Any]:
         cls = self._class_from_payload(payload)
         if cls is None:
-            return {"ok": False, "message": "未选择课程"}
+            return {"ok": False, "message": "未选择课次"}
         if str(cls["id"]) in {self._fill_target, self._playback_class_id}:
             self._act_stop({"id": str(cls["id"])})
         with self._class_lock:
@@ -2532,7 +2532,7 @@ class InputPlugin(Plugin):
         cls = self._class_from_payload(payload)
         with self._class_lock:
             if cls is None:
-                return {"ok": False, "message": "未选择课程"}
+                return {"ok": False, "message": "未选择课次"}
             class_id = str(cls["id"])
             if class_id in {self._playback_class_id, self._fill_target}:
                 if self._processing:

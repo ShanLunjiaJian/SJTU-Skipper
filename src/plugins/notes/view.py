@@ -88,7 +88,7 @@ class NotesView:
                     type=SettingType.INT,
                     label=label,
                     group="笔记",
-                    section="课后处理",
+                    section="课次结束策略",
                     description=description,
                     order=order,
                 ),
@@ -99,10 +99,10 @@ class NotesView:
                 key="notes.on_stop",
                 default=OnStopAction.DIRECT,
                 type=SettingType.SELECT,
-                label="课后处理",
+                label="课次结束策略",
                 options=list(self.ON_STOP_LABELS),
                 group="笔记",
-                section="课后处理",
+                section="课次结束策略",
                 description="先补全再生成会等待可用录播．不自动生成时仍可手动生成笔记．",
                 order=100,
             ),
@@ -182,19 +182,19 @@ class NotesView:
         return [
             {
                 "type": BlockType.HTML,
-                "html": f'''<section class="p-3 border-bottom" aria-label="课后笔记">
+                "html": f'''<section class="p-3 border-bottom" aria-label="完整笔记">
               <div class="d-flex align-items-center justify-content-between gap-2 mb-3">
-                <h3 class="fs-md fw-semibold mb-0">课后笔记</h3>
+                <h3 class="fs-md fw-semibold mb-0">完整笔记</h3>
                 <span class="badge theme-{state_theme}" role="status">{state_label}</span>
               </div>
               <div class="d-flex flex-wrap align-items-center gap-2">
-                <button type="button" class="btn-outline theme-primary" data-action="notes.read">打开笔记</button>
+                <button type="button" class="btn-outline theme-primary" data-action="notes.read">打开完整笔记</button>
                 <button type="button" class="btn-outline theme-secondary" data-action="notes.logs">查看日志</button>
                 <button type="button" class="{style}" data-action="notes.{action}">{label}</button>
               </div>
               {notice}
               <div class="mt-3 pt-3 border-top">
-                <label class="d-block fw-semibold mb-2" for="notes-on-stop">课程结束后</label>
+                <label class="d-block fw-semibold mb-2" for="notes-on-stop">课次结束策略</label>
                 <select id="notes-on-stop" name="mode" class="form-control min-w-0"
                   data-change-action="notes.set_mode">{options}</select>
               </div>
@@ -212,7 +212,7 @@ class NotesView:
     def _delete(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         deleted = self.pipeline.delete(sid)
         if not deleted:
             return {"ok": False, "refresh": True, "message": "仅已结束的笔记可删除"}
@@ -221,7 +221,7 @@ class NotesView:
     def _generate(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         started = self.pipeline.start(sid)
         if not started:
             return {
@@ -234,7 +234,7 @@ class NotesView:
     def _stop(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         stopped = self.pipeline.stop(sid)
         if not stopped:
             return {"ok": False, "refresh": True, "message": "仅正在生成的笔记可停止"}
@@ -243,7 +243,7 @@ class NotesView:
     def _read(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         docs = [
             {
                 "key": key,
@@ -255,7 +255,7 @@ class NotesView:
             ).items()
         ]
         page = self.ctx.require("reader").show(
-            title="笔记",
+            title="完整笔记",
             docs=docs,
             active=str(
                 payload.get("doc") or current_navigation().doc or NoteKind.KNOWLEDGE
@@ -268,7 +268,7 @@ class NotesView:
     def _logs(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         page = f"notes:logs:{sid}"
         if not self.ctx.ui.has_page(page):
             self.ctx.ui.add_page(
@@ -340,7 +340,7 @@ class NotesView:
     def _fill_again(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         self._request_fill(sid)
         return {"ok": True, "message": "正在查找可补录的内容", "refresh": True}
 
@@ -431,7 +431,7 @@ class NotesView:
     def _chunk_read(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         docs = [
             {
                 "key": key,

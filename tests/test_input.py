@@ -1551,7 +1551,7 @@ class TestClassPlayer:
         ctx.ui.open_page("input:session")
         blocks = ctx.ui.state()["page_content"]["input:session"]
         player = next(block for block in blocks if block["type"] == BlockType.PLAYER)
-        assert [src["label"] for src in player["sources"]] == ["课堂", "屏幕"]
+        assert [src["key"] for src in player["sources"]] == [StreamView.MAIN, StreamView.SCREEN]
         assert player["processing"] is False
 
         plugin.teardown()

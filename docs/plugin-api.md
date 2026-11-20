@@ -112,10 +112,10 @@ ctx.register_service("my.service", my_object)
 约定：
 
 - 服务名包括 `settings`、`llm`、`agent`、`input`、`stt`、`vlm`、`notes-pipeline`、`summarize`、`instant-summarize` 和 `reader`．
-- `stt.status()` 返回供应商、服务地址/端点、模型、语言、会话 ID、音频时长、处理游标、覆盖时长、片段数、临时文字和失败区间等状态．
-- `stt.transcribe(start=None, end=None)` 同步处理保留 PCM 中尚未覆盖的区间．`start` 缺省为已调度游标，`end` 缺省为 `start + 120` 秒，并限制在音频终点内；区间按供应商单次请求上限切分（兼容服务 120 秒，Google v2 55 秒）．调用会追加转写、记录覆盖并推进已调度游标，返回 `ok/start/end/segments/chars/items`．
+- `stt.status()` 返回提供方、服务地址/端点、模型、语言、会话 ID、音频时长、处理游标、覆盖时长、片段数、临时文字和失败区间等状态．
+- `stt.transcribe(start=None, end=None)` 同步处理保留 PCM 中尚未覆盖的区间．`start` 缺省为已调度游标，`end` 缺省为 `start + 120` 秒，并限制在音频终点内；区间按提供方单次请求上限切分（兼容服务 120 秒，Google v2 55 秒）．调用会追加转写、记录覆盖并推进已调度游标，返回 `ok/start/end/segments/chars/items`．
 - `stt.reset(session_id)`、`vlm.reset(session_id)` 清理已停止会话的识别缓存，不启动任务、不删除文件．调用前必须停止来源并等待消费者退出．`StreamHub.clear_results(session_id)` 清理内存转写、板书和处理进度，保留媒体及停止状态．
-- `stt.processing(session_id)`、`vlm.processing(session_id)` 只报告指定会话是否仍有识别工作执行，用于删除前等待退出，不等待其他课程的工作．
+- `stt.processing(session_id)`、`vlm.processing(session_id)` 只报告指定处理会话是否仍有识别工作执行，用于删除前等待退出，不等待其他课次的工作．
 - 服务调用使用公开服务对象，不导入插件实现．共享类型与枚举（`Side`、`BlockType`、`FormInputType`、`TaskState`、`StreamKind`、`MediaKind`、`SettingType`）从 `core` 导入．
 - `requires` 声明必需插件，控制加载顺序和服务访问权限．缺失必需插件时加载失败．`optional_requires` 声明可选插件；调用 `ctx.service(name)` 可取得服务或 `None`．
 
@@ -143,7 +143,7 @@ for frame in ctx.llm.stream(IpcMethod.GENERATE, role="board_recognition", messag
 - 模型和思考级别来自 `roles.yml`．提供方、模型能力与兼容参数来自 `models.yml`．`api` 的可选值由安装的 OMP SDK 决定．
 - `ctx.llm.call(IpcMethod.INFO)` 返回角色、提供方状态和用量．Agent 会话创建时固定配置．
 - `IpcMethod.CATALOG` 返回结构化配置（提供方、模型能力、角色选择器、原始 YAML）．`PROVIDER_SET`、`PROVIDER_REMOVE`、`MODELS_SET`、`ROLE_SET` 提交结构化修改，校验通过才写盘并返回新的 catalog．`DISCOVER` 请求端点 `${baseUrl}/models`，返回归一化后的候选模型，不修改配置．
-- `stt` 通过供应商适配器使用独立协议：兼容 HTTP/WebSocket 服务，或 Google Cloud Speech-to-Text v2 REST．
+- `stt` 通过提供方适配器使用独立协议：兼容 HTTP/WebSocket 服务，或 Google Cloud Speech-to-Text v2 REST．
 
 ## 6. UI
 
@@ -163,12 +163,12 @@ for frame in ctx.llm.stream(IpcMethod.GENERATE, role="board_recognition", messag
 | -------------- | --------------------------- | -------------------------------------- |
 | 主要业务操作   | `btn-solid theme-primary`   | 保存、开始处理、生成笔记、发送         |
 | 其他业务操作   | `btn-solid theme-secondary` | 停止、暂停、取消排队、编辑条目         |
-| 删除数据或凭据 | `btn-solid theme-danger`    | 删除板书、删除笔记、删除模型、移除凭据 |
-| 非业务操作     | `btn-outline`               | 打开课程、切换视图、刷新、查看日志     |
+| 删除数据或凭据 | `btn-solid theme-danger`    | 删除板书、删除笔记、删除模型、删除凭据 |
+| 非业务操作     | `btn-outline`               | 打开课次、切换视图、刷新、查看日志     |
 | 低强调辅助控件 | `btn-text theme-secondary`  | 折叠、关闭面板、取消表单               |
 
 - 每个独立操作组最多 1 个主操作，同组按钮使用同一尺寸．表格和重复列表操作使用 `btn-sm`．
-- 外观与颜色分别选择．`outline` 不限定颜色：「打开课程」「打开笔记」是对应页面的主要入口，使用 `btn-outline theme-primary`；普通刷新和辅助入口可用 `theme-secondary`．
+- 外观与颜色分别选择．`outline` 不限定颜色：「打开课次」「打开完整笔记」是对应页面的主要入口，使用 `btn-outline theme-primary`；普通刷新和辅助入口可用 `theme-secondary`．
 - 颜色不能按按钮文字或 action 名自动推断．声明式控件通过 `class` 或 `button_class` 明确指定例外．
 - 通用业务操作默认使用 `solid secondary`，表单提交默认使用 `solid primary`．不能把同组的全部操作都设为主操作．
 - 停止、暂停、取消排队保留已有结果，使用 `solid secondary`．删除结果、删除凭据使用 `solid danger`．是否保留结果只决定危险色，不决定按钮外观．
@@ -232,6 +232,20 @@ Block：
 {"type": "tabs", "tabs": [{"title": "知识", "active": True, "blocks": [...],
                           "meta": {"doc_key": "knowledge", "path": "...", "owner": "summarize",
                                    "page_id": "reader:my-page", "selection_actions": [...]}}]}
+{"type": "disclosure", "id": "add-provider", "title": "添加提供方", "blocks": [...]}
+# expandable 表格的 rows[].details 为该行的编辑区 blocks
+{"type": "table", "id": "models", "expandable": True,
+ "columns": [{"key": "model", "label": "模型"}],
+ "rows": [{"id": "model-1", "model": "flash", "details": [...]}]}
+# editor=True 使用表格下方的编辑区；rows[].id 标识选中行，默认第一行
+# hide_single 在只有一个标签时隐藏标签栏；label 用于无障碍名称
+{"type": "tabs", "id": "providers", "label": "提供方", "hide_single": True,
+ "tabs": [{"id": "local", "title": "local", "blocks": [...]}]}
+# schema_form 根据字段约束生成对象表单，提交 context 与 definition
+{"type": "schema_form", "id": "provider-local", "title": "连接与凭据",
+ "schema": {"type": "object", "properties": {"baseUrl": {"type": "string"}}},
+ "value": {"baseUrl": "http://localhost:8080/v1"}, "context": {"provider": "local"},
+ "submit": {"action": "llm.definition.save", "label": "保存"}}
 {"type": "progress", "value": 0.42, "label": "处理进度"}
 # 切换开关时，action 的 values 包含 {"enabled": true/false}
 {"type": "switch", "label": "分段笔记", "checked": True,
@@ -243,8 +257,8 @@ Block：
  "path": "/data/sessions/<sid>/notes/note_knowledge.md",
  "delete_action": "reader.qa_delete", "collapse_action": "reader.qa_collapse"}
 # player：两路视频（m3u8 走 hls.js，flv 走 mpegts.js，其余原生播放）
-{"type": "player", "sources": [{"key": "main", "label": "课堂", "src": "https://.../main.m3u8"},
-                              {"key": "screen", "label": "屏幕", "src": "...", "muted": True}],
+{"type": "player", "sources": [{"key": "main", "label": "课堂画面", "src": "https://.../main.m3u8"},
+                              {"key": "screen", "label": "屏幕画面", "src": "...", "muted": True}],
  "live": False, "processing": False, "finished": False, "queued": False}
 ```
 
@@ -268,7 +282,7 @@ def device_login(payload: dict):
 
 浏览器是导航的唯一来源．`GET /api/ui/state` 接收 `page`、`class`、`doc` 和 JSON 数组 `pages` 查询参数．`POST /api/ui/action` 的请求体必须包含同名字段组成的 `navigation` 对象．页面打开、关闭接口也接收 `{navigation: {...}}`．命令响应返回目标 `navigation`，浏览器负责更新 URL．服务端不保存导航，UI 状态响应不能覆盖浏览器导航．
 
-插件在 UI 请求内通过 `core.navigation.current_navigation()` 读取临时导航．`ctx.ui.open_page()`、`close_page()` 和 `show_home()` 只修改该请求的导航．这些方法不能为后台任务保存选择．后台工作必须使用显式课程 ID、文稿路径和任务 ID．`StreamHub` 只管理媒体与处理会话，不提供所选课程接口．
+插件在 UI 请求内通过 `core.navigation.current_navigation()` 读取临时导航．`ctx.ui.open_page()`、`close_page()` 和 `show_home()` 只修改该请求的导航．这些方法不能为后台任务保存选择．后台工作必须使用显式课次 ID、文稿路径和任务 ID．`StreamHub` 只管理媒体与处理会话，不提供所选课次接口．
 
 Action 归属：
 
@@ -287,7 +301,7 @@ Action 归属：
              "label": "Agent", "status": "running", "blocks": []}]}
 ```
 
-发送 action 收到 `{agent_session_id, message, **send_values}`．笔记使用 `notes-pipeline.message`，`send_values` 包含课堂 `session_id`，由流水线判断是否恢复主写作．控件 ID、角色和 SDK 会话 ID 不得混用．
+发送 action 收到 `{agent_session_id, message, **send_values}`．笔记使用 `notes-pipeline.message`，`send_values` 包含处理会话的 `session_id`，由流水线判断是否恢复笔记写作．控件 ID、角色和 SDK 会话 ID 不得混用．
 
 ### 6.1 reader：选中菜单与内联问答
 
@@ -371,9 +385,9 @@ settings.set("my.api_key", "new")
 - `type=SettingType.ACTION, action="..."`：渲染为按钮，点击调用对应 UI action．
 - 设置变化发 `settings.changed`．
 
-LLM 设置使用独立的 `models.yml` 与 `roles.yml` 编辑区，不注册模型、密钥或 YAML 字符串的标量设置．两份文件保存在 `data_dir/llm_runtime/`，保存前一起检查．角色支持 `provider/model:level`、`@role` 和缺省继承 `default`．
+LLM 设置提供对象表单与原始 JSON 编辑区．配置保存在 `settings.json` 的 `llm.models`、`llm.roles` 中，提交后共用运行时校验．全部 8 个固定角色必须显式配置，继承使用 `@default`，多余或缺失角色均拒绝保存．SDK 所需文件只存在于临时工作区．
 
-API key 按提供方写入项目 OMP `AuthStorage`（`llm_runtime/credentials.db`）．OpenCode 登录、刷新和登出也使用同一凭据存储．无鉴权服务明确设置 `auth: none`．设置页不回显凭据，普通插件 secret 仍按上述接口管理．
+提供方凭据保存在 `auth.json` 的 `llm` 字段，运行时载入临时 `AuthStorage`．OpenCode 登录、刷新和登出即时保存凭据．无鉴权服务设置 `auth: none`．
 
 ## 8. Agent
 
@@ -431,7 +445,7 @@ agent.close(writer.id)
 
 `message(session_id, message)` 返回 `{accepted, reason?}`．消息只进入活动 run，立即中断目标回合并在同一任务中继续；`agent.run.ready` 表示开始接纳．关闭目标拒绝消息，不创建空会话．`cancel` 终止整个任务；`close` 取消执行并释放会话．SDK 保存模型历史，Python 的显示记录用于界面展示．
 
-`reopen(session_id, *, name, workspace, system_prompt, role, tools, meta)` 恢复已关闭的会话．指针或 transcript 缺失时失败，不回退到创建．业务所有者负责重新进入原任务流程；笔记流水线只恢复已发布主写作，完成分段、审阅和问答不恢复．
+`reopen(session_id, *, name, workspace, system_prompt, role, tools, meta)` 恢复已关闭的 Agent 会话．指针或 transcript 缺失时失败，不回退到创建．业务所有者负责重新进入原任务流程；笔记流水线只恢复已发布的笔记写作，已完成的分段笔记、笔记审阅和问答任务不恢复．
 
 `can_resume(session_id)` 返回 `(bool, reason)`：会话仍活动或运行时已无可用 transcript 时为 `False`．恢复前用它判断，不要直接读取运行时目录．
 

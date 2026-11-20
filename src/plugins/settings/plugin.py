@@ -288,7 +288,7 @@ class SettingsPlugin(Plugin):
         for key, value in values.items():
             if not isinstance(key, str):
                 continue
-            if key in {"models_yaml", "roles_yaml"}:
+            if key in {"models_json", "roles_json"}:
                 errors.append("模型配置必须通过「保存配置」保存")
                 continue
             spec = service.get_spec(key)

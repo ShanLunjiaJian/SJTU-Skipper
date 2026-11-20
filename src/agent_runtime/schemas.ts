@@ -204,15 +204,20 @@ const providerSchema = type({
   "[string]": "unknown",
 });
 export const modelsConfigurationSchema = type({
-  providers: type({ "[string]": providerSchema }).narrow(
-    (providers) => Object.keys(providers).length > 0,
-  ),
+  providers: type({ "[string]": providerSchema }),
   "[string]": "unknown",
 });
 export type ModelsConfiguration = typeof modelsConfigurationSchema.infer;
 export const rolesConfigurationSchema = type({
+  "+": "reject",
   default: nonemptyString,
-  "[string]": nonemptyString,
+  board_recognition: nonemptyString,
+  note_chunk: nonemptyString,
+  note_writer: nonemptyString,
+  note_review: nonemptyString,
+  ask_instant: nonemptyString,
+  ask_research: nonemptyString,
+  compaction: nonemptyString,
 });
 
 export const runtimeBootstrapSchema = type({
@@ -241,25 +246,14 @@ export const openCodeTokenResponseSchema = type({
 const emptyParams = type({ "+": "reject" }).default(() => ({}));
 const configurationParams = type({
   "+": "reject",
-  models: nonemptyString,
-  roles: nonemptyString,
+  models: nonemptyString.or(modelsConfigurationSchema),
+  roles: nonemptyString.or(rolesConfigurationSchema),
 });
-
-/** Model capability fields the configuration UI edits per model. */
-export const modelSettingsSchema = type({
-  "+": "reject",
-  id: nonemptyString,
-  "contextWindow?": "number.integer > 0",
-  "maxTokens?": "number.integer > 0",
-  "input?": type.enumerated("text", "image").array(),
-  "reasoning?": "boolean",
-});
-export type ModelSettings = typeof modelSettingsSchema.infer;
 
 const modelsSetParams = type({
   "+": "reject",
   provider: nonemptyString,
-  models: modelSettingsSchema.array(),
+  models: modelSchema.array(),
 });
 const providerSetParams = type({
   "+": "reject",

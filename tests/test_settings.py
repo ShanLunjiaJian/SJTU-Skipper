@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from config import load_config
 from core.agent_types import IpcMethod
 from core.ui import FormInputType
+from plugins.llm_core.settings_view import ROLE_TITLES
 from plugins.llm_core.plugin import CredentialType, ProviderAuth, ProviderSource
 from core.runtime import build_runtime
 from core.settings_spec import SECRET_MASK, SettingType, SettingsSpec
@@ -507,6 +509,7 @@ class ConfigurationRuntime:
             },
         }
         self.selectors = {
+            **{role: "@default" for role in ROLE_TITLES},
             "default": "lecture/example:high",
             "note_writer": "lecture/example:medium",
             "board_recognition": "lecture/example:off",
@@ -528,10 +531,7 @@ class ConfigurationRuntime:
                 "reasoning": False,
             },
         ]
-        self.configuration = {
-            "models_yaml": "providers: {}\n",
-            "roles_yaml": "default: lecture/example:high\n",
-        }
+        self.configuration = {}
 
     def _resolved(self, role: str) -> dict:
         selector = self.selectors.get(role, self.selectors["default"])
@@ -559,6 +559,21 @@ class ConfigurationRuntime:
             "selectors": dict(self.selectors),
             "roles": {role: self._resolved(role) for role in self.selectors},
             "usage": {},
+            "definitions": {
+                "models": {"providers": deepcopy(self.providers)},
+                "roles": dict(self.selectors),
+            },
+            "definition_schema": {
+                "type": "object",
+                "properties": {"providers": {"additionalProperties": {
+                    "type": "object", "properties": {
+                        "models": {"type": "array", "items": {
+                            "type": "object", "properties": {"id": {"type": "string"}},
+                        }},
+                        "modelOverrides": {"type": "object", "additionalProperties": {"type": "object"}},
+                    },
+                }}},
+            },
         }
 
     def call(self, method: IpcMethod, **params):
@@ -566,9 +581,11 @@ class ConfigurationRuntime:
         if method == IpcMethod.CONFIGURE:
             if self.fail_configure:
                 raise ValueError("Invalid role selector")
-            self.configuration.update(
-                models_yaml=params["models"], roles_yaml=params["roles"]
-            )
+            if isinstance(params["models"], dict):
+                self.providers = deepcopy(params["models"]["providers"])
+                self.selectors = dict(params["roles"])
+            else:
+                self.configuration.update(models=params["models"], roles=params["roles"])
         elif method == IpcMethod.CATALOG:
             return self._catalog()
         elif method == IpcMethod.INFO:
@@ -600,9 +617,13 @@ class ConfigurationRuntime:
             provider = self.providers[params["provider"]]
             provider["models"] = [dict(m) for m in params["models"]]
         elif method == IpcMethod.ROLE_SET:
+            if params["role"] == "board_recognition" and params["selector"] == "opencode/flash:off":
+                raise ValueError("board_recognition requires image input")
             self.selectors[params["role"]] = params["selector"]
-        elif method == IpcMethod.CREDENTIALS:
+        elif method in (IpcMethod.CREDENTIALS, IpcMethod.IMPORT_CREDENTIALS):
             self.providers[params["provider"]]["configured"] = True
+        elif method == IpcMethod.LOGOUT:
+            self.providers[params["provider"]]["configured"] = False
         return self._catalog()
 
     def close(self):
@@ -629,6 +650,13 @@ def llm_tabs(runtime) -> dict[str, list[dict]]:
     return {tab["title"]: tab["blocks"] for tab in nested}
 
 
+def model_blocks(runtime, provider="lecture"):
+    return next(
+        tab["blocks"] for tab in llm_tabs(runtime)["模型"][0]["tabs"]
+        if tab["title"] == provider
+    )
+
+
 def _table(blocks, action=None) -> dict:
     tables = [block for block in blocks if block["type"] == "table"]
     if action is None:
@@ -648,39 +676,22 @@ def _form(blocks, action: str) -> dict:
     )
 
 
-def test_external_yaml_editors_save_without_settings_copies(tmp_path, monkeypatch):
+def test_raw_json_saves_objects(tmp_path, monkeypatch):
     runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
     try:
-        tabs = llm_tabs(runtime)
-        editors = _form(tabs["原始配置"], "llm.configure")
-        assert {field["name"] for field in editors["fields"]} == {
-            "models_yaml",
-            "roles_yaml",
-        }
-        assert all(
-            field["input"] == FormInputType.TEXTAREA for field in editors["fields"]
-        )
-
+        definition = backend._catalog()["definitions"]
+        models = definition["models"]
+        models["providers"]["lecture"]["models"][0]["maxTokens"] = 7000
         result = runtime.ui.dispatch_action(
             "llm.configure",
-            {
-                "values": {
-                    "models_yaml": "providers: {lecture: {}}\n",
-                    "roles_yaml": "default: lecture/example\n",
-                }
-            },
+            {"values": {
+                "models_json": json.dumps(models),
+                "roles_json": json.dumps(definition["roles"]),
+            }},
         )
-        assert result.ok
-        assert backend.calls[-1] == (
-            IpcMethod.CONFIGURE,
-            {
-                "models": "providers: {lecture: {}}\n",
-                "roles": "default: lecture/example\n",
-            },
-        )
-        service = runtime.services.require("settings")
-        assert "models_yaml" not in service.all()
-        assert "roles_yaml" not in service.all()
+        assert result.ok, result.message
+        assert backend.providers["lecture"]["models"][0]["maxTokens"] == 7000
+        assert backend.selectors == definition["roles"]
     finally:
         runtime.stop()
 
@@ -720,7 +731,7 @@ def test_endpoint_check_reports_gaps_then_adds_selected_models(tmp_path, monkeyp
         assert backend.calls[-1][0] == IpcMethod.DISCOVER
         assert not any(call[0] == IpcMethod.MODELS_SET for call in backend.calls)
 
-        blocks = llm_tabs(runtime)["模型"]
+        blocks = model_blocks(runtime)
         table = _table(blocks, "llm.model.add")
         assert [row["model"] for row in table["rows"]] == ["extra", "plain"]
         assert table["rows"][0]["context"] == "100K"
@@ -734,7 +745,7 @@ def test_endpoint_check_reports_gaps_then_adds_selected_models(tmp_path, monkeyp
         assert [model["id"] for model in params["models"]] == ["example", "extra"]
         assert params["models"][1]["contextWindow"] == 100000
 
-        blocks = llm_tabs(runtime)["模型"]
+        blocks = model_blocks(runtime)
         assert "1 个尚未添加" in json.dumps(blocks, ensure_ascii=False)
         everything = runtime.ui.dispatch_action(
             "llm.model.add_all", {"values": {"provider": "lecture"}}
@@ -770,7 +781,7 @@ def test_endpoint_check_failure_is_shown_inline(tmp_path, monkeypatch):
         )
         assert not result.ok
         assert "HTTP 401" in result.message
-        blocks = llm_tabs(runtime)["模型"]
+        blocks = model_blocks(runtime)
         assert any(
             "检查失败" in block.get("text", "")
             for block in blocks
@@ -780,50 +791,24 @@ def test_endpoint_check_failure_is_shown_inline(tmp_path, monkeypatch):
         runtime.stop()
 
 
-def test_model_page_selects_then_edits_one_model(tmp_path, monkeypatch):
+def test_model_edit_preserves_definition(tmp_path, monkeypatch):
     runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
     try:
-        blocks = llm_tabs(runtime)["模型"]
-        table = _table(blocks, "llm.select.model")
-        assert [row["model"] for row in table["rows"]] == ["example"]
-        assert table["rows"][0]["context"] == "32K"
-        assert table["rows"][0]["roles"] == "default、board_recognition、note_writer"
-        editor = _form(blocks, "llm.model.save")
-        values = {field["name"]: field["value"] for field in editor["fields"]}
-        assert values["model"] == "example"
-        assert values["context_window"] == 32000
-
-        runtime.ui.dispatch_action(
-            "llm.select.model", {"values": {"provider": "opencode", "model": "flash"}}
+        backend.providers["opencode"]["models"][0]["headers"] = {"X-Route": "lecture"}
+        blocks = model_blocks(runtime, "opencode")
+        table = _table(blocks)
+        editor = table["rows"][0]["details"][0]
+        definition = deepcopy(editor["value"])
+        definition["contextWindow"] = 123000
+        del definition["reasoning"]
+        result = runtime.ui.dispatch_action(
+            "llm.definition.save",
+            {"values": {**editor["context"], "definition": definition}},
         )
-        blocks = llm_tabs(runtime)["模型"]
-        editor = _form(blocks, "llm.model.save")
-        values = {field["name"]: field["value"] for field in editor["fields"]}
-        assert (values["provider"], values["model"]) == ("opencode", "flash")
-        assert values["context_window"] == 200000
-
-        saved = runtime.ui.dispatch_action(
-            "llm.model.save",
-            {
-                "values": {
-                    "provider": "opencode",
-                    "model": "flash",
-                    "context_window": 123000,
-                    "max_tokens": 9000,
-                    "input_text": True,
-                    "input_image": True,
-                    "reasoning": False,
-                }
-            },
-        )
-        assert saved.ok, saved.message
-        assert backend.providers["opencode"]["models"][0] == {
-            "id": "flash",
-            "contextWindow": 123000,
-            "maxTokens": 9000,
-            "input": ["text", "image"],
-            "reasoning": False,
-        }
+        assert result.ok, result.message
+        assert backend.providers["opencode"]["models"][0] == definition
+        assert definition["headers"] == {"X-Route": "lecture"}
+        assert backend.providers["lecture"]["models"][0]["contextWindow"] == 32000
     finally:
         runtime.stop()
 
@@ -859,14 +844,12 @@ def test_model_delete_is_blocked_while_roles_use_it(tmp_path, monkeypatch):
         runtime.stop()
 
 
-def test_role_page_selects_then_edits_one_role(tmp_path, monkeypatch):
+def test_role_edit_uses_fixed_role_row(tmp_path, monkeypatch):
     runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
     try:
-        runtime.ui.dispatch_action(
-            "llm.select.role", {"values": {"role": "note_writer"}}
-        )
-        blocks = llm_tabs(runtime)["角色"]
-        editor = _form(blocks, "llm.role.save")
+        table = _table(llm_tabs(runtime)["角色"])
+        row = next(row for row in table["rows"] if row["role"] == "note_writer")
+        editor = row["details"][0]
         values = {field["name"]: field["value"] for field in editor["fields"]}
         assert (values["role"], values["level"]) == ("note_writer", "medium")
 
@@ -899,7 +882,21 @@ def test_role_page_selects_then_edits_one_role(tmp_path, monkeypatch):
         runtime.stop()
 
 
-def test_invalid_yaml_keeps_effective_configuration(tmp_path, monkeypatch):
+@pytest.mark.parametrize("selector", ["@default", "@note_writer", "lecture/example"])
+def test_role_without_thinking_suffix(tmp_path, monkeypatch, selector):
+    runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        result = runtime.ui.dispatch_action(
+            "llm.role.save",
+            {"values": {"role": "ask_instant", "model": selector, "level": ""}},
+        )
+        assert result.ok, result.message
+        assert backend.selectors["ask_instant"] == selector
+    finally:
+        runtime.stop()
+
+
+def test_invalid_json_keeps_effective_configuration(tmp_path, monkeypatch):
     runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
     try:
         previous = dict(backend.configuration)
@@ -908,13 +905,13 @@ def test_invalid_yaml_keeps_effective_configuration(tmp_path, monkeypatch):
             "llm.configure",
             {
                 "values": {
-                    "models_yaml": "broken",
-                    "roles_yaml": "invalid",
+                    "models_json": "broken",
+                    "roles_json": "invalid",
                 }
             },
         )
         assert not result.ok
-        assert "Invalid role selector" in result.message
+        assert "JSON" in result.message
         assert backend.configuration == previous
         assert runtime.services.require("settings").all() == {}
     finally:
@@ -998,6 +995,14 @@ def test_device_login_imports_oauth_into_runtime(tmp_path, monkeypatch):
                 },
             },
         ) in backend.calls
+        rows = next(block for block in llm_tabs(runtime)["提供方"] if block["type"] == "table")["rows"]
+        oauth = next(row for row in rows if row["id"] == "opencode")
+        assert [action["action"] for action in oauth["actions"]] == ["llm.logout"]
+        again = runtime.ui.dispatch_action(
+            "llm.opencode_login", {"values": {"provider": "opencode", "force": True}}
+        )
+        assert not again.ok
+        assert state["started"] == 1
         assert plugin._login is None
         blocks = llm_tabs(runtime)["提供方"]
         assert "已关联 OpenCode 套餐" in json.dumps(blocks, ensure_ascii=False)
@@ -1007,6 +1012,9 @@ def test_device_login_imports_oauth_into_runtime(tmp_path, monkeypatch):
         )
         assert result.ok
         assert backend.calls[-1] == (IpcMethod.LOGOUT, {"provider": "opencode"})
+        rows = next(block for block in llm_tabs(runtime)["提供方"] if block["type"] == "table")["rows"]
+        oauth = next(row for row in rows if row["id"] == "opencode")
+        assert [action["action"] for action in oauth["actions"]] == ["llm.opencode_login"]
     finally:
         runtime.stop()
 

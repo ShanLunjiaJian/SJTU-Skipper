@@ -17,6 +17,11 @@ import {
   type PersistenceSnapshot,
 } from "./schemas";
 
+const fixedRoles = (defaultSelector: string): Record<string, string> =>
+  Object.fromEntries(Object.values(AgentRole).map(role => [
+    role, role === AgentRole.DEFAULT ? defaultSelector : "@default",
+  ]));
+
 test("first request creates missing runtime configuration", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "runtime-init-"));
   const root = path.join(directory, "missing");
@@ -80,7 +85,7 @@ async function persistenceFixture(credentials: AuthStorageData = {}) {
           },
         },
       },
-      roles: { default: "local/proof:off" },
+      roles: fixedRoles("local/proof:off"),
       credentials,
     },
     "runtime bootstrap",
@@ -104,6 +109,91 @@ async function persistenceFixture(credentials: AuthStorageData = {}) {
     },
   };
 }
+
+test("last provider deletion persists an unconfigured state", async () => {
+  const fixture = await persistenceFixture();
+  let restored: Runtime | undefined;
+  try {
+    const before = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
+    const removed = await fixture.runtime.dispatch(
+      IpcMethod.PROVIDER_REMOVE, { provider: "local" }, fixture.emit,
+    );
+    expect(removed.providers).toEqual([]);
+    expect(removed.roles).toEqual({});
+    expect(removed.selectors).toEqual(before.selectors);
+    const settings = fixture.snapshots.at(-1)!.settings!;
+    expect(settings.models.providers).toEqual({});
+    await fixture.runtime.close();
+    restored = new Runtime(fixture.root, { ...settings, save: () => {} });
+    expect((await restored.dispatch(IpcMethod.CATALOG, {}, fixture.emit)).providers).toEqual([]);
+    expect((await restored.dispatch(IpcMethod.INFO, {}, fixture.emit)).roles).toEqual({});
+    await expect(restored.dispatch(IpcMethod.GENERATE, {
+      role: AgentRole.DEFAULT,
+      messages: [{ role: "user", content: "Read" }],
+    }, fixture.emit)).rejects.toThrow("No providers configured");
+    const added = await restored.dispatch(IpcMethod.CONFIGURE, {
+      models: before.definitions.models, roles: before.definitions.roles,
+    }, fixture.emit);
+    expect(added.providers.map((provider) => provider.id)).toEqual(["local"]);
+    expect(added.roles.default.model).toBe("proof");
+  } finally {
+    await restored?.close();
+    await fixture.close();
+  }
+});
+
+test("object configuration preserves raw definitions and fixed role suffixes", async () => {
+  const fixture = await persistenceFixture();
+  try {
+    const initial = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
+    const models = initial.definitions.models;
+    models.providers.local.headers = { "X-Test": "preserved" };
+    models.providers.local.models[0].compat = {
+      extraBody: { nested: { enabled: true }, optional: null },
+    };
+    const roles = { ...fixedRoles("local/proof"), note_writer: "@default:high", note_chunk: "@note_writer" };
+    validate(ipcRequestSchema, {
+      id: "configure-object",
+      method: IpcMethod.CONFIGURE,
+      params: { models, roles },
+    }, "object configuration");
+    await fixture.runtime.dispatch(IpcMethod.CONFIGURE, { models, roles }, fixture.emit);
+    const catalog = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
+    expect(catalog.definitions).toEqual({ models, roles });
+    expect(catalog.definition_schema).toHaveProperty("properties.providers");
+    expect(catalog.roles.note_writer.thinkingLevel).toBe("high");
+    expect(catalog.roles.note_chunk).toEqual(catalog.roles.note_writer);
+    expect(catalog.selectors.default).toBe("local/proof");
+    const rows = structuredClone(models.providers.local.models);
+    rows[0].name = "Renamed";
+    await fixture.runtime.dispatch(IpcMethod.MODELS_SET, {
+      provider: "local", models: rows,
+    }, fixture.emit);
+    const edited = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
+    expect(edited.definitions.models.providers.local.models).toEqual(rows);
+    expect(edited.definitions.models.providers.local.headers).toEqual({ "X-Test": "preserved" });
+    await fixture.runtime.dispatch(IpcMethod.ROLE_SET, {
+      role: AgentRole.NOTE_REVIEW, selector: "@note_writer:low",
+    }, fixture.emit);
+    const updated = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
+    expect(updated.definitions.roles.note_review).toBe("@note_writer:low");
+    await expect(fixture.runtime.dispatch(IpcMethod.CONFIGURE, {
+      models, roles: { ...roles, note_writer: "@note_chunk:high", note_chunk: "@note_writer" },
+    }, fixture.emit)).rejects.toThrow("Invalid role alias");
+    await expect(fixture.runtime.dispatch(IpcMethod.CONFIGURE, {
+      models, roles: { ...roles, custom: "@default" },
+    }, fixture.emit)).rejects.toThrow();
+    await expect(fixture.runtime.dispatch(IpcMethod.CONFIGURE, {
+      models, roles: { ...roles, note_writer: "@missing" },
+    }, fixture.emit)).rejects.toThrow("Invalid role alias");
+    await expect(fixture.runtime.dispatch(IpcMethod.CONFIGURE, {
+      models, roles: { default: "local/proof" },
+    }, fixture.emit)).rejects.toThrow();
+  } finally {
+    await fixture.close();
+  }
+});
+
 
 test("bootstrap preserves accounts without emitting secrets", async () => {
   const credentials: AuthStorageData = {
@@ -415,7 +505,7 @@ test("generation honors disabled thinking", async () => {
             },
           },
         }),
-        roles: "default: deepseek/deepseek-flash:off",
+        roles: Bun.YAML.stringify(fixedRoles("deepseek/deepseek-flash:off")),
       },
       () => {},
     );
@@ -523,7 +613,7 @@ async function localRuntime(respond: (body: ModelRequest) => Response | Promise<
           },
         },
       }),
-      roles: "default: local/proof:off",
+      roles: Bun.YAML.stringify(fixedRoles("local/proof:off")),
     },
     () => {},
   );
@@ -2001,7 +2091,7 @@ async function catalogFixture() {
           },
         },
       }),
-      roles: "default: local/proof:off\nnote_writer: second/plain:high\n",
+      roles: Bun.YAML.stringify({ ...fixedRoles("local/proof:off"), note_writer: "second/plain:high" }),
     },
     () => {},
   );
@@ -2027,7 +2117,7 @@ test("catalog reports structured providers, models and selectors", async () => {
         contextWindow: 8_000,
         maxTokens: 1_000,
         input: ["text", "image"],
-        reasoning: false,
+        compat: { supportsDeveloperRole: false },
       },
     ]);
     expect(catalog.selectors.default).toBe("local/proof:off");
@@ -2042,7 +2132,7 @@ test("catalog reports structured providers, models and selectors", async () => {
   }
 });
 
-test("models_set edits capabilities and keeps unedited model fields", async () => {
+test("models_set replaces complete model definitions", async () => {
   const fixture = await catalogFixture();
   try {
     const catalog = (await fixture.runtime.dispatch(
@@ -2070,8 +2160,8 @@ test("models_set edits capabilities and keeps unedited model fields", async () =
         reasoning: true,
       },
     ]);
-    expect(catalog.models_yaml).toContain("supportsDeveloperRole: false");
-    expect(catalog.models_yaml).toContain("contextWindow: 200000");
+    expect(catalog.definitions.models.providers.local.models[0]).toEqual(catalog.providers[0].models[0]);
+    expect(catalog.definitions.models.providers.local.models[0].compat).toBeUndefined();
   } finally {
     await fixture.close();
   }

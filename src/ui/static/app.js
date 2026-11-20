@@ -36,9 +36,11 @@
     BUTTONS: "buttons",
     FORM: "form",
     LOG: "log",
+    SCHEMA_FORM: "schema_form",
     IMAGE: "image",
     VIDEO: "video",
     TABS: "tabs",
+    DISCLOSURE: "disclosure",
     PLAYER: "player",
     SWITCH: "switch",
     QA: "qa",
@@ -464,28 +466,65 @@
     return pre;
   }
 
-  function renderTable(block) {
-    const wrap = el("div", { class: "table-responsive" });
-    const table = el("table", { class: "table table-hover align-middle" });
+  function renderDisclosure(block, existing = null) {
+    const details = existing || el("details", { class: "disclosure" }, [
+      el("summary"),
+      el("div", { class: "disclosure-body" }),
+    ]);
+    if (!existing) details.open = Boolean(block.open);
+    details.firstElementChild.textContent = block.title || "";
+    updateBlocks(details.lastElementChild, block.blocks || []);
+    details._deferred = details.lastElementChild._deferred;
+    return details;
+  }
+
+  function renderTable(block, existing = null) {
+    const wrap = existing || el("div", { class: "table-block" }, [
+      el("div", { class: "table-responsive" }, [
+        el("table", { class: "table table-hover align-middle" }, [el("thead"), el("tbody")]),
+      ]),
+      el("p", { class: "fg-2 p-3", text: "暂无数据" }),
+      el("div", { class: "table-editor" }),
+    ]);
+    const table = wrap.firstElementChild.firstElementChild;
+    const [thead, tbody] = table.children;
     const columns = Array.isArray(block.columns) ? block.columns : [];
     const rows = Array.isArray(block.rows) ? block.rows : [];
+    table.classList.toggle("table-shared-editor", Boolean(block.editor));
     const rowActions = Array.isArray(block.row_actions) ? block.row_actions : [];
-
+    const sharedEditor = Boolean(block.editor);
+    const editorHost = wrap.children[2];
+    editorHost.hidden = !sharedEditor;
+    const selectedKey = rows.some((row) => row.id === wrap._selectedRow)
+      ? wrap._selectedRow : rows[0]?.id;
+    wrap._selectedRow = selectedKey;
+    const selectRow = (id) => {
+      wrap._selectedRow = id;
+      for (const row of tbody.children) {
+        const selected = row._rowKey === id;
+        row.classList.toggle("editing-row", sharedEditor && selected);
+        row.querySelector("[data-edit-row]")?.setAttribute("aria-pressed", String(selected));
+      }
+      for (const panel of editorHost.children) panel.hidden = panel.dataset.row !== id;
+    };
+    const previous = new Map(Array.from(tbody.children)
+      .filter((row) => row._rowKey !== undefined).map((row) => [row._rowKey, row]));
+    const wanted = new Set();
     const colLabel = (c) => (typeof c === "string" ? c : (c.label ?? c.key ?? ""));
     const colKey = (c, i) => (typeof c === "string" ? c : (c.key ?? i));
-    const thead = el("thead");
-    const tr = el("tr");
-    for (const c of columns) tr.appendChild(el("th", { scope: "col", text: colLabel(c) }));
-    if (rowActions.length) tr.appendChild(el("th", { text: "操作" }));
-    thead.appendChild(tr);
-    table.appendChild(thead);
-
-    const tbody = el("tbody");
-    for (const row of rows) {
+    const headRow = el("tr");
+    for (const c of columns) headRow.appendChild(el("th", { scope: "col", text: colLabel(c) }));
+    if (rowActions.length || sharedEditor) headRow.appendChild(el("th", { scope: "col", text: "操作" }));
+    thead.replaceChildren(headRow);
+    const ordered = [];
+    rows.forEach((row, index) => {
       const rowObj = Array.isArray(row)
         ? Object.fromEntries(columns.map((c, i) => [colKey(c, i), row[i]]))
         : row || {};
-      const tr = el("tr");
+      const key = rowObj.id ?? rowObj.key ?? index;
+      const tr = previous.get(key) || el("tr");
+      tr._rowKey = key;
+      tr.replaceChildren();
       for (let i = 0; i < columns.length; i += 1) {
         const c = columns[i];
         const key = colKey(c, i);
@@ -493,31 +532,92 @@
         if (typeof value === "object" && value !== null) value = JSON.stringify(value);
         tr.appendChild(el("td", { text: value ?? "" }));
       }
-      if (rowActions.length) {
+      if (rowActions.length || sharedEditor) {
         const td = el("td", { class: "text-nowrap" });
-        for (const action of rowActions) {
+        if (sharedEditor) {
+          const button = el("button", {
+            type: "button", class: "btn-text theme-secondary btn-sm",
+            "aria-label": `编辑 ${rowObj.title || rowObj.model || rowObj.role || key}`,
+            title: `编辑 ${rowObj.title || rowObj.model || rowObj.role || key}`,
+            "aria-pressed": String(key === selectedKey), "data-edit-row": "",
+          });
+          // Bootstrap Icons: pencil-square.
+          button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M15.502 1.94a.5.5 0 0 1 0 .706L14.459 3.69l-2-2L13.502.646a.5.5 0 0 1 .707 0l1.293 1.293zm-1.75 2.456-2-2L4.939 9.21a.5.5 0 0 0-.121.196l-.805 2.414a.25.25 0 0 0 .316.316l2.414-.805a.5.5 0 0 0 .196-.12l6.813-6.814z"/><path fill-rule="evenodd" d="M1 13.5A1.5 1.5 0 0 0 2.5 15h11a1.5 1.5 0 0 0 1.5-1.5v-6a.5.5 0 0 0-1 0v6a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5H9a.5.5 0 0 0 0-1H2.5A1.5 1.5 0 0 0 1 2.5z"/></svg>';
+          button.addEventListener("click", () => selectRow(key));
+          td.appendChild(button);
+        }
+        for (const action of [...(rowObj.actions || []), ...rowActions]) {
           let value = action.value ? { ...action.value } : {};
           if (Array.isArray(action.keys)) {
             for (const key of action.keys) value[key] = rowObj[key];
           } else if (!action.value) {
             value = { ...rowObj };
           }
-          td.appendChild(
-            actionButton(
-              action.label || "执行",
-              action.action,
-              value,
-              action.class || "btn-solid theme-secondary btn-sm",
-            ),
+          const button = actionButton(
+            action.label || "执行",
+            action.action,
+            value,
+            action.class || "btn-solid theme-secondary btn-sm",
           );
+          if (action.icon) {
+            const label = `${action.label || "执行"} ${rowObj.model || rowObj.title || key}`;
+            button.setAttribute("aria-label", label);
+            button.title = label;
+          }
+          if (action.icon === "trash") {
+            // Bootstrap Icons: trash.
+            button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/><path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/></svg>';
+          }
+          if (action.icon === "link") {
+            // Bootstrap Icons: link-45deg.
+            button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1 1 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4 4 0 0 1-.128-1.287z"/><path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243z"/></svg>';
+          }
+          if (action.icon === "key") {
+            // Bootstrap Icons: key.
+            button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8m4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5"/><path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0"/></svg>';
+          }
+          const before = rowObj.actions?.includes(action) ? td.querySelector("[data-edit-row]") : null;
+          td.insertBefore(button, before);
         }
         tr.appendChild(td);
       }
-      tbody.appendChild(tr);
+      wanted.add(tr);
+      ordered.push(tr);
+      if (sharedEditor) {
+        let panel = Array.from(editorHost.children).find((node) => node.dataset.row === key);
+        if (!panel) {
+          panel = el("div", { dataset: { row: key } });
+          editorHost.appendChild(panel);
+        }
+        updateBlocks(panel, rowObj.details || []);
+      }
+      if (block.expandable && Array.isArray(rowObj.details)) {
+        if (!tr._detailsRow) tr._detailsRow = el("tr", { class: "table-details" }, [el("td")]);
+        const cell = tr._detailsRow.firstElementChild;
+        cell.colSpan = Math.max(1, columns.length + (rowActions.length ? 1 : 0));
+        const title = rowObj.title || rowObj.name || rowObj.model || rowObj.role || rowObj.id || "";
+        const disclosure = renderDisclosure({ title: `编辑 ${title}`, blocks: rowObj.details },
+          cell.firstElementChild);
+        if (!cell.firstElementChild) cell.appendChild(disclosure);
+        wanted.add(tr._detailsRow);
+        ordered.push(tr._detailsRow);
+      }
+    });
+    ordered.forEach((row, index) => {
+      if (tbody.children[index] !== row) moveActivityNode(tbody, row, tbody.children[index] || null);
+    });
+    for (const row of Array.from(tbody.children)) {
+      if (wanted.has(row)) continue;
+      destroyPlayers(row);
+      row.remove();
     }
-    table.appendChild(tbody);
-    wrap.appendChild(table);
-    if (!rows.length) wrap.appendChild(el("p", { class: "fg-2 p-3", text: "暂无数据" }));
+    wrap.children[1].hidden = Boolean(rows.length);
+    if (sharedEditor) {
+      for (const panel of Array.from(editorHost.children))
+        if (!rows.some((row) => row.id === panel.dataset.row)) panel.remove();
+      selectRow(selectedKey);
+    }
+    wrap._deferred = ordered.some((row) => row.firstElementChild?.firstElementChild?._deferred);
     return wrap;
   }
 
@@ -890,6 +990,315 @@
     };
     applyVisibility();
     form.addEventListener("change", applyVisibility);
+    for (const control of Array.from(form.elements)) {
+      if (control.name)
+        control._initialValue = control.type === FIELD_INPUT.CHECKBOX
+          ? control.checked : control.value;
+    }
+    return form;
+  }
+
+  function retainFormDraft(previous, replacement) {
+    const controls = new Map(
+      Array.from(replacement.elements)
+        .filter((control) => control.name)
+        .map((control) => [control.name, control]),
+    );
+    for (const control of Array.from(previous.elements)) {
+      const target = controls.get(control.name);
+      if (!target || control.type === "hidden") continue;
+      const value = control.type === FIELD_INPUT.CHECKBOX ? control.checked : control.value;
+      if (value === control._initialValue) continue;
+      if (target.type === FIELD_INPUT.CHECKBOX) target.checked = value;
+      else target.value = value;
+    }
+    replacement.dispatchEvent(new Event("change"));
+  }
+
+  function renderSchemaForm(block, existing = null) {
+    const form = existing || el("form", { class: "settings-form schema-form" });
+    form._schemaBlock = block;
+    if (existing && (form._dirty || form._saving || form._schemaSignature === JSON.stringify(block)))
+      return form;
+    form._schemaSignature = JSON.stringify(block);
+    const disclosureStates = new Map(Array.from(form.querySelectorAll("details[data-path]"),
+      (details) => [details.dataset.path, details.open]));
+    form.replaceChildren();
+    const rootSchema = block.schema || {};
+    const resolve = (schema) => {
+      if (!schema || typeof schema !== "object") return {};
+      if (schema.$ref?.startsWith("#/")) {
+        let target = rootSchema;
+        for (const part of schema.$ref.slice(2).split("/"))
+          target = target?.[part.replace(/~1/g, "/").replace(/~0/g, "~")];
+        return { ...resolve(target), ...Object.fromEntries(Object.entries(schema)
+          .filter(([key]) => key !== "$ref")) };
+      }
+      if (schema.allOf) {
+        const merged = { ...schema, properties: { ...schema.properties }, required: [...(schema.required || [])] };
+        for (const item of schema.allOf) {
+          const part = resolve(item);
+          Object.assign(merged, part, { properties: { ...merged.properties, ...part.properties },
+            required: [...merged.required, ...(part.required || [])] });
+        }
+        delete merged.allOf;
+        return merged;
+      }
+      return schema;
+    };
+    const typeOf = (value) => value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+    const seed = (schema) => {
+      schema = resolve(schema);
+      if (schema.default !== undefined) return structuredClone(schema.default);
+      if (schema.const !== undefined) return structuredClone(schema.const);
+      if (schema.enum) return schema.enum[0];
+      if (schema.anyOf || schema.oneOf) return seed((schema.anyOf || schema.oneOf)[0]);
+      const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
+      return type === "object" || schema.properties ? {} : type === "array" ? []
+        : type === "number" || type === "integer" ? 0 : type === "boolean" ? false
+          : type === "null" ? null : "";
+    };
+    const localButton = (label, callback) => {
+      const button = el("button", { type: "button", class: "btn-solid theme-secondary btn-sm", text: label });
+      button.addEventListener("click", () => { callback(); form._dirty = true; });
+      return button;
+    };
+    const field = (rawSchema, value, title, optional = false, path = title) => {
+      let schema = resolve(rawSchema);
+      const alternatives = schema.oneOf || schema.anyOf;
+      if (alternatives?.length && alternatives.every((item) => resolve(item).const !== undefined)) {
+        schema = { ...schema, enum: alternatives.map((item) => resolve(item).const) };
+        delete schema.oneOf;
+        delete schema.anyOf;
+      }
+      if (schema["x-hidden"]) return { node: null, read: () => value };
+      const box = el("fieldset", { class: "schema-field", dataset: { path } });
+      const legend = el("legend", { text: schema.title || title });
+      box.appendChild(legend);
+      const body = el("fieldset", { class: "schema-field-body" });
+      const booleanField = schema.type === "boolean";
+      const grouped = schema.type === "object" || schema.type === "array" || schema.properties;
+      box.classList.toggle("schema-scalar", !grouped);
+      if (optional && grouped) {
+        const details = el("details", { class: "disclosure", dataset: { path } }, [
+          el("summary", { text: schema.title || title }),
+        ]);
+        details.open = disclosureStates.get(path) || false;
+        const content = el("div", { class: "disclosure-body" });
+        const enabled = el("input", { type: "checkbox", class: "check", dataset: { path: `${path}:enabled` } });
+        enabled.checked = value !== undefined;
+        const holder = el("div");
+        let child;
+        const mount = () => {
+          if (enabled.checked && !child) {
+            child = field(schema, value === undefined ? seed(schema) : value, title, false, path);
+            holder.appendChild(child.node);
+          }
+          holder.hidden = !enabled.checked;
+        };
+        content.append(el("label", { class: "schema-option" }, [enabled,
+          document.createTextNode("启用")]), holder);
+        details.appendChild(content);
+        enabled.addEventListener("change", mount);
+        details.addEventListener("toggle", () => { if (details.open) mount(); });
+        if (details.open) mount();
+        return { node: details, read: () => !enabled.checked ? undefined : child ? child.read()
+          : value === undefined ? seed(schema) : value };
+      }
+      let omitted = null;
+      if (optional && !booleanField) {
+        omitted = el("input", { type: "checkbox", class: "check" });
+        omitted.checked = grouped ? value !== undefined : value === undefined;
+        const label = el("label", { class: "schema-option" }, [omitted,
+          document.createTextNode(grouped ? "启用" : "使用默认值")]);
+        box.appendChild(label);
+        const disabled = () => grouped ? !omitted.checked : omitted.checked;
+        body.disabled = disabled();
+        omitted.addEventListener("change", () => { body.disabled = disabled(); });
+      }
+      if (schema.description) box.appendChild(el("p", { class: "form-text", text: schema.description }));
+      box.appendChild(body);
+      let read;
+      const branches = schema.oneOf || schema.anyOf || (Array.isArray(schema.type)
+        ? schema.type.map((type) => ({ ...schema, type })) : null);
+      const declaredType = schema.type || (schema.properties || schema.additionalProperties ? "object" : undefined);
+      if (branches || (!declaredType && !schema.enum && schema.const === undefined)) {
+        const options = branches || ["string", "number", "boolean", "null", "object", "array"]
+          .map((type) => ({ type }));
+        const selector = el("select", { class: "form-control", "aria-label": `${title} 类型` });
+        const initial = value === undefined ? seed(options[0]) : value;
+        const matches = (option) => {
+          const candidate = resolve(option);
+          return candidate.const !== undefined ? candidate.const === initial
+            : candidate.enum ? candidate.enum.includes(initial)
+              : (candidate.type || (candidate.properties ? "object" : undefined)) === typeOf(initial)
+                || (candidate.type === "integer" && Number.isInteger(initial));
+        };
+        let selected = Math.max(0, options.findIndex(matches));
+        options.forEach((option, index) => selector.appendChild(el("option", {
+          value: String(index), text: option.title || option.type || `选项 ${index + 1}`,
+        })));
+        selector.value = String(selected);
+        const holder = el("div");
+        let child;
+        const renderChoice = (nextValue) => {
+          child = field(options[selected], nextValue, title, false, path);
+          holder.replaceChildren(child.node);
+        };
+        renderChoice(initial);
+        selector.addEventListener("change", () => {
+          selected = Number(selector.value);
+          renderChoice(seed(options[selected]));
+        });
+        body.append(selector, holder);
+        read = () => child.read();
+      } else if (declaredType === "object") {
+        const object = value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+        const properties = schema.properties || {};
+        const fields = [];
+        for (const [key, property] of Object.entries(properties)) {
+          const child = field(property, object[key], key, !(schema.required || []).includes(key),
+            path ? `${path}.${key}` : key);
+          fields.push([key, child]);
+          if (child.node) body.appendChild(child.node);
+        }
+        const rows = [];
+        const list = el("div", { class: "schema-entries" });
+        const additional = typeof schema.additionalProperties === "object" ? schema.additionalProperties : {};
+        const addEntry = (key, entryValue) => {
+          const row = el("div", { class: "schema-entry" });
+          const keyInput = el("input", { class: "form-control", value: key, "aria-label": `${title} 参数名` });
+          const child = field(additional, entryValue, "参数值");
+          const entry = { row, keyInput, child };
+          rows.push(entry);
+          row.append(keyInput, child.node, localButton("删除", () => {
+            rows.splice(rows.indexOf(entry), 1); row.remove();
+          }));
+          list.appendChild(row);
+        };
+        for (const [key, entryValue] of Object.entries(object))
+          if (!Object.hasOwn(properties, key)) addEntry(key, entryValue);
+        if (schema.additionalProperties !== false || rows.length) {
+          body.append(el("h4", { class: "fs-md", text: Object.keys(properties).length ? "扩展参数" : title }), list);
+          body.appendChild(localButton("添加参数", () => addEntry("", seed(additional))));
+        }
+        read = () => {
+          const result = {};
+          for (const [key, child] of fields) {
+            const entryValue = child.read();
+            if (entryValue !== undefined) Object.defineProperty(result, key,
+              { value: entryValue, enumerable: true, writable: true, configurable: true });
+          }
+          for (const { keyInput, child } of rows) {
+            const key = keyInput.value;
+            if (Object.hasOwn(properties, key) || Object.hasOwn(result, key))
+              throw new Error(`${title} 的参数名重复：${key}`);
+            Object.defineProperty(result, key, { value: child.read(), enumerable: true,
+              writable: true, configurable: true });
+          }
+          return result;
+        };
+      } else if (declaredType === "array") {
+        const list = el("div", { class: "schema-entries" });
+        const entries = [];
+        const addItem = (itemValue) => {
+          const row = el("div", { class: "schema-entry" });
+          const child = field(schema.items || {}, itemValue, `${title} 项目`);
+          const entry = { row, child };
+          entries.push(entry);
+          const move = (direction) => {
+            const index = entries.indexOf(entry);
+            const target = index + direction;
+            if (target < 0 || target >= entries.length) return;
+            [entries[index], entries[target]] = [entries[target], entries[index]];
+            entries.forEach((item, position) => {
+              if (list.children[position] !== item.row) list.insertBefore(item.row, list.children[position] || null);
+            });
+          };
+          row.append(child.node, el("div", { class: "form-actions" }, [
+            localButton("上移", () => move(-1)), localButton("下移", () => move(1)),
+            localButton("删除", () => { entries.splice(entries.indexOf(entry), 1); row.remove(); }),
+          ]));
+          list.appendChild(row);
+        };
+        for (const item of Array.isArray(value) ? value : []) addItem(item);
+        body.append(list, localButton("添加项目", () => addItem(seed(schema.items || {}))));
+        read = () => entries.map((entry) => entry.child.read());
+      } else {
+        const options = schema.enum || (schema.const !== undefined ? [schema.const] : null);
+        let input;
+        if (options || declaredType === "boolean" || declaredType === "null") {
+          const values = options || (declaredType === "null" ? [null]
+            : optional ? [undefined, true, false] : [true, false]);
+          input = el("select", { class: "form-control", "aria-label": schema.title || title });
+          values.forEach((item, index) => input.appendChild(el("option", { value: String(index),
+            text: item === undefined ? "-" : typeof item === "string" ? item : JSON.stringify(item) })));
+          input.value = String(Math.max(0, values.findIndex((item) => item === value)));
+          read = () => values[Number(input.value)];
+        } else if (declaredType === "number" || declaredType === "integer") {
+          input = el("input", { type: "number", class: "form-control", "aria-label": schema.title || title,
+            step: declaredType === "integer" ? "1" : "any" });
+          if (value !== undefined) input.value = String(value);
+          if (schema.minimum !== undefined) input.min = String(schema.minimum);
+          if (schema.maximum !== undefined) input.max = String(schema.maximum);
+          read = () => {
+            if (!input.value.trim() || !Number.isFinite(Number(input.value)))
+              throw new Error(`${title} 需要填写数字．`);
+            return Number(input.value);
+          };
+        } else {
+          const multiline = schema["x-multiline"] || (typeof value === "string" && value.includes("\n"));
+          input = multiline
+            ? el("textarea", { class: "form-control", rows: 3, "aria-label": schema.title || title })
+            : el("input", { type: "text", class: "form-control", "aria-label": schema.title || title });
+          input.value = value === undefined ? "" : String(value);
+          read = () => input.value;
+        }
+        body.appendChild(input);
+        input.dataset.path = path;
+        input.name = path;
+      }
+      return { node: box, read: () => (omitted && (grouped ? !omitted.checked : omitted.checked))
+        ? undefined : read() };
+    };
+    if (block.title) form.appendChild(el("h3", { class: "settings-form-title", text: block.title }));
+    if (block.description) form.appendChild(el("p", { class: "form-description", text: block.description }));
+    const editor = field(rootSchema, block.value, block.title || "配置", false, "");
+    const status = el("p", { class: "form-text", role: "status", "aria-live": "polite" });
+    const save = el("button", { type: "submit", class: "btn-solid theme-primary",
+      text: block.submit?.label || "保存" });
+    form.append(editor.node, status, el("div", { class: "form-actions" }, [save]));
+    form._dirty = false;
+    if (!existing) {
+      form.addEventListener("input", () => { form._dirty = true; });
+      form.addEventListener("change", () => { form._dirty = true; });
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        await form._saveDefinition();
+      });
+    }
+    form._saveDefinition = async () => {
+      if (form._saving) return;
+      try {
+        const definition = editor.read();
+        const snapshot = JSON.stringify(definition);
+        const spec = form._schemaBlock;
+        form._saving = true;
+        save.disabled = true;
+        status.textContent = "正在保存";
+        const result = await postAction(spec.submit.action, { ...spec.context, definition });
+        if (result?.ok) {
+          form._dirty = JSON.stringify(editor.read()) !== snapshot;
+          status.textContent = "已保存";
+        } else status.textContent = result?.message || "保存失败，请修改后重试．";
+      } catch (error) {
+        status.textContent = `保存失败：${error.message}`;
+      } finally {
+        form._saving = false;
+        save.disabled = false;
+      }
+    };
     return form;
   }
 
@@ -912,7 +1321,9 @@
       "aria-orientation",
       block.layout === "settings" ? "vertical" : "horizontal",
     );
+    data.bar.setAttribute("aria-label", block.label || block.title || "Tabs");
     const tabs = block.tabs || [];
+    data.bar.hidden = Boolean(block.hide_single && tabs.length <= 1);
     const key =
       block.id || block.key || `tabs:${tabs.map((tab) => tab.title || "").join("\u0001")}`;
     const tabKey = (tab, index) => tab.id || tab.key || tab.title || `tab:${index}`;
@@ -1043,9 +1454,19 @@
           buttons[index].focus();
           buttons[index].click();
         });
+        button.addEventListener("focus", () => {
+          button.scrollIntoView({ block: "nearest", inline: "nearest" });
+        });
       }
       button._tab = tab;
       button.textContent = tab.title || `Tab ${index + 1}`;
+      if (data.bar.hidden) {
+        panel.removeAttribute("aria-labelledby");
+        panel.setAttribute("aria-label", tab.title || block.label || "Tab");
+      } else {
+        panel.removeAttribute("aria-label");
+        panel.setAttribute("aria-labelledby", button.id);
+      }
       const meta = tab.meta || {};
       panel.classList.toggle("prose", Boolean(meta.doc_key));
       panel.classList.toggle("w-100", Boolean(meta.doc_key));
@@ -1187,7 +1608,7 @@
     if (block.screen_missing) {
       grid.appendChild(
         el("div", { class: "col-12 xl:col-6" }, [
-          el("div", { class: "card p-3 fg-2", text: "该课程没有屏幕流" }),
+          el("div", { class: "card p-3 fg-2", text: "该课次没有屏幕流" }),
         ]),
       );
     }
@@ -1550,6 +1971,11 @@
         else if (block.type === BLOCK_TYPE.QA) renderQA(block, node);
         else if (block.type === BLOCK_TYPE.TABS) renderTabs(block, node.firstElementChild);
         else if (block.type === BLOCK_TYPE.CARDS) renderCards(block, node.firstElementChild);
+        else if (block.type === BLOCK_TYPE.DISCLOSURE)
+          renderDisclosure(block, node.firstElementChild);
+        else if (block.type === BLOCK_TYPE.TABLE) renderTable(block, node.firstElementChild);
+        else if (block.type === BLOCK_TYPE.SCHEMA_FORM)
+          renderSchemaForm(block, node.firstElementChild);
         else if (node._blockSignature !== signature) {
           const focused = document.activeElement;
           if (
@@ -1558,6 +1984,8 @@
             destroyPlayers(node);
             const replacement = renderBlock(block);
             if (replacement) {
+              if (block.type === BLOCK_TYPE.FORM)
+                retainFormDraft(node.firstElementChild, replacement.firstElementChild);
               node.replaceWith(replacement);
               node = replacement;
             }
@@ -1778,6 +2206,9 @@
           for (const tab of block.tabs || []) collect(tab.blocks, page);
         if (block.type === BLOCK_TYPE.CARDS)
           for (const item of block.items || []) collect(item.blocks, page);
+        if (block.type === BLOCK_TYPE.DISCLOSURE) collect(block.blocks, page);
+        if (block.type === BLOCK_TYPE.TABLE)
+          for (const row of block.rows || []) collect(row.details, page);
       }
     };
     for (const [page, blocks] of Object.entries(state.ui.page_content || {})) collect(blocks, page);
@@ -2137,7 +2568,7 @@
         const label =
           agent.label ||
           (agent.role === EXECUTION_ROLE.WRITER
-            ? "主写作"
+            ? "笔记写作"
             : agent.role === EXECUTION_ROLE.REVIEWER
               ? "笔记审阅"
               : agent.role) ||
@@ -2434,6 +2865,8 @@
     }
     if (type === BLOCK_TYPE.TABLE) return el("div", { class: "block" }, [renderTable(block)]);
     if (type === BLOCK_TYPE.CARDS) return el("div", { class: "block" }, [renderCards(block)]);
+    if (type === BLOCK_TYPE.DISCLOSURE)
+      return el("div", { class: "block" }, [renderDisclosure(block)]);
     if (type === BLOCK_TYPE.ROWS) return renderRows(block);
     if (type === BLOCK_TYPE.TREE) return el("div", { class: "block" }, [renderTree(block)]);
     if (type === BLOCK_TYPE.LIST) {
@@ -2469,6 +2902,8 @@
       return row;
     }
     if (type === BLOCK_TYPE.FORM) return el("div", { class: "block" }, [renderForm(block)]);
+    if (type === BLOCK_TYPE.SCHEMA_FORM)
+      return el("div", { class: "block" }, [renderSchemaForm(block)]);
     if (type === BLOCK_TYPE.LOG) return el("div", { class: "block" }, [renderLog(block)]);
     if (type === BLOCK_TYPE.IMAGE) {
       return el("div", { class: "block" }, [
@@ -3160,7 +3595,7 @@
       tabsEl.replaceChildren();
       tabsEl.hidden = true;
       toolboxEl.replaceChildren(
-        el("div", { class: "vstack gap-2 fg-2" }, [el("b", { text: "未选择课程" })]),
+        el("div", { class: "vstack gap-2 fg-2" }, [el("b", { text: "未选择课次" })]),
       );
       return;
     }
@@ -3343,7 +3778,7 @@
     if (!active || !blocks) {
       if (!samePage || !container.children.length)
         container.replaceChildren(
-          el("div", { class: "text-center p-5" }, [el("h2", { text: "未选择课程" })]),
+          el("div", { class: "text-center p-5" }, [el("h2", { text: "未选择课次" })]),
         );
     } else complete = updateBlocks(container, blocks);
     state.pageKey = complete ? key : null;
@@ -3375,7 +3810,10 @@
       (block.type === BLOCK_TYPE.TABS &&
         (block.tabs || []).some((tab) => (tab.blocks || []).some(hasActivityBlock))) ||
       (block.type === BLOCK_TYPE.CARDS &&
-        (block.items || []).some((item) => (item.blocks || []).some(hasActivityBlock)))
+        (block.items || []).some((item) => (item.blocks || []).some(hasActivityBlock))) ||
+      (block.type === BLOCK_TYPE.DISCLOSURE && (block.blocks || []).some(hasActivityBlock)) ||
+      (block.type === BLOCK_TYPE.TABLE &&
+        (block.rows || []).some((row) => (row.details || []).some(hasActivityBlock)))
     );
   }
 
