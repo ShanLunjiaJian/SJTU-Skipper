@@ -113,6 +113,9 @@ def test_build_tree_live_session_is_marked() -> None:
     nodes = build_tree(COURSES, recordings, lives, now=now)
     maths = nodes[0]
     assert maths["live"] is True
+    assert maths["expanded"] is False
+    expanded = build_tree(COURSES, recordings, lives, now=now, expanded={"1"})
+    assert expanded[0]["expanded"] is True
     live_child = next(child for child in maths["children"] if child.get("live"))
     assert live_child["badge"] == LiveState.LIVE
     assert LiveState.LIVE not in live_child["subtitle"]
@@ -154,6 +157,23 @@ def test_build_tree_unmatched_live_goes_to_other_node() -> None:
     )
     assert len(nodes[-1]["children"]) == 1
     assert nodes[-1]["children"][0]["action"]["value"]["live_id"] == "L9"
+
+
+def test_build_tree_current_class_is_active_and_expanded() -> None:
+    recordings = {
+        "1": [_rec("a", "2026-11-05 08:00:00", "2026-11-05 09:35:00")],
+        "2": [],
+    }
+    nodes = build_tree(
+        COURSES,
+        recordings,
+        [],
+        now=datetime(2026, 11, 6, 12, 0),
+        expanded={"1"},
+        current_class_id="1-20261105-0800",
+    )
+    assert nodes[0]["expanded"] is True
+    assert nodes[0]["children"][0]["active"] is True
 
 
 def test_live_state_tracks_time() -> None:

@@ -72,7 +72,7 @@ class VLMRecognitionError(RuntimeError):
 
 
 class VLMService:
-    """Narrow public ``vlm`` service facade (6 methods, no leaked state)."""
+    """Public board recognition operations."""
 
     __slots__ = ("_plugin",)
 
@@ -95,6 +95,15 @@ class VLMService:
 
     def cancel(self, session_id: str) -> None:
         self._plugin.cancel(session_id)
+
+    def processing(self, session_id: str) -> bool:
+        with self._plugin._lock:
+            session = self._plugin._processing_session
+            return session is not None and session.session_id == session_id
+
+    def reset(self, session_id: str) -> None:
+        """Clear cached recognition state after the session stops."""
+        self._plugin.reset(session_id)
 
     def process_window(self, start: float, end: float) -> list[dict[str, Any]]:
         """Force-process one window of the current video stream."""
@@ -261,8 +270,9 @@ class VlmPlugin(Plugin):
                 type=SettingType.BOOL,
                 default=True,
                 group="VLM",
-                description="是否启动 VLM 板书识别工作线程",
-                group_note="识别模型在 LLM 的 roles.yml 中由 board_recognition 配置．",
+                section="识别流程",
+                order=0,
+                description="识别模型由 LLM 设置中的 board_recognition 角色指定．",
             ),
             SettingsSpec(
                 key="vlm.window_seconds",
@@ -270,7 +280,9 @@ class VlmPlugin(Plugin):
                 type=SettingType.FLOAT,
                 default=20.0,
                 group="VLM",
-                description="每次融合识别的视频窗口长度；窗口以采样点为中心，前后各占一半",
+                section="画面采样",
+                order=10,
+                description="窗口以采样点为中心，前后各占一半．",
             ),
             SettingsSpec(
                 key="vlm.cadence_live_seconds",
@@ -278,7 +290,9 @@ class VlmPlugin(Plugin):
                 type=SettingType.FLOAT,
                 default=180.0,
                 group="VLM",
-                description="直播时每隔多少秒取一个 20 秒窗口（默认 3 分钟）",
+                section="画面采样",
+                order=20,
+                description="按视频时间计算相邻采样点的间隔．",
             ),
             SettingsSpec(
                 key="vlm.cadence_recording_seconds",
@@ -286,55 +300,69 @@ class VlmPlugin(Plugin):
                 type=SettingType.FLOAT,
                 default=300.0,
                 group="VLM",
-                description="录播全速处理时每隔多少秒取一个 20 秒窗口（默认 5 分钟）",
+                section="画面采样",
+                order=30,
+                description="按视频时间计算，不受录播处理速度影响．",
             ),
             SettingsSpec(
                 key="vlm.history_windows",
-                label="板书去重窗口数",
+                label="板书去重窗口数（个）",
                 type=SettingType.INT,
                 default=3,
                 group="VLM",
-                description="只用最近写入的板书去重，不发送给模型．0 表示不跨窗口去重．",
+                section="识别流程",
+                order=2,
+                description="使用最近写入的板书去重，不发送给模型．0 表示不跨窗口去重．",
             ),
             SettingsSpec(
                 key="vlm.fps",
-                label="采样帧率",
+                label="采样帧率（帧/秒）",
                 type=SettingType.FLOAT,
                 default=4.0,
                 group="VLM",
-                description="VLM 处理使用的帧率（通常与视频帧率一致）",
+                section="画面采样",
+                order=40,
+                description="通常与播放设置的视频帧率一致．",
             ),
             SettingsSpec(
                 key="vlm.max_frames",
-                label="最大帧数",
+                label="每窗口帧数上限（帧）",
                 type=SettingType.INT,
                 default=12,
                 group="VLM",
-                description="每个窗口最多采样的帧数；0 表示不限制（全量帧很慢）",
+                section="画面采样",
+                order=50,
+                description="0 表示不限制帧数．",
             ),
             SettingsSpec(
                 key="vlm.loop_max_attempts",
-                label="重复输出最大尝试次数",
+                label="重复输出尝试上限（次）",
                 type=SettingType.INT,
                 default=3,
                 group="VLM",
-                description="包含首次识别；检测到重复输出时重新尝试",
+                section="识别流程",
+                order=3,
+                description="包含首次识别；检测到重复输出时重试．",
             ),
             SettingsSpec(
                 key="vlm.fusion",
-                label="启用融合",
+                label="融合多帧画面",
                 type=SettingType.BOOL,
                 default=True,
                 group="VLM",
-                description="启用图片融合（含配准与去遮挡）；关闭时只取最后一帧",
+                section="识别流程",
+                order=1,
+                description="融合时配准画面并去除遮挡．停用时只使用窗口最后一帧．",
             ),
             SettingsSpec(
                 key="vlm.prepare_ahead",
-                label="提前准备窗口数",
+                label="预备窗口数（个）",
                 type=SettingType.INT,
                 default=1,
                 group="VLM",
-                description="0 为顺序准备，1 为识别时准备下一个窗口",
+                section="处理缓冲",
+                order=60,
+                description="0 表示顺序准备；1 表示识别时准备下一个窗口．",
             ),
         ]
         settings = self._ctx.service("settings")
@@ -366,6 +394,30 @@ class VlmPlugin(Plugin):
                 self._llm.cancel(key)
             except Exception:
                 logger.exception("Cannot cancel VLM request %s", key)
+
+    def reset(self, session_id: str) -> None:
+        with self._lock:
+            self._cancelled_sessions.add(session_id)
+            session = self._ctx.streams.get_session(session_id)
+            if session is not None:
+                self._sessions[session_id] = session
+            self._recording_sessions.discard(session_id)
+            self._recording_cursor.pop(session_id, None)
+            self._coverage_cache.pop(session_id, None)
+            self._disabled_at.pop(session_id, None)
+            self._session_history.pop(session_id, None)
+            if self._prepared_key is not None and self._prepared_key[0] == session_id:
+                self._prepared_future.cancel()
+                self._prepared_future = None
+                self._prepared_key = None
+            if self._last_session == session_id:
+                self._cursor = 0.0
+                self._next_center = self._window_seconds() / 2
+                self._history.clear()
+                self._latest_image_path = ""
+                self._last_window = {}
+                self._last_error = ""
+                self._consecutive_errors = 0
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -464,16 +516,15 @@ class VlmPlugin(Plugin):
             "vlm:board",
             "板书识别",
             render=self._render_board_page,
-            icon="🖼",
             order=21,
             plugin_id=self.id,
         )
         ui.register_command(
             "vlm.debug",
             "板书识别（调试）",
-            subtitle="查看融合板书图像与识别文本",
+            icon="easel",
+            description="打开板书识别调试页面，查看识别结果",
             category="调试",
-            icon="🖼",
             order=21,
             page_id="vlm:board",
             keywords="vlm board blackboard debug 板书",
@@ -511,7 +562,7 @@ class VlmPlugin(Plugin):
                 blocks.append(
                     {
                         "type": BlockType.HTML,
-                        "html": '<pre class="log vlm-raw-reply" aria-label="模型原始回复">'
+                        "html": '<pre class="vlm-raw-reply overflow-auto" aria-label="模型原始回复">'
                         + escape(f"模型原始回复：\n{last['text']}")
                         + "</pre>",
                     }

@@ -11,10 +11,19 @@
     PENDING: "pending",
     RUNNING: "running",
   });
+  const STATUS_LABEL = Object.freeze({
+    QUEUED: "排队中",
+    RUNNING: "处理中",
+    PAUSED: "已暂停",
+    FINISHED: "已结束",
+    FAILED: "失败",
+    CANCELLED: "已取消",
+  });
 
   const BLOCK_TYPE = Object.freeze({
     AGENT_ACTIVITY: "agent_activity",
     TASK_QUEUE: "task_queue",
+    QUEUE: "queue",
     HTML: "html",
     MARKDOWN: "markdown",
     TEXT: "text",
@@ -27,9 +36,11 @@
     BUTTONS: "buttons",
     FORM: "form",
     LOG: "log",
+    SCHEMA_FORM: "schema_form",
     IMAGE: "image",
     VIDEO: "video",
     TABS: "tabs",
+    DISCLOSURE: "disclosure",
     PLAYER: "player",
     SWITCH: "switch",
     QA: "qa",
@@ -76,7 +87,6 @@
 
   const TOAST_KIND = Object.freeze({
     DEFAULT: "",
-    OK: "ok",
     ERR: "err",
   });
 
@@ -115,6 +125,7 @@
 
   const state = {
     ui: null,
+    connected: null,
     activeTab: { left: null, right: null },
     blockTabs: {},
     expandedTrees: new Map(),
@@ -174,16 +185,85 @@
   };
 
   const shortId = (id) => (id ? String(id).slice(0, 18) : "-");
+  const menuBindings = new Map();
+  let toastTimer;
+
+  function bindMenu(button, menu) {
+    button._menu = menu;
+    const hide = () => {
+      menu.classList.remove("show");
+      button.setAttribute("aria-expanded", "false");
+    };
+    const toggle = () => {
+      const opening = !menu.classList.contains("show");
+      for (const binding of menuBindings.values()) binding.hide();
+      if (!opening) return;
+      menu.classList.add("show");
+      const rect = button.getBoundingClientRect();
+      menu.style.left = `${Math.max(4, Math.min(rect.left, innerWidth - menu.offsetWidth - 4))}px`;
+      menu.style.top = `${rect.bottom + menu.offsetHeight > innerHeight ? Math.max(4, rect.top - menu.offsetHeight) : rect.bottom}px`;
+      button.setAttribute("aria-expanded", "true");
+    };
+    const keydown = (event) => {
+      if (!["ArrowDown", "ArrowUp", "Home", "End", "Escape"].includes(event.key)) return;
+      event.preventDefault();
+      if (event.key === "Escape") {
+        hide();
+        button.focus();
+        return;
+      }
+      if (!menu.classList.contains("show")) toggle();
+      const items = $$('button:not(:disabled), [role="option"]:not([aria-disabled="true"])', menu);
+      const index = items.indexOf(document.activeElement);
+      const next =
+        event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? items.length - 1
+            : (index + (event.key === "ArrowUp" ? -1 : 1) + items.length) % items.length;
+      items[next]?.focus();
+    };
+    button.addEventListener("click", toggle);
+    button.addEventListener("keydown", keydown);
+    menu.addEventListener("keydown", keydown);
+    const binding = {
+      hide,
+      dispose: () => {
+        hide();
+        button.removeEventListener("click", toggle);
+        button.removeEventListener("keydown", keydown);
+        menu.removeEventListener("keydown", keydown);
+        menuBindings.delete(button);
+      },
+    };
+    menuBindings.set(button, binding);
+    return binding;
+  }
+
+  document.addEventListener("pointerdown", (event) => {
+    for (const [button, binding] of menuBindings)
+      if (!button.contains(event.target) && !button._menu.contains(event.target)) binding.hide();
+  });
+  document.addEventListener(
+    "scroll",
+    (event) => {
+      for (const [button, binding] of menuBindings)
+        if (!button._menu.contains(event.target)) binding.hide();
+    },
+    true,
+  );
+  window.addEventListener("resize", () => {
+    for (const binding of menuBindings.values()) binding.hide();
+  });
 
   function toast(message, kind = TOAST_KIND.DEFAULT) {
     if (!message) return;
     const node = $("#toast");
-    node.textContent = message;
-    node.className = `toast show ${kind}`;
-    clearTimeout(toast._timer);
-    toast._timer = setTimeout(() => {
-      node.className = "toast";
-    }, 3200);
+    $(".toast-body", node).textContent = message;
+    node.className = `toast ${kind === TOAST_KIND.ERR ? "theme-danger" : "theme-secondary"}`;
+    clearTimeout(toastTimer);
+    node.classList.add("show");
+    toastTimer = setTimeout(() => node.classList.remove("show"), 3200);
   }
 
   async function api(path, options = {}) {
@@ -320,9 +400,11 @@
   }
 
   function setConnection(ok) {
-    const pill = $("#connection");
-    pill.textContent = ok ? "已连接" : "连接断开";
-    pill.className = `pill ${ok ? "pill-ok" : "pill-err"}`;
+    state.connected = ok;
+    const connection = $("#connection");
+    if (connection) {
+      connection.textContent = ok ? "已连接" : "连接断开";
+    }
   }
 
   function typeset(node = $("#page-content")) {
@@ -351,7 +433,13 @@
     }
   }
 
-  function actionButton(label, action, value = undefined, cls = "btn btn-sm", disabled = false) {
+  function actionButton(
+    label,
+    action,
+    value = undefined,
+    cls = "btn-solid theme-secondary btn-sm",
+    disabled = false,
+  ) {
     const attrs = { class: cls, dataset: { action } };
     if (value !== undefined) attrs.dataset.value = JSON.stringify(value);
     attrs.type = FIELD_INPUT.BUTTON;
@@ -361,15 +449,15 @@
   }
 
   function renderLog(block) {
-    const pre = el("pre", { class: "log" });
+    const pre = el("pre", { class: "log bg-2 border p-3 overflow-auto" });
     const lines = Array.isArray(block.lines) ? block.lines : [];
     for (const line of lines) {
       if (typeof line === "string") {
-        pre.appendChild(el("span", { class: "log-line", text: line }));
+        pre.appendChild(el("span", { class: "d-block", text: line }));
       } else {
         pre.appendChild(
-          el("span", { class: "log-line" }, [
-            line.time ? el("span", { class: "ts", text: String(line.time) }) : null,
+          el("span", { class: "d-block" }, [
+            line.time ? el("span", { class: "fg-2 me-2", text: String(line.time) }) : null,
             document.createTextNode(String(line.text ?? line.message ?? "")),
           ]),
         );
@@ -378,28 +466,65 @@
     return pre;
   }
 
-  function renderTable(block) {
-    const wrap = el("div", { class: "table-wrap" });
-    const table = el("table", { class: "data-table" });
+  function renderDisclosure(block, existing = null) {
+    const details = existing || el("details", { class: "disclosure" }, [
+      el("summary"),
+      el("div", { class: "disclosure-body" }),
+    ]);
+    if (!existing) details.open = Boolean(block.open);
+    details.firstElementChild.textContent = block.title || "";
+    updateBlocks(details.lastElementChild, block.blocks || []);
+    details._deferred = details.lastElementChild._deferred;
+    return details;
+  }
+
+  function renderTable(block, existing = null) {
+    const wrap = existing || el("div", { class: "table-block" }, [
+      el("div", { class: "table-responsive" }, [
+        el("table", { class: "table table-hover align-middle" }, [el("thead"), el("tbody")]),
+      ]),
+      el("p", { class: "fg-2 p-3", text: "暂无数据" }),
+      el("div", { class: "table-editor" }),
+    ]);
+    const table = wrap.firstElementChild.firstElementChild;
+    const [thead, tbody] = table.children;
     const columns = Array.isArray(block.columns) ? block.columns : [];
     const rows = Array.isArray(block.rows) ? block.rows : [];
+    table.classList.toggle("table-shared-editor", Boolean(block.editor));
     const rowActions = Array.isArray(block.row_actions) ? block.row_actions : [];
-
+    const sharedEditor = Boolean(block.editor);
+    const editorHost = wrap.children[2];
+    editorHost.hidden = !sharedEditor;
+    const selectedKey = rows.some((row) => row.id === wrap._selectedRow)
+      ? wrap._selectedRow : rows[0]?.id;
+    wrap._selectedRow = selectedKey;
+    const selectRow = (id) => {
+      wrap._selectedRow = id;
+      for (const row of tbody.children) {
+        const selected = row._rowKey === id;
+        row.classList.toggle("editing-row", sharedEditor && selected);
+        row.querySelector("[data-edit-row]")?.setAttribute("aria-pressed", String(selected));
+      }
+      for (const panel of editorHost.children) panel.hidden = panel.dataset.row !== id;
+    };
+    const previous = new Map(Array.from(tbody.children)
+      .filter((row) => row._rowKey !== undefined).map((row) => [row._rowKey, row]));
+    const wanted = new Set();
     const colLabel = (c) => (typeof c === "string" ? c : (c.label ?? c.key ?? ""));
     const colKey = (c, i) => (typeof c === "string" ? c : (c.key ?? i));
-    const thead = el("thead");
-    const tr = el("tr");
-    for (const c of columns) tr.appendChild(el("th", { text: colLabel(c) }));
-    if (rowActions.length) tr.appendChild(el("th", { text: "操作" }));
-    thead.appendChild(tr);
-    table.appendChild(thead);
-
-    const tbody = el("tbody");
-    for (const row of rows) {
+    const headRow = el("tr");
+    for (const c of columns) headRow.appendChild(el("th", { scope: "col", text: colLabel(c) }));
+    if (rowActions.length || sharedEditor) headRow.appendChild(el("th", { scope: "col", text: "操作" }));
+    thead.replaceChildren(headRow);
+    const ordered = [];
+    rows.forEach((row, index) => {
       const rowObj = Array.isArray(row)
         ? Object.fromEntries(columns.map((c, i) => [colKey(c, i), row[i]]))
         : row || {};
-      const tr = el("tr");
+      const key = rowObj.id ?? rowObj.key ?? index;
+      const tr = previous.get(key) || el("tr");
+      tr._rowKey = key;
+      tr.replaceChildren();
       for (let i = 0; i < columns.length; i += 1) {
         const c = columns[i];
         const key = colKey(c, i);
@@ -407,41 +532,102 @@
         if (typeof value === "object" && value !== null) value = JSON.stringify(value);
         tr.appendChild(el("td", { text: value ?? "" }));
       }
-      if (rowActions.length) {
-        const td = el("td", { class: "row-actions" });
-        for (const action of rowActions) {
+      if (rowActions.length || sharedEditor) {
+        const td = el("td", { class: "text-nowrap" });
+        if (sharedEditor) {
+          const button = el("button", {
+            type: "button", class: "btn-text theme-secondary btn-sm",
+            "aria-label": `编辑 ${rowObj.title || rowObj.model || rowObj.role || key}`,
+            title: `编辑 ${rowObj.title || rowObj.model || rowObj.role || key}`,
+            "aria-pressed": String(key === selectedKey), "data-edit-row": "",
+          });
+          // Bootstrap Icons: pencil-square.
+          button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M15.502 1.94a.5.5 0 0 1 0 .706L14.459 3.69l-2-2L13.502.646a.5.5 0 0 1 .707 0l1.293 1.293zm-1.75 2.456-2-2L4.939 9.21a.5.5 0 0 0-.121.196l-.805 2.414a.25.25 0 0 0 .316.316l2.414-.805a.5.5 0 0 0 .196-.12l6.813-6.814z"/><path fill-rule="evenodd" d="M1 13.5A1.5 1.5 0 0 0 2.5 15h11a1.5 1.5 0 0 0 1.5-1.5v-6a.5.5 0 0 0-1 0v6a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5H9a.5.5 0 0 0 0-1H2.5A1.5 1.5 0 0 0 1 2.5z"/></svg>';
+          button.addEventListener("click", () => selectRow(key));
+          td.appendChild(button);
+        }
+        for (const action of [...(rowObj.actions || []), ...rowActions]) {
           let value = action.value ? { ...action.value } : {};
           if (Array.isArray(action.keys)) {
             for (const key of action.keys) value[key] = rowObj[key];
           } else if (!action.value) {
             value = { ...rowObj };
           }
-          td.appendChild(
-            actionButton(
-              action.label || "执行",
-              action.action,
-              value,
-              action.class || "btn btn-sm",
-            ),
+          const button = actionButton(
+            action.label || "执行",
+            action.action,
+            value,
+            action.class || "btn-solid theme-secondary btn-sm",
           );
+          if (action.icon) {
+            const label = `${action.label || "执行"} ${rowObj.model || rowObj.title || key}`;
+            button.setAttribute("aria-label", label);
+            button.title = label;
+          }
+          if (action.icon === "trash") {
+            // Bootstrap Icons: trash.
+            button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/><path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/></svg>';
+          }
+          if (action.icon === "link") {
+            // Bootstrap Icons: link-45deg.
+            button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1 1 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4 4 0 0 1-.128-1.287z"/><path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243z"/></svg>';
+          }
+          if (action.icon === "key") {
+            // Bootstrap Icons: key.
+            button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8m4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5"/><path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0"/></svg>';
+          }
+          const before = rowObj.actions?.includes(action) ? td.querySelector("[data-edit-row]") : null;
+          td.insertBefore(button, before);
         }
         tr.appendChild(td);
       }
-      tbody.appendChild(tr);
+      wanted.add(tr);
+      ordered.push(tr);
+      if (sharedEditor) {
+        let panel = Array.from(editorHost.children).find((node) => node.dataset.row === key);
+        if (!panel) {
+          panel = el("div", { dataset: { row: key } });
+          editorHost.appendChild(panel);
+        }
+        updateBlocks(panel, rowObj.details || []);
+      }
+      if (block.expandable && Array.isArray(rowObj.details)) {
+        if (!tr._detailsRow) tr._detailsRow = el("tr", { class: "table-details" }, [el("td")]);
+        const cell = tr._detailsRow.firstElementChild;
+        cell.colSpan = Math.max(1, columns.length + (rowActions.length ? 1 : 0));
+        const title = rowObj.title || rowObj.name || rowObj.model || rowObj.role || rowObj.id || "";
+        const disclosure = renderDisclosure({ title: `编辑 ${title}`, blocks: rowObj.details },
+          cell.firstElementChild);
+        if (!cell.firstElementChild) cell.appendChild(disclosure);
+        wanted.add(tr._detailsRow);
+        ordered.push(tr._detailsRow);
+      }
+    });
+    ordered.forEach((row, index) => {
+      if (tbody.children[index] !== row) moveActivityNode(tbody, row, tbody.children[index] || null);
+    });
+    for (const row of Array.from(tbody.children)) {
+      if (wanted.has(row)) continue;
+      destroyPlayers(row);
+      row.remove();
     }
-    table.appendChild(tbody);
-    wrap.appendChild(table);
-    if (!rows.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    wrap.children[1].hidden = Boolean(rows.length);
+    if (sharedEditor) {
+      for (const panel of Array.from(editorHost.children))
+        if (!rows.some((row) => row.id === panel.dataset.row)) panel.remove();
+      selectRow(selectedKey);
+    }
+    wrap._deferred = ordered.some((row) => row.firstElementChild?.firstElementChild?._deferred);
     return wrap;
   }
 
   function renderTree(block) {
-    const wrap = el("div", { class: "tree" });
+    const wrap = el("ul", { class: "nav flex-column flex-nowrap gap-0 py-3" });
     const nodes = Array.isArray(block.nodes) ? block.nodes : [];
     if (!nodes.length) {
       wrap.appendChild(
-        el("div", {
-          class: "tree-empty",
+        el("li", {
+          class: "fg-2 p-3",
           text: block.empty_text || "暂无内容",
         }),
       );
@@ -451,13 +637,13 @@
     return wrap;
   }
 
-  function renderTreeNode(node) {
-    const box = el("div", { class: "tree-node" });
+  function renderTreeNode(node, depth = 0) {
+    const box = el("li", { class: "nav-item d-block w-100 min-w-0" });
     const children = Array.isArray(node.children) ? node.children : [];
     const canExpand = children.length > 0;
+    const empty = !canExpand && !node.action;
     const hasActive = (item) => item.active || (item.children || []).some(hasActive);
     let expanded = state.expandedTrees.get(node.id) ?? children.some(hasActive);
-    let caret;
     let kids;
     const toggle = () => {
       expanded = !expanded;
@@ -466,45 +652,65 @@
     };
     const updateExpansion = () => {
       if (!canExpand) return;
-      caret.textContent = expanded ? "▾" : "▸";
-      caret.title = expanded ? "折叠" : "展开";
-      caret.setAttribute("aria-expanded", String(expanded));
+      row.setAttribute("aria-expanded", String(expanded));
+      row.classList.toggle(
+        "active",
+        Boolean(node.active || (!expanded && children.some(hasActive))),
+      );
       if (expanded && !kids) {
-        kids = el("div", { class: "tree-children" });
-        for (const child of children) kids.appendChild(renderTreeNode(child));
+        kids = el("ul", { class: "nav flex-column flex-nowrap gap-0" });
+        for (const child of children) kids.appendChild(renderTreeNode(child, depth + 1));
         box.appendChild(kids);
       }
       if (kids) kids.hidden = !expanded;
     };
-    const row = el("div", {
-      class: `tree-row ${node.active ? "active" : ""} ${node.live ? "live" : ""}`,
-    });
-    caret = el("button", {
-      class: `tree-caret ${canExpand ? "" : "leaf"}`,
+    const row = el("button", {
+      class: `nav-link w-100 justify-content-start text-start position-relative ${canExpand || empty || node.active ? "fw-semibold" : ""} ${node.active ? "active" : ""}`,
       type: FIELD_INPUT.BUTTON,
-      text: expanded ? "▾" : "▸",
-      title: canExpand ? (expanded ? "折叠" : "展开") : "",
-      "aria-expanded": String(expanded),
+      disabled: empty,
+      title: node.label || node.id || "",
+      "aria-current": node.active ? "page" : undefined,
     });
-    caret.addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (canExpand) toggle();
-    });
-    row.appendChild(caret);
-    if (node.icon) row.appendChild(el("span", { class: "tree-icon", text: node.icon }));
-    row.appendChild(el("span", { class: "tree-label", text: node.label || node.id || "" }));
-    if (node.subtitle) row.appendChild(el("span", { class: "tree-sub", text: node.subtitle }));
+    row.style.paddingInlineStart = `${16 + depth * 8}px`;
+    if (node.icon) row.appendChild(el("span", { text: node.icon, "aria-hidden": "true" }));
+    row.appendChild(
+      el("span", {
+        class: "min-w-0 text-truncate",
+        text: node.label || node.id || "",
+        title: node.label || node.id || "",
+      }),
+    );
+    if (node.subtitle)
+      row.appendChild(
+        el("span", {
+          class: "small fg-2 fw-normal flex-grow-1 min-w-0 text-truncate",
+          text: node.subtitle,
+          title: node.subtitle,
+        }),
+      );
     if (node.badge) {
       row.appendChild(
         el("span", {
-          class: `tree-badge ${node.badge_class || ""}`,
+          class: `badge flex-shrink-0 ${node.badge_class === "live" ? "theme-primary" : node.badge_class === "paused" ? "theme-warning" : "theme-secondary"}`,
           text: node.badge,
+          role: "status",
         }),
       );
     }
+    if (canExpand || empty) {
+      const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      caret.setAttribute("class", "ms-auto flex-shrink-0");
+      caret.setAttribute("width", "16");
+      caret.setAttribute("height", "16");
+      caret.setAttribute("viewBox", "0 0 32 32");
+      caret.setAttribute("fill", "currentColor");
+      caret.setAttribute("aria-hidden", "true");
+      caret.innerHTML = '<path d="M16 22 6 12 7.4 10.6 16 19.2 24.6 10.6 26 12z"/>';
+      row.appendChild(caret);
+    }
     row.addEventListener("click", () => {
-      if (node.action) runNodeAction(node.action);
-      else if (canExpand) toggle();
+      if (canExpand) toggle();
+      else if (node.action) runNodeAction(node.action);
     });
     box.appendChild(row);
     updateExpansion();
@@ -517,45 +723,55 @@
   }
 
   function renderRows(block) {
-    const wrap = el("div", { class: "row-list block" });
+    const wrap = el("div", { class: "block list-group" });
     for (const item of block.items || []) {
       const row = el("div", {
-        class: `row-item ${item.active ? "active" : ""}`,
+        class: `list-group-item d-flex flex-wrap align-items-center gap-2 ${item.active ? "active" : ""}`,
       });
-      const main = el("div", { class: "row-main" }, [
-        el("div", { class: "row-title", text: item.title || item.text || "" }),
-        item.subtitle ? el("div", { class: "row-sub", text: item.subtitle }) : null,
-        item.meta ? el("div", { class: "row-meta", text: item.meta }) : null,
+      const main = el("div", { class: "flex-grow-1 text-break" }, [
+        el("div", { class: "fw-semibold", text: item.title || item.text || "" }),
+        item.subtitle ? el("div", { class: "small", text: item.subtitle }) : null,
+        item.meta ? el("div", { class: "small", text: item.meta }) : null,
       ]);
       row.appendChild(main);
       if (item.action) {
         row.appendChild(
-          actionButton(item.label || "打开", item.action, item.value, item.class || "btn btn-sm"),
+          actionButton(
+            item.label || "打开",
+            item.action,
+            item.value,
+            item.class || "btn-outline theme-primary btn-sm",
+          ),
         );
       }
       wrap.appendChild(row);
     }
-    if (!wrap.children.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    if (!wrap.children.length) wrap.appendChild(el("p", { class: "fg-2 p-3", text: "暂无数据" }));
     return wrap;
   }
 
   function renderCards(block, existing = null) {
-    const wrap = existing || el("div", { class: "cards" });
+    const wrap = existing || el("div", { class: "vstack gap-3" });
     const previous = new Map(Array.from(wrap.children, (card) => [card._cardKey, card]));
     const wanted = new Set();
     (block.items || []).forEach((item, index) => {
       const key = item.id || item.key || `card:${index}`;
       let card = previous.get(key);
       if (!card) {
-        card = el("div", { class: "card" }, [el("div"), el("div"), el("div")]);
+        card = el("article", { class: "card" }, [
+          el("header", { class: "card-header" }),
+          el("div", { class: "card-body" }),
+          el("footer", { class: "card-footer d-flex flex-wrap gap-2" }),
+        ]);
         card._cardKey = key;
       }
       const [head, body, actions] = card.children;
       head.replaceChildren();
-      if (item.title) head.appendChild(el("div", { class: "card-title", text: item.title }));
-      if (item.subtitle) head.appendChild(el("div", { class: "card-sub", text: item.subtitle }));
+      if (item.title) head.appendChild(el("h3", { class: "h5 mb-1", text: item.title }));
+      if (item.subtitle)
+        head.appendChild(el("p", { class: "small fg-2 mb-0", text: item.subtitle }));
       if (item.meta) {
-        const meta = el("div", { class: "card-meta" });
+        const meta = el("div", { class: "d-flex flex-wrap gap-2 small fg-2" });
         for (const entry of Array.isArray(item.meta) ? item.meta : Object.entries(item.meta))
           meta.appendChild(
             el("span", {
@@ -565,7 +781,7 @@
         head.appendChild(meta);
       }
       updateBlocks(body, item.blocks || []);
-      actions.className = "card-actions";
+      head.hidden = !head.childNodes.length;
       actions.replaceChildren();
       for (const action of item.actions || [])
         actions.appendChild(
@@ -573,9 +789,10 @@
             action.label || "执行",
             action.action,
             action.value,
-            action.class || "btn btn-sm",
+            action.class || "btn-solid theme-secondary btn-sm",
           ),
         );
+      actions.hidden = !actions.childNodes.length;
       wanted.add(card);
       if (wrap.children[index] !== card && !composingWithin(card))
         moveActivityNode(wrap, card, wrap.children[index] || null);
@@ -585,7 +802,7 @@
         destroyPlayers(card);
         card.remove();
       }
-    if (!wrap.children.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    if (!wrap.children.length) wrap.appendChild(el("p", { class: "fg-2 p-3", text: "暂无数据" }));
     wrap._deferred = Array.from(wrap.children).some(
       (card) => !wanted.has(card) || composingWithin(card) || card.children[1]?._deferred,
     );
@@ -595,32 +812,56 @@
   function renderForm(block) {
     const submitSpec = block.submit || {};
     const action = block.action || submitSpec.action || "";
-    const form = el("form", { class: "form" });
+    const form = el("form", { class: "settings-form" });
+    if (block.title)
+      form.appendChild(el("h3", { class: "settings-form-title", text: block.title }));
+    if (block.description)
+      form.appendChild(el("p", { class: "form-description", text: block.description }));
+    const sections = new Map();
+    const sectionFor = (name = "") => {
+      if (!sections.has(name)) {
+        const section = el("fieldset", { class: "form-section" });
+        if (name) section.appendChild(el("legend", { text: name }));
+        form.appendChild(section);
+        sections.set(name, section);
+      }
+      return sections.get(name);
+    };
     if (action) form.dataset.action = action;
     const conditionalRows = [];
     for (const field of block.fields || []) {
-      const row = el("div", { class: "form-row" });
+      if (field.hidden) {
+        form.appendChild(
+          el("input", {
+            type: "hidden",
+            name: field.name || field.key,
+            value: field.value ?? "",
+          }),
+        );
+        continue;
+      }
+      const section = sectionFor(field.section);
+      const row = el("div", { class: "form-field" });
       if (field.visible_when) {
         row._visibleWhen = field.visible_when;
         conditionalRows.push(row);
       }
       const id = `f-${Math.random().toString(36).slice(2)}`;
       const fieldName = field.name || field.key;
-      row.appendChild(el("label", { for: id, text: field.label || fieldName }));
+      const label = el("label", { for: id, text: field.label || fieldName });
+      row.appendChild(label);
       if (field.type === SETTING_TYPE.ACTION || field.input === FIELD_INPUT.BUTTON) {
-        row.appendChild(
-          el("div", { class: "form-inline" }, [
-            actionButton(
-              field.button_label || field.label || "执行",
-              field.action,
-              field.value && typeof field.value === "object" ? field.value : undefined,
-              field.button_class || "btn btn-sm btn-primary",
-            ),
-          ]),
+        const button = actionButton(
+          field.button_label || field.label || "执行",
+          field.action,
+          field.value && typeof field.value === "object" ? field.value : undefined,
+          field.button_class || "btn-solid theme-secondary",
         );
+        button.id = id;
+        row.appendChild(el("div", {}, [button]));
         if (field.description)
-          row.appendChild(el("div", { class: "hint", text: field.description }));
-        form.appendChild(row);
+          row.appendChild(el("small", { class: "form-text", text: field.description }));
+        section.appendChild(row);
         continue;
       }
       const rawType = field.type || (field.secret ? SETTING_TYPE.SECRET : SETTING_TYPE.TEXT);
@@ -628,7 +869,7 @@
       let input;
       if (type === FIELD_INPUT.TEXTAREA) {
         input = el("textarea", {
-          class: "textarea",
+          class: "form-control",
           id,
           name: fieldName,
           placeholder: field.placeholder || "",
@@ -636,7 +877,7 @@
         input.value = field.value ?? "";
         if (field.rows) input.rows = Number(field.rows);
       } else if (type === FIELD_INPUT.SELECT) {
-        input = el("select", { class: "select", id, name: fieldName });
+        input = el("select", { class: "form-control", id, name: fieldName });
         const options = field.option_items || field.options || [];
         for (const option of options) {
           const value = typeof option === "object" ? option.value : option;
@@ -651,16 +892,15 @@
       } else if (type === FIELD_INPUT.CHECKBOX || rawType === SETTING_TYPE.BOOL) {
         input = el("input", {
           type: FIELD_INPUT.CHECKBOX,
+          class: "check",
           id,
           name: fieldName,
         });
         input.checked = Boolean(field.value);
-        const label = row.querySelector("label");
-        label.classList.add("checkbox");
-        label.prepend(input);
+        row.insertBefore(input, label);
       } else {
         input = el("input", {
-          class: "input",
+          class: "form-control",
           id,
           name: fieldName,
           type:
@@ -687,36 +927,42 @@
       }
       input.dataset.fieldType = rawType;
       if (field.readonly) {
-        input.readOnly = true;
-        input.classList.add("input-readonly");
+        if (input.type === FIELD_INPUT.CHECKBOX || input.tagName === "SELECT")
+          input.disabled = true;
+        else input.readOnly = true;
       }
       if (input.type !== FIELD_INPUT.CHECKBOX) row.appendChild(input);
       if (field.secret) {
-        const status = el("div", {
-          class: `form-status ${field.is_set ? "ok" : ""}`,
-          text: field.is_set
-            ? `已配置，${field.secret_length || "?"} 字符；真实值不会回传前端`
-            : "未配置",
+        const status = el("span", {
+          class: `badge ${field.is_set ? "theme-success" : "theme-secondary"}`,
+          role: "status",
+          text: field.is_set ? `已配置，${field.secret_length || "?"} 字符` : "未配置",
         });
-        const line = el("div", { class: "form-inline" }, [status]);
+        const line = el("div", { class: "d-flex flex-wrap align-items-center gap-2" }, [status]);
         if (field.is_set) {
           line.appendChild(
             actionButton(
               "清除",
               "settings.clear_secret",
               { key: fieldName },
-              "btn btn-sm btn-danger",
+              "btn-solid theme-danger btn-sm",
             ),
           );
         }
         row.appendChild(line);
       }
-      if (field.description) row.appendChild(el("div", { class: "hint", text: field.description }));
-      form.appendChild(row);
+      if (field.description) {
+        const descriptionId = `${id}-description`;
+        input.setAttribute("aria-describedby", descriptionId);
+        row.appendChild(
+          el("small", { id: descriptionId, class: "form-text", text: field.description }),
+        );
+      }
+      section.appendChild(row);
     }
     const actions = el("div", { class: "form-actions" });
     const submit = el("button", {
-      class: "btn btn-primary",
+      class: submitSpec.class || "btn-solid theme-primary",
       type: FIELD_INPUT.SUBMIT,
       text: block.submit_label || submitSpec.label || "保存",
     });
@@ -734,21 +980,332 @@
           ? String(controller.type === FIELD_INPUT.CHECKBOX ? controller.checked : controller.value)
           : "";
         const visible = (condition.values || []).map(String).includes(value);
-        row.style.display = visible ? "" : "none";
+        row.hidden = !visible;
         row.dataset.hidden = visible ? "0" : "1";
       }
+      for (const section of sections.values())
+        section.hidden = !Array.from(section.querySelectorAll(".form-field")).some(
+          (row) => !row.hidden,
+        );
     };
     applyVisibility();
-    form.addEventListener("change", (event) => {
-      if (event.target && event.target.tagName === "SELECT") applyVisibility();
-    });
+    form.addEventListener("change", applyVisibility);
+    for (const control of Array.from(form.elements)) {
+      if (control.name)
+        control._initialValue = control.type === FIELD_INPUT.CHECKBOX
+          ? control.checked : control.value;
+    }
+    return form;
+  }
+
+  function retainFormDraft(previous, replacement) {
+    const controls = new Map(
+      Array.from(replacement.elements)
+        .filter((control) => control.name)
+        .map((control) => [control.name, control]),
+    );
+    for (const control of Array.from(previous.elements)) {
+      const target = controls.get(control.name);
+      if (!target || control.type === "hidden") continue;
+      const value = control.type === FIELD_INPUT.CHECKBOX ? control.checked : control.value;
+      if (value === control._initialValue) continue;
+      if (target.type === FIELD_INPUT.CHECKBOX) target.checked = value;
+      else target.value = value;
+    }
+    replacement.dispatchEvent(new Event("change"));
+  }
+
+  function renderSchemaForm(block, existing = null) {
+    const form = existing || el("form", { class: "settings-form schema-form" });
+    form._schemaBlock = block;
+    if (existing && (form._dirty || form._saving || form._schemaSignature === JSON.stringify(block)))
+      return form;
+    form._schemaSignature = JSON.stringify(block);
+    const disclosureStates = new Map(Array.from(form.querySelectorAll("details[data-path]"),
+      (details) => [details.dataset.path, details.open]));
+    form.replaceChildren();
+    const rootSchema = block.schema || {};
+    const resolve = (schema) => {
+      if (!schema || typeof schema !== "object") return {};
+      if (schema.$ref?.startsWith("#/")) {
+        let target = rootSchema;
+        for (const part of schema.$ref.slice(2).split("/"))
+          target = target?.[part.replace(/~1/g, "/").replace(/~0/g, "~")];
+        return { ...resolve(target), ...Object.fromEntries(Object.entries(schema)
+          .filter(([key]) => key !== "$ref")) };
+      }
+      if (schema.allOf) {
+        const merged = { ...schema, properties: { ...schema.properties }, required: [...(schema.required || [])] };
+        for (const item of schema.allOf) {
+          const part = resolve(item);
+          Object.assign(merged, part, { properties: { ...merged.properties, ...part.properties },
+            required: [...merged.required, ...(part.required || [])] });
+        }
+        delete merged.allOf;
+        return merged;
+      }
+      return schema;
+    };
+    const typeOf = (value) => value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+    const seed = (schema) => {
+      schema = resolve(schema);
+      if (schema.default !== undefined) return structuredClone(schema.default);
+      if (schema.const !== undefined) return structuredClone(schema.const);
+      if (schema.enum) return schema.enum[0];
+      if (schema.anyOf || schema.oneOf) return seed((schema.anyOf || schema.oneOf)[0]);
+      const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
+      return type === "object" || schema.properties ? {} : type === "array" ? []
+        : type === "number" || type === "integer" ? 0 : type === "boolean" ? false
+          : type === "null" ? null : "";
+    };
+    const localButton = (label, callback) => {
+      const button = el("button", { type: "button", class: "btn-solid theme-secondary btn-sm", text: label });
+      button.addEventListener("click", () => { callback(); form._dirty = true; });
+      return button;
+    };
+    const field = (rawSchema, value, title, optional = false, path = title) => {
+      let schema = resolve(rawSchema);
+      const alternatives = schema.oneOf || schema.anyOf;
+      if (alternatives?.length && alternatives.every((item) => resolve(item).const !== undefined)) {
+        schema = { ...schema, enum: alternatives.map((item) => resolve(item).const) };
+        delete schema.oneOf;
+        delete schema.anyOf;
+      }
+      if (schema["x-hidden"]) return { node: null, read: () => value };
+      const box = el("fieldset", { class: "schema-field", dataset: { path } });
+      const legend = el("legend", { text: schema.title || title });
+      box.appendChild(legend);
+      const body = el("fieldset", { class: "schema-field-body" });
+      const booleanField = schema.type === "boolean";
+      const grouped = schema.type === "object" || schema.type === "array" || schema.properties;
+      box.classList.toggle("schema-scalar", !grouped);
+      if (optional && grouped) {
+        const details = el("details", { class: "disclosure", dataset: { path } }, [
+          el("summary", { text: schema.title || title }),
+        ]);
+        details.open = disclosureStates.get(path) || false;
+        const content = el("div", { class: "disclosure-body" });
+        const enabled = el("input", { type: "checkbox", class: "check", dataset: { path: `${path}:enabled` } });
+        enabled.checked = value !== undefined;
+        const holder = el("div");
+        let child;
+        const mount = () => {
+          if (enabled.checked && !child) {
+            child = field(schema, value === undefined ? seed(schema) : value, title, false, path);
+            holder.appendChild(child.node);
+          }
+          holder.hidden = !enabled.checked;
+        };
+        content.append(el("label", { class: "schema-option" }, [enabled,
+          document.createTextNode("启用")]), holder);
+        details.appendChild(content);
+        enabled.addEventListener("change", mount);
+        details.addEventListener("toggle", () => { if (details.open) mount(); });
+        if (details.open) mount();
+        return { node: details, read: () => !enabled.checked ? undefined : child ? child.read()
+          : value === undefined ? seed(schema) : value };
+      }
+      let omitted = null;
+      if (optional && !booleanField) {
+        omitted = el("input", { type: "checkbox", class: "check" });
+        omitted.checked = grouped ? value !== undefined : value === undefined;
+        const label = el("label", { class: "schema-option" }, [omitted,
+          document.createTextNode(grouped ? "启用" : "使用默认值")]);
+        box.appendChild(label);
+        const disabled = () => grouped ? !omitted.checked : omitted.checked;
+        body.disabled = disabled();
+        omitted.addEventListener("change", () => { body.disabled = disabled(); });
+      }
+      if (schema.description) box.appendChild(el("p", { class: "form-text", text: schema.description }));
+      box.appendChild(body);
+      let read;
+      const branches = schema.oneOf || schema.anyOf || (Array.isArray(schema.type)
+        ? schema.type.map((type) => ({ ...schema, type })) : null);
+      const declaredType = schema.type || (schema.properties || schema.additionalProperties ? "object" : undefined);
+      if (branches || (!declaredType && !schema.enum && schema.const === undefined)) {
+        const options = branches || ["string", "number", "boolean", "null", "object", "array"]
+          .map((type) => ({ type }));
+        const selector = el("select", { class: "form-control", "aria-label": `${title} 类型` });
+        const initial = value === undefined ? seed(options[0]) : value;
+        const matches = (option) => {
+          const candidate = resolve(option);
+          return candidate.const !== undefined ? candidate.const === initial
+            : candidate.enum ? candidate.enum.includes(initial)
+              : (candidate.type || (candidate.properties ? "object" : undefined)) === typeOf(initial)
+                || (candidate.type === "integer" && Number.isInteger(initial));
+        };
+        let selected = Math.max(0, options.findIndex(matches));
+        options.forEach((option, index) => selector.appendChild(el("option", {
+          value: String(index), text: option.title || option.type || `选项 ${index + 1}`,
+        })));
+        selector.value = String(selected);
+        const holder = el("div");
+        let child;
+        const renderChoice = (nextValue) => {
+          child = field(options[selected], nextValue, title, false, path);
+          holder.replaceChildren(child.node);
+        };
+        renderChoice(initial);
+        selector.addEventListener("change", () => {
+          selected = Number(selector.value);
+          renderChoice(seed(options[selected]));
+        });
+        body.append(selector, holder);
+        read = () => child.read();
+      } else if (declaredType === "object") {
+        const object = value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+        const properties = schema.properties || {};
+        const fields = [];
+        for (const [key, property] of Object.entries(properties)) {
+          const child = field(property, object[key], key, !(schema.required || []).includes(key),
+            path ? `${path}.${key}` : key);
+          fields.push([key, child]);
+          if (child.node) body.appendChild(child.node);
+        }
+        const rows = [];
+        const list = el("div", { class: "schema-entries" });
+        const additional = typeof schema.additionalProperties === "object" ? schema.additionalProperties : {};
+        const addEntry = (key, entryValue) => {
+          const row = el("div", { class: "schema-entry" });
+          const keyInput = el("input", { class: "form-control", value: key, "aria-label": `${title} 参数名` });
+          const child = field(additional, entryValue, "参数值");
+          const entry = { row, keyInput, child };
+          rows.push(entry);
+          row.append(keyInput, child.node, localButton("删除", () => {
+            rows.splice(rows.indexOf(entry), 1); row.remove();
+          }));
+          list.appendChild(row);
+        };
+        for (const [key, entryValue] of Object.entries(object))
+          if (!Object.hasOwn(properties, key)) addEntry(key, entryValue);
+        if (schema.additionalProperties !== false || rows.length) {
+          body.append(el("h4", { class: "fs-md", text: Object.keys(properties).length ? "扩展参数" : title }), list);
+          body.appendChild(localButton("添加参数", () => addEntry("", seed(additional))));
+        }
+        read = () => {
+          const result = {};
+          for (const [key, child] of fields) {
+            const entryValue = child.read();
+            if (entryValue !== undefined) Object.defineProperty(result, key,
+              { value: entryValue, enumerable: true, writable: true, configurable: true });
+          }
+          for (const { keyInput, child } of rows) {
+            const key = keyInput.value;
+            if (Object.hasOwn(properties, key) || Object.hasOwn(result, key))
+              throw new Error(`${title} 的参数名重复：${key}`);
+            Object.defineProperty(result, key, { value: child.read(), enumerable: true,
+              writable: true, configurable: true });
+          }
+          return result;
+        };
+      } else if (declaredType === "array") {
+        const list = el("div", { class: "schema-entries" });
+        const entries = [];
+        const addItem = (itemValue) => {
+          const row = el("div", { class: "schema-entry" });
+          const child = field(schema.items || {}, itemValue, `${title} 项目`);
+          const entry = { row, child };
+          entries.push(entry);
+          const move = (direction) => {
+            const index = entries.indexOf(entry);
+            const target = index + direction;
+            if (target < 0 || target >= entries.length) return;
+            [entries[index], entries[target]] = [entries[target], entries[index]];
+            entries.forEach((item, position) => {
+              if (list.children[position] !== item.row) list.insertBefore(item.row, list.children[position] || null);
+            });
+          };
+          row.append(child.node, el("div", { class: "form-actions" }, [
+            localButton("上移", () => move(-1)), localButton("下移", () => move(1)),
+            localButton("删除", () => { entries.splice(entries.indexOf(entry), 1); row.remove(); }),
+          ]));
+          list.appendChild(row);
+        };
+        for (const item of Array.isArray(value) ? value : []) addItem(item);
+        body.append(list, localButton("添加项目", () => addItem(seed(schema.items || {}))));
+        read = () => entries.map((entry) => entry.child.read());
+      } else {
+        const options = schema.enum || (schema.const !== undefined ? [schema.const] : null);
+        let input;
+        if (options || declaredType === "boolean" || declaredType === "null") {
+          const values = options || (declaredType === "null" ? [null]
+            : optional ? [undefined, true, false] : [true, false]);
+          input = el("select", { class: "form-control", "aria-label": schema.title || title });
+          values.forEach((item, index) => input.appendChild(el("option", { value: String(index),
+            text: item === undefined ? "-" : typeof item === "string" ? item : JSON.stringify(item) })));
+          input.value = String(Math.max(0, values.findIndex((item) => item === value)));
+          read = () => values[Number(input.value)];
+        } else if (declaredType === "number" || declaredType === "integer") {
+          input = el("input", { type: "number", class: "form-control", "aria-label": schema.title || title,
+            step: declaredType === "integer" ? "1" : "any" });
+          if (value !== undefined) input.value = String(value);
+          if (schema.minimum !== undefined) input.min = String(schema.minimum);
+          if (schema.maximum !== undefined) input.max = String(schema.maximum);
+          read = () => {
+            if (!input.value.trim() || !Number.isFinite(Number(input.value)))
+              throw new Error(`${title} 需要填写数字．`);
+            return Number(input.value);
+          };
+        } else {
+          const multiline = schema["x-multiline"] || (typeof value === "string" && value.includes("\n"));
+          input = multiline
+            ? el("textarea", { class: "form-control", rows: 3, "aria-label": schema.title || title })
+            : el("input", { type: "text", class: "form-control", "aria-label": schema.title || title });
+          input.value = value === undefined ? "" : String(value);
+          read = () => input.value;
+        }
+        body.appendChild(input);
+        input.dataset.path = path;
+        input.name = path;
+      }
+      return { node: box, read: () => (omitted && (grouped ? !omitted.checked : omitted.checked))
+        ? undefined : read() };
+    };
+    if (block.title) form.appendChild(el("h3", { class: "settings-form-title", text: block.title }));
+    if (block.description) form.appendChild(el("p", { class: "form-description", text: block.description }));
+    const editor = field(rootSchema, block.value, block.title || "配置", false, "");
+    const status = el("p", { class: "form-text", role: "status", "aria-live": "polite" });
+    const save = el("button", { type: "submit", class: "btn-solid theme-primary",
+      text: block.submit?.label || "保存" });
+    form.append(editor.node, status, el("div", { class: "form-actions" }, [save]));
+    form._dirty = false;
+    if (!existing) {
+      form.addEventListener("input", () => { form._dirty = true; });
+      form.addEventListener("change", () => { form._dirty = true; });
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        await form._saveDefinition();
+      });
+    }
+    form._saveDefinition = async () => {
+      if (form._saving) return;
+      try {
+        const definition = editor.read();
+        const snapshot = JSON.stringify(definition);
+        const spec = form._schemaBlock;
+        form._saving = true;
+        save.disabled = true;
+        status.textContent = "正在保存";
+        const result = await postAction(spec.submit.action, { ...spec.context, definition });
+        if (result?.ok) {
+          form._dirty = JSON.stringify(editor.read()) !== snapshot;
+          status.textContent = "已保存";
+        } else status.textContent = result?.message || "保存失败，请修改后重试．";
+      } catch (error) {
+        status.textContent = `保存失败：${error.message}`;
+      } finally {
+        form._saving = false;
+        save.disabled = false;
+      }
+    };
     return form;
   }
 
   function renderTabs(block, existing = null) {
-    const wrap = existing || el("div", { class: "tabs" });
+    const wrap = existing || el("div", { class: "vstack gap-3" });
     if (!wrap._tabState) {
-      const bar = el("div", { class: "tabs-bar" });
+      const bar = el("div", { class: "nav nav-tabs", role: "tablist" });
       wrap.appendChild(bar);
       wrap._tabState = {
         bar,
@@ -758,7 +1315,15 @@
       };
     }
     const data = wrap._tabState;
+    wrap.classList.toggle("settings-layout", block.layout === "settings");
+    wrap.classList.toggle("settings-pages", block.layout === "settings-pages");
+    data.bar.setAttribute(
+      "aria-orientation",
+      block.layout === "settings" ? "vertical" : "horizontal",
+    );
+    data.bar.setAttribute("aria-label", block.label || block.title || "Tabs");
     const tabs = block.tabs || [];
+    data.bar.hidden = Boolean(block.hide_single && tabs.length <= 1);
     const key =
       block.id || block.key || `tabs:${tabs.map((tab) => tab.title || "").join("\u0001")}`;
     const tabKey = (tab, index) => tab.id || tab.key || tab.title || `tab:${index}`;
@@ -781,13 +1346,12 @@
     if (focusedView && data.active !== active) active = data.active;
     const show = (target, remember = true) => {
       if (documentTabs) {
-        const current = navigationFromUrl();
-        const currentTab =
+        const navigation = navigationFromUrl();
+        const selected =
           tabs.find(
-            (tab) =>
-              tab.meta?.doc_key === current.doc && tab.meta?.page_id === current.page,
+            (tab) => tab.meta?.doc_key === navigation.doc && tab.meta?.page_id === navigation.page,
           ) || tabs[0];
-        target = currentTab ? tabKey(currentTab, tabs.indexOf(currentTab)) : null;
+        target = selected ? tabKey(selected, tabs.indexOf(selected)) : null;
       }
       const index = tabs.findIndex((tab, index) => tabKey(tab, index) === target);
       if (index < 0) return;
@@ -806,7 +1370,11 @@
       data.active = target;
       if (remember && !documentTabs) state.blockTabs[key] = tabs[index].title || "";
       for (const [id, panel] of data.panels) panel.hidden = id !== target;
-      for (const [id, button] of data.buttons) button.classList.toggle("active", id === target);
+      for (const [id, button] of data.buttons) {
+        button.classList.toggle("active", id === target);
+        button.setAttribute("aria-selected", String(id === target));
+        button.tabIndex = id === target ? 0 : -1;
+      }
       const panel = data.panels.get(target);
       for (const view of agentViews.values())
         if (changed && panel.contains(view.root) && view.input.getClientRects().length) {
@@ -823,8 +1391,20 @@
       let panel = data.panels.get(id);
       let button = data.buttons.get(id);
       if (!panel) {
-        panel = el("div", { class: "tabs-body" });
-        button = el("button", { class: "tab-btn", type: FIELD_INPUT.BUTTON });
+        const panelId = `panel-${Math.random().toString(36).slice(2)}`;
+        panel = el("div", {
+          class: "tabs-body",
+          id: panelId,
+          role: "tabpanel",
+          "aria-labelledby": `${panelId}-tab`,
+        });
+        button = el("button", {
+          class: "tab-btn nav-link",
+          id: `${panelId}-tab`,
+          role: "tab",
+          "aria-controls": panelId,
+          type: FIELD_INPUT.BUTTON,
+        });
         data.panels.set(id, panel);
         data.buttons.set(id, button);
         wrap.appendChild(panel);
@@ -857,10 +1437,40 @@
             toast(`打开页面失败：${err.message}`, TOAST_KIND.ERR);
           }
         });
+        button.addEventListener("keydown", (event) => {
+          const vertical = data.bar.getAttribute("aria-orientation") === "vertical";
+          const previous = vertical ? "ArrowUp" : "ArrowLeft";
+          const next = vertical ? "ArrowDown" : "ArrowRight";
+          if (![previous, next, "Home", "End"].includes(event.key)) return;
+          event.preventDefault();
+          const buttons = Array.from(data.bar.children);
+          const position = buttons.indexOf(button);
+          const index =
+            event.key === "Home"
+              ? 0
+              : event.key === "End"
+                ? buttons.length - 1
+                : (position + (event.key === next ? 1 : -1) + buttons.length) % buttons.length;
+          buttons[index].focus();
+          buttons[index].click();
+        });
+        button.addEventListener("focus", () => {
+          button.scrollIntoView({ block: "nearest", inline: "nearest" });
+        });
       }
       button._tab = tab;
       button.textContent = tab.title || `Tab ${index + 1}`;
+      if (data.bar.hidden) {
+        panel.removeAttribute("aria-labelledby");
+        panel.setAttribute("aria-label", tab.title || block.label || "Tab");
+      } else {
+        panel.removeAttribute("aria-label");
+        panel.setAttribute("aria-labelledby", button.id);
+      }
       const meta = tab.meta || {};
+      panel.classList.toggle("prose", Boolean(meta.doc_key));
+      panel.classList.toggle("w-100", Boolean(meta.doc_key));
+      panel.classList.toggle("min-w-0", Boolean(meta.doc_key));
       Object.assign(panel.dataset, {
         docKey: meta.doc_key || "",
         docPath: meta.path || "",
@@ -869,6 +1479,12 @@
         selectionActions: JSON.stringify(meta.selection_actions || []),
       });
       updateBlocks(panel, tab.blocks || []);
+      for (const content of panel.querySelectorAll(":scope > .markdown")) {
+        content.classList.toggle("prose", Boolean(meta.doc_key));
+        content.classList.toggle("w-100", Boolean(meta.doc_key));
+        content.classList.toggle("min-w-0", Boolean(meta.doc_key));
+        content.classList.toggle("flex-shrink-0", Boolean(meta.doc_key));
+      }
     });
     for (const [id, panel] of data.panels)
       if (!wanted.has(id) && !composingWithin(panel)) {
@@ -943,22 +1559,22 @@
   function renderPlayer(block) {
     const key = playerKey(block);
     const cache = state.playerCache[key] || {};
-    const wrap = el("div", { class: "player" });
-    const grid = el("div", { class: "player-grid" });
+    const wrap = el("div", { class: "vstack gap-3" });
+    const grid = el("div", { class: "row g-3" });
     const videos = [];
     const sources = Array.isArray(block.sources) ? block.sources : [];
 
     for (const source of sources) {
       const saved = block.live ? {} : cache[source.key] || {};
-      const pane = el("div", { class: "player-pane" });
+      const pane = el("div", { class: "card overflow-hidden min-w-0" });
       pane.appendChild(
         el("div", {
-          class: "player-label",
+          class: "card-header",
           text: source.label || source.key || "",
         }),
       );
       const video = el("video", {
-        class: "player-video",
+        class: "w-100 ratio-16x9 object-fit-contain",
         controls: "controls",
         playsinline: "",
         preload: "metadata",
@@ -975,8 +1591,9 @@
       video.addEventListener("timeupdate", remember);
       video.addEventListener("pause", remember);
       video.addEventListener("seeked", remember);
-      const hint = el("div", { class: "player-error", text: "" });
+      const hint = el("div", { class: "fg-danger p-2", role: "status", hidden: true });
       video.addEventListener("error", () => {
+        hint.hidden = false;
         hint.textContent =
           video._mpegts || video._hls
             ? "视频加载失败：转发代理无法连上视频源"
@@ -985,37 +1602,42 @@
       videos.push(video);
       pane.appendChild(video);
       pane.appendChild(hint);
-      grid.appendChild(pane);
+      grid.appendChild(el("div", { class: "col-12 xl:col-6" }, [pane]));
     }
 
     if (block.screen_missing) {
       grid.appendChild(
-        el("div", {
-          class: "player-pane player-empty",
-          text: "该课程没有屏幕流",
-        }),
+        el("div", { class: "col-12 xl:col-6" }, [
+          el("div", { class: "card p-3 fg-2", text: "该课次没有屏幕流" }),
+        ]),
       );
     }
     wrap.appendChild(grid);
 
-    const bar = el("div", { class: "player-actions" });
+    const bar = el("div", { class: "d-flex flex-wrap align-items-center gap-3" });
     const finished = Boolean(block.finished);
     const live = Boolean(block.live);
-    let processing = Boolean(block.processing);
+    const processing = Boolean(block.processing);
 
     const stateText = () => {
-      if (finished) return "已结束";
-      if (block.queued) return live ? "直播，排队中" : "排队中";
-      if (live) return processing ? "直播，处理中" : "直播，已暂停处理";
-      return processing ? "处理中" : "已暂停";
+      if (finished) return STATUS_LABEL.FINISHED;
+      if (block.queued) return live ? `直播，${STATUS_LABEL.QUEUED}` : STATUS_LABEL.QUEUED;
+      if (live)
+        return processing ? `直播，${STATUS_LABEL.RUNNING}` : `直播，${STATUS_LABEL.PAUSED}`;
+      return processing ? STATUS_LABEL.RUNNING : STATUS_LABEL.PAUSED;
     };
-    const stateEl = el("span", { class: "player-state", text: stateText() });
-    const toggle = el("button", {
-      class: "btn btn-sm btn-primary",
-      type: FIELD_INPUT.BUTTON,
-      text: finished ? "已结束" : block.queued ? "提前处理" : processing ? "暂停处理" : "继续处理",
+    const stateTheme = finished
+      ? "success"
+      : block.queued
+        ? "secondary"
+        : processing
+          ? "primary"
+          : "warning";
+    const stateEl = el("span", {
+      class: `badge theme-${stateTheme}`,
+      role: "status",
+      text: stateText(),
     });
-    toggle.disabled = finished;
 
     const playAll = () => {
       for (const video of videos) {
@@ -1028,40 +1650,6 @@
         tryPlay();
       }
     };
-    const pauseAll = () => {
-      for (const video of videos) {
-        try {
-          video.pause();
-        } catch (_) {}
-      }
-    };
-
-    if (!finished) {
-      toggle.addEventListener("click", async () => {
-        if (block.queued) {
-          // Already waiting in line: the server moves it to the front; the
-          // next poll reports whether it actually got the engine slot.
-          await postAction(block.start_action, {});
-          stateEl.textContent = stateText();
-          toggle.textContent = "提前处理";
-          return;
-        }
-        const action = processing ? block.pause_action : block.start_action;
-        const result = await postAction(action, {});
-        if (!result || result.ok === false) return;
-        if (!processing && String(result.message || "").includes("准备")) {
-          // Streams are still resolving; the server starts processing as soon
-          // as they are ready and the page re-renders in the running state.
-          stateEl.textContent = "准备中…";
-          return;
-        }
-        processing = !processing;
-        toggle.textContent = processing ? "暂停处理" : "继续处理";
-        stateEl.textContent = stateText();
-        if (processing) playAll();
-        else if (!live) pauseAll();
-      });
-    }
 
     // Live video keeps playing while processing is paused; recordings only
     // play while processing is running.
@@ -1070,29 +1658,30 @@
     }
 
     bar.appendChild(stateEl);
-    bar.appendChild(toggle);
     wrap.appendChild(bar);
     return wrap;
   }
 
   function renderSwitch(block) {
-    const wrap = el("div", { class: "block switch-block" });
+    const id = `switch-${Math.random().toString(36).slice(2)}`;
     const input = el("input", {
       type: FIELD_INPUT.CHECKBOX,
-      class: "switch-input",
+      role: "switch",
+      switch: "",
+      id,
     });
     input.checked = Boolean(block.checked);
-    const label = el("label", { class: "switch-label" }, [
-      input,
-      el("span", { class: "switch-track" }),
-      el("span", { class: "switch-text", text: block.label || "" }),
-    ]);
     input.addEventListener("change", () => {
       postAction(block.action, { enabled: input.checked });
     });
-    wrap.appendChild(label);
-    if (block.hint) wrap.appendChild(el("div", { class: "hint", text: block.hint }));
-    return wrap;
+    const content = el("div", { class: "form-field-content" }, [
+      el("label", { for: id, text: block.label || "" }),
+      block.hint ? el("small", { class: "form-text", text: block.hint }) : null,
+    ]);
+    return el("div", { class: "block form-field" }, [
+      el("div", { class: "switch" }, [input]),
+      content,
+    ]);
   }
 
   function qaPreview(text) {
@@ -1160,16 +1749,18 @@
     }
     const collapsed = Boolean(block.collapsed) && !pending && !retained;
     const wrap = el("section", {
-      class: `qa ${collapsed ? "collapsed" : ""}`,
+      class: "qa card min-w-0",
       dataset: {
         qaId: block.id || "",
         qaPath: block.path || "",
         qaStatus: block.status || "",
       },
     });
-    const head = el("div", { class: "qa-head" });
+    const head = el("div", {
+      class: "card-header d-flex flex-row flex-wrap align-items-center gap-2",
+    });
     const toggle = el("button", {
-      class: "qa-toggle",
+      class: "qa-toggle btn-text btn-icon theme-secondary btn-sm",
       type: FIELD_INPUT.BUTTON,
       text: collapsed ? "▸" : "▾",
       title: "折叠 / 展开",
@@ -1180,31 +1771,43 @@
         await postAction(block.collapse_action || "reader.qa_collapse", {
           path: block.path,
           id: block.id,
-          collapsed: !wrap.classList.contains("collapsed"),
+          collapsed: !wrap.querySelector(".qa-body").hidden,
         });
       } finally {
         toggle.disabled = false;
       }
     });
     head.appendChild(toggle);
-    head.appendChild(el("span", { class: "qa-badge qa-badge-q", text: "问" }));
-    head.appendChild(el("span", { class: "qa-summary", text: qaPreview(block.question) }));
-    const level = qaLevelLabel(block.intensity);
-    if (level) head.appendChild(el("span", { class: "qa-level", text: level }));
-    if (block.ts) head.appendChild(el("span", { class: "qa-time", text: block.ts }));
-    if (pending) head.appendChild(el("span", { class: "qa-pending", text: "回答中…" }));
+    head.appendChild(el("span", { class: "badge theme-primary", text: "问" }));
     head.appendChild(
-      actionButton(
-        "删除",
-        block.delete_action || "reader.qa_delete",
-        { path: block.path, id: block.id },
-        "btn btn-sm btn-danger qa-delete",
-      ),
+      el("span", { class: "text-break flex-grow-1 min-w-0", text: qaPreview(block.question) }),
     );
+    const level = qaLevelLabel(block.intensity);
+    if (level) head.appendChild(el("span", { class: "badge theme-secondary", text: level }));
+    if (block.ts) head.appendChild(el("time", { class: "small fg-2", text: block.ts }));
+    if (pending)
+      head.appendChild(
+        el("span", {
+          class: "qa-pending badge theme-primary",
+          role: "status",
+          text: STATUS_LABEL.RUNNING,
+        }),
+      );
+    const remove = actionButton(
+      "删除",
+      block.delete_action || "reader.qa_delete",
+      { path: block.path, id: block.id },
+      "btn-text btn-icon theme-danger btn-sm flex-shrink-0",
+    );
+    remove.title = "删除";
+    remove.setAttribute("aria-label", "删除");
+    remove.innerHTML =
+      '<svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708"/></svg>';
+    head.appendChild(remove);
 
-    const body = el("div", { class: "qa-body" });
+    const body = el("div", { class: "qa-body card-body", hidden: collapsed });
     const answerBox = el("div", {
-      class: `qa-answer ${pending ? "pending" : ""} ${block.status === QA_STATUS.ERROR ? "qa-failed" : ""}`,
+      class: `qa-answer ${block.status === QA_STATUS.ERROR ? "fg-danger" : ""}`,
     });
     if (pending || retained) {
       const activity = qaActivity(block);
@@ -1214,7 +1817,7 @@
     if (!pending) {
       answerBox.appendChild(
         el("div", {
-          class: "qa-text markdown",
+          class: "qa-text markdown prose",
           html: block.answer_html || escapeHtml(block.answer || "（无内容）"),
         }),
       );
@@ -1255,11 +1858,10 @@
     const view = Array.from(agentViews.values()).find((item) => item.root === activity);
     const retained = retainAgentView(view);
     if (answerBox) {
-      answerBox.classList.remove("pending");
-      answerBox.classList.toggle("qa-failed", payload.status === QA_STATUS.ERROR);
+      answerBox.classList.toggle("fg-danger", payload.status === QA_STATUS.ERROR);
       let answer = answerBox.querySelector(".qa-text");
       if (!answer) {
-        answer = el("div", { class: "qa-text markdown" });
+        answer = el("div", { class: "qa-text markdown prose" });
         answerBox.appendChild(answer);
       }
       const html = payload.answer_html || escapeHtml(payload.answer || "（无内容）");
@@ -1273,7 +1875,7 @@
     const pending = node.querySelector(".qa-pending");
     if (pending) pending.remove();
     const collapsed = !retained && payload.collapsed !== false;
-    node.classList.toggle("collapsed", collapsed);
+    node.querySelector(".qa-body").hidden = collapsed;
     const toggle = node.querySelector(".qa-toggle");
     if (toggle) toggle.textContent = collapsed ? "▸" : "▾";
   }
@@ -1342,7 +1944,22 @@
   }
 
   function updateBlocks(parent, blocks) {
+    if (parent.querySelector("[data-ask-editor]")) {
+      parent._deferred = true;
+      return false;
+    }
     const previous = new Map(Array.from(parent.children, (node) => [node._blockKey, node]));
+    for (const block of blocks || []) {
+      if (block.type !== BLOCK_TYPE.QA) continue;
+      const key = stableBlockKey(block, 0);
+      const node = Array.from(parent.querySelectorAll("[data-ask-submitted]")).find(
+        (candidate) => candidate._blockKey === key,
+      );
+      if (node) {
+        previous.set(key, node);
+        delete node.dataset.askSubmitted;
+      }
+    }
     const wanted = new Set();
     let deferred = false;
     (blocks || []).forEach((block, index) => {
@@ -1354,6 +1971,11 @@
         else if (block.type === BLOCK_TYPE.QA) renderQA(block, node);
         else if (block.type === BLOCK_TYPE.TABS) renderTabs(block, node.firstElementChild);
         else if (block.type === BLOCK_TYPE.CARDS) renderCards(block, node.firstElementChild);
+        else if (block.type === BLOCK_TYPE.DISCLOSURE)
+          renderDisclosure(block, node.firstElementChild);
+        else if (block.type === BLOCK_TYPE.TABLE) renderTable(block, node.firstElementChild);
+        else if (block.type === BLOCK_TYPE.SCHEMA_FORM)
+          renderSchemaForm(block, node.firstElementChild);
         else if (node._blockSignature !== signature) {
           const focused = document.activeElement;
           if (
@@ -1362,6 +1984,8 @@
             destroyPlayers(node);
             const replacement = renderBlock(block);
             if (replacement) {
+              if (block.type === BLOCK_TYPE.FORM)
+                retainFormDraft(node.firstElementChild, replacement.firstElementChild);
               node.replaceWith(replacement);
               node = replacement;
             }
@@ -1394,6 +2018,7 @@
 
   function destroyPlayers(root) {
     if (!root) return;
+    for (const button of $$("[data-menu-toggle]", root)) menuBindings.get(button)?.dispose();
     for (const video of $$("video", root)) {
       if (video._hls) {
         try {
@@ -1581,6 +2206,9 @@
           for (const tab of block.tabs || []) collect(tab.blocks, page);
         if (block.type === BLOCK_TYPE.CARDS)
           for (const item of block.items || []) collect(item.blocks, page);
+        if (block.type === BLOCK_TYPE.DISCLOSURE) collect(block.blocks, page);
+        if (block.type === BLOCK_TYPE.TABLE)
+          for (const row of block.rows || []) collect(row.details, page);
       }
     };
     for (const [page, blocks] of Object.entries(state.ui.page_content || {})) collect(blocks, page);
@@ -1660,38 +2288,55 @@
           : block.kind === EXECUTION_BLOCK_KIND.REVIEW
             ? `Review report${block.round !== undefined ? ` ${block.round}` : ""}`
             : `${block.kind === EXECUTION_BLOCK_KIND.USER ? "User" : "Text"}${text ? `: ${text.trim().split("\n")[0]}` : ""}`;
-    row.className = `execution-block execution-${block.kind || EXECUTION_BLOCK_KIND.TEXT}`;
+    row.className = "execution-block font-monospace border-bottom min-w-0 text-break";
     row.dataset.status = block.status || EXECUTION_BLOCK_STATUS.COMPLETED;
-    const header = el(isRead ? "div" : "summary", { class: "execution-header" }, [
-      el("span", { class: "execution-title", text: title }),
-      el("span", {
-        class: "execution-status",
-        text: block.status || EXECUTION_BLOCK_STATUS.COMPLETED,
-      }),
-      el("span", {
-        class: "execution-seconds",
-        text: executionNumber(block.seconds) ? `${block.seconds.toFixed(1)}s` : "",
-      }),
-    ]);
+    const header = el(
+      isRead ? "div" : "summary",
+      { class: "d-flex flex-wrap align-items-center gap-2 p-2" },
+      [
+        el("span", { class: "flex-grow-1 min-w-0 text-break", text: title }),
+        block.status && block.status !== EXECUTION_BLOCK_STATUS.COMPLETED
+          ? el("span", {
+              class: `badge ${block.status === EXECUTION_BLOCK_STATUS.FAILED ? "theme-danger" : block.status === EXECUTION_BLOCK_STATUS.CANCELLED ? "theme-secondary" : "theme-primary"} font-body`,
+              text:
+                {
+                  [EXECUTION_BLOCK_STATUS.STREAMING]: STATUS_LABEL.RUNNING,
+                  [EXECUTION_BLOCK_STATUS.RUNNING]: STATUS_LABEL.RUNNING,
+                  [EXECUTION_BLOCK_STATUS.FAILED]: STATUS_LABEL.FAILED,
+                  [EXECUTION_BLOCK_STATUS.CANCELLED]: STATUS_LABEL.CANCELLED,
+                }[block.status] || block.status,
+              role: "status",
+            })
+          : null,
+        el("span", {
+          class: "small fg-2",
+          text: executionNumber(block.seconds) ? `${block.seconds.toFixed(1)}s` : "",
+        }),
+      ],
+    );
     if (isRead) {
       row.replaceChildren(header);
       return;
     }
-    const body = el("div", { class: "execution-body" });
+    const body = el("div", { class: "execution-body p-3" });
     if (block.kind === EXECUTION_BLOCK_KIND.TOOL) {
       body.append(
-        el("h4", { text: "Arguments" }),
+        el("h4", { class: "h6", text: "Arguments" }),
         el("pre", { text: executionText(block.arguments) || "Unavailable" }),
       );
       if (block.result !== undefined)
-        body.append(el("h4", { text: "Result" }), el("pre", { text: executionText(block.result) }));
+        body.append(
+          el("h4", { class: "h6", text: "Result" }),
+          el("pre", { text: executionText(block.result) }),
+        );
     } else if (block.kind === EXECUTION_BLOCK_KIND.REVIEW) {
       const report = executionArgs(block.report);
       const verdict = report.correct;
       if (typeof verdict === "boolean")
         body.appendChild(
-          el("strong", {
-            class: "execution-verdict",
+          el("span", {
+            class: `badge ${verdict ? "theme-success" : "theme-danger"} font-body`,
+            role: "status",
             text: verdict ? "Correct" : "Incorrect",
           }),
         );
@@ -1701,7 +2346,7 @@
       } else if (text) body.appendChild(el("pre", { text }));
       for (const finding of report.findings || []) {
         body.appendChild(
-          el("article", { class: "execution-finding" }, [
+          el("article", { class: "border-start ps-3 mb-3" }, [
             el("strong", {
               text: `${finding.priority !== undefined ? `P${finding.priority} ` : ""}${finding.title || "Finding"}`,
             }),
@@ -1717,7 +2362,7 @@
       if (!Object.keys(report).length && block.report)
         body.appendChild(el("pre", { text: executionText(block.report) }));
     } else body.appendChild(el("pre", { text }));
-    const preview = el("pre", { class: "execution-preview", text: "" });
+    const preview = el("pre", { class: "execution-preview w-100 overflow-hidden", text: "" });
     if (block.kind === EXECUTION_BLOCK_KIND.TOOL) {
       if (["grep", "glob"].includes(name) && block.result !== undefined) {
         const result = block.result;
@@ -1765,42 +2410,52 @@
     const key = JSON.stringify([state.ui.active_page, block.id]);
     let view = agentViews.get(key);
     if (!view) {
-      const root = el("section", { class: "block agent-workflow" });
+      const root = el("section", {
+        class: "block agent-workflow vstack gap-3 flex-grow-1 min-w-0 min-h-0 overflow-hidden",
+      });
       const select = el("button", {
-        class: "execution-select",
+        class: "btn-outline theme-secondary",
         type: FIELD_INPUT.BUTTON,
         "aria-label": "查看会话",
+        "data-menu-toggle": "",
         "aria-haspopup": "listbox",
         "aria-expanded": "false",
       });
       const menu = el("div", {
-        class: "execution-session-menu",
+        class: "menu execution-session-menu overflow-auto",
         role: "listbox",
         "aria-label": "选择会话",
-        hidden: true,
       });
       document.body.appendChild(menu);
       const metrics = el("div", {
-        class: "execution-metrics",
+        class: "d-flex flex-wrap justify-content-end ms-auto gap-2 small fg-2",
         "aria-label": "Execution metrics",
       });
       const log = el("div", {
-        class: "execution-log",
+        class: "execution-log border p-2 flex-grow-1 min-h-0 overflow-auto",
         tabindex: "0",
         "aria-label": "Execution blocks",
       });
       const input = el("textarea", {
-        class: "execution-message",
+        class: "form-control flex-grow-1 min-w-0",
         rows: "3",
         "aria-label": "发送给 Agent",
       });
       const send = el("button", {
         type: FIELD_INPUT.BUTTON,
-        class: "btn btn-primary",
+        class: "btn-solid theme-primary flex-shrink-0 text-nowrap",
         text: "发送",
       });
-      const composer = el("div", { class: "execution-composer" }, [input, send]);
-      root.append(el("div", { class: "execution-bar" }, [select, metrics]), log, composer);
+      const composer = el(
+        "div",
+        { class: "execution-composer d-flex align-items-end gap-2 flex-shrink-0" },
+        [input, send],
+      );
+      root.append(
+        el("div", { class: "d-flex flex-wrap align-items-center gap-2" }, [select, metrics]),
+        log,
+        composer,
+      );
       view = {
         key,
         page: state.ui.active_page,
@@ -1819,23 +2474,9 @@
         agents: [],
         composer,
       };
-      const close = () => {
-        menu.hidden = true;
-        select.setAttribute("aria-expanded", "false");
-      };
+      const menuController = bindMenu(select, menu);
+      const close = () => menuController.hide();
       view.close = close;
-      select.addEventListener("click", () => {
-        if (!menu.hidden) {
-          close();
-          return;
-        }
-        const rect = select.getBoundingClientRect();
-        menu.style.left = `${rect.left}px`;
-        menu.style.top = `${rect.bottom + 4}px`;
-        menu.hidden = false;
-        select.setAttribute("aria-expanded", "true");
-        (menu.querySelector('[aria-selected="true"]') || menu.firstElementChild)?.focus();
-      });
       menu.addEventListener("click", (event) => {
         const option = event.target.closest("[data-target]");
         if (!option) return;
@@ -1849,30 +2490,8 @@
         showAgentExecution(view, key);
         select.focus();
       });
-      menu.addEventListener("keydown", (event) => {
-        const options = Array.from(menu.children);
-        const index = options.indexOf(document.activeElement);
-        if (event.key === "Escape") {
-          close();
-          select.focus();
-        } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
-          event.preventDefault();
-          const next =
-            event.key === "Home"
-              ? 0
-              : event.key === "End"
-                ? options.length - 1
-                : (index + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
-          options[next]?.focus();
-        }
-      });
-      const onPointerDown = (event) => {
-        if (!menu.hidden && !menu.contains(event.target) && !select.contains(event.target)) close();
-      };
-      document.addEventListener("pointerdown", onPointerDown);
       view.dispose = () => {
-        close();
-        document.removeEventListener("pointerdown", onPointerDown);
+        menuController.dispose();
         menu.remove();
         root.remove();
         view.revision = (view.revision || 0) + 1;
@@ -1949,7 +2568,7 @@
         const label =
           agent.label ||
           (agent.role === EXECUTION_ROLE.WRITER
-            ? "主写作"
+            ? "笔记写作"
             : agent.role === EXECUTION_ROLE.REVIEWER
               ? "笔记审阅"
               : agent.role) ||
@@ -1978,6 +2597,7 @@
       if (!option) {
         option = el("button", {
           type: FIELD_INPUT.BUTTON,
+          class: "menu-item",
           role: "option",
           dataset: { target: value },
         });
@@ -2017,8 +2637,10 @@
     view.root.dataset.sessionId = view.targets.get(target)?.session_id || "";
     const label = `${view.options.get(target)?.textContent || "查看会话"} ▾`;
     if (select.textContent !== label) select.textContent = label;
-    for (const [value, option] of view.options)
+    for (const [value, option] of view.options) {
       option.setAttribute("aria-selected", String(value === target));
+      option.classList.toggle("selected", value === target);
+    }
     const latest = view.targets.get(target) || {};
     const agents = [latest];
     const context =
@@ -2065,7 +2687,7 @@
     if (!rows.length)
       rows.push(
         el("p", {
-          class: "execution-empty",
+          class: "fg-2",
           text: "Waiting for execution blocks",
         }),
       );
@@ -2094,68 +2716,92 @@
     });
   }
 
-  function renderTaskQueue(existing = null) {
-    const root =
-      existing ||
-      el("section", { class: "block task-queue" }, [
-        el("h2", { class: "block-title", text: "任务队列" }),
-        el("p", { class: "task-summary" }),
-        el("p", {
-          class: "empty task-empty",
-          text: "还没有等待或运行中的任务．开始课程处理或生成笔记后，任务会出现在这里．",
-        }),
-        el("ul", { class: "task-list", "aria-label": "任务队列" }),
-      ]);
-    const tasks = state.ui.tasks || [];
-    const pending = tasks.filter((task) => task.state === TASK_STATE.PENDING).length;
-    $(".task-summary", root).textContent =
-      `等待中 ${pending} 个，运行中 ${tasks.length - pending} 个`;
-    $(".task-empty", root).hidden = tasks.length > 0;
-    const list = $(".task-list", root);
-    const rows = new Map(Array.from(list.children, (row) => [row.dataset.taskId, row]));
-    tasks.forEach((task, index) => {
-      const key = String(task.id ?? index);
+  function renderQueue(items, existing = null) {
+    const list = existing || el("ul", { class: "queue-list list-unstyled mb-0 fs-md lh-base" });
+    const rows = new Map(Array.from(list.children, (row) => [row.dataset.queueId, row]));
+    const icons = {
+      pause:
+        "M6 3.5a.5.5 0 0 1 .5.5v8a.5.5 0 0 1-1 0V4a.5.5 0 0 1 .5-.5m4 0a.5.5 0 0 1 .5.5v8a.5.5 0 0 1-1 0V4a.5.5 0 0 1 .5-.5",
+      play: "M10.804 8 5 4.633v6.734zM12 8a1 1 0 0 1-.5.866l-6 3.5A1 1 0 0 1 4 11.5v-7a1 1 0 0 1 1.5-.866l6 3.5A1 1 0 0 1 12 8",
+      x: "M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708",
+    };
+    (items || []).forEach((item, index) => {
+      const key = String(item.id);
       let row = rows.get(key);
       if (!row) {
-        row = el("li", { class: "task-row", dataset: { taskId: key } }, [
-          el("div", { class: "task-info" }, [
-            el("h3", { class: "task-label" }),
-            el("p", { class: "task-detail" }),
-            el("p", { class: "task-session" }),
-          ]),
-          el("span", { class: "badge task-state" }),
-          el("button", {
-            type: FIELD_INPUT.BUTTON,
-            class: "btn btn-sm btn-danger task-cancel",
-            text: "停止任务",
-          }),
-        ]);
-        $(".task-cancel", row).addEventListener("click", async (event) => {
-          const button = event.currentTarget;
-          const cancel = row.task.cancel;
-          if (!cancel?.action || button.disabled) return;
-          button.disabled = true;
-          try {
-            await postAction(cancel.action, cancel.payload || {});
-          } finally {
-            button.disabled = false;
-          }
+        row = el("li", {
+          class:
+            "position-relative d-flex align-items-center gap-3 px-5 py-4 border-bottom border-subtle",
+          dataset: { queueId: key },
         });
       }
       rows.delete(key);
-      row.task = task;
-      $(".task-label", row).textContent = task.label || "任务";
-      $(".task-detail", row).textContent = task.detail || "";
-      const session = $(".task-session", row);
-      session.textContent = task.session_id ? `会话：${task.session_id}` : "";
-      session.hidden = !task.session_id;
-      $(".task-state", row).textContent = task.state === TASK_STATE.PENDING ? "等待中" : "运行中";
-      const button = $(".task-cancel", row);
-      button.hidden = !task.cancel?.action;
-      button.setAttribute("aria-label", `停止任务：${task.label || task.id || "任务"}`);
+      const signature = JSON.stringify(item);
+      if (row.dataset.signature !== signature) {
+        row.dataset.signature = signature;
+        row.title = item.subtitle || "";
+        const content = el("div", { class: "flex-grow-1 min-w-0" }, [
+          el("div", { class: "text-break", text: item.title }),
+          item.detail ? el("div", { class: "fg-2 text-break", text: item.detail }) : null,
+          item.progress ? el("div", { class: "fg-2 mt-1", text: item.progress }) : null,
+          item.subtitle
+            ? el("span", { class: "visually-hidden", role: "status", text: item.subtitle })
+            : null,
+        ]);
+        row.replaceChildren(
+          el("span", {
+            class: `position-absolute start-0 top-0 bottom-0 my-4 border-start border-3 border-${item.theme || "secondary"}`,
+            "aria-hidden": "true",
+          }),
+          content,
+        );
+        if (item.actions?.length) {
+          const actions = el("div", {
+            class: "queue-actions d-flex flex-row flex-shrink-0 ms-auto",
+          });
+          for (const action of item.actions) {
+            const button = actionButton(
+              action.label,
+              action.action,
+              action.value,
+              `btn-text theme-${action.theme || "secondary"} btn-sm p-2 border-0`,
+            );
+            button.title = action.label;
+            button.setAttribute("aria-label", action.label);
+            button.innerHTML = `<svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path d="${icons[action.icon]}"/></svg>`;
+            actions.appendChild(button);
+          }
+          row.appendChild(actions);
+        }
+      }
       if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null);
     });
     for (const row of rows.values()) row.remove();
+    return list;
+  }
+
+  function renderTaskQueue(existing = null) {
+    const tasks = state.ui.tasks || [];
+    const pending = tasks.filter((task) => task.state === TASK_STATE.PENDING).length;
+    const root =
+      existing ||
+      el("section", { class: "block task-queue", "aria-label": "任务队列" }, [
+        el("p", { class: "queue-summary fg-2 mb-3" }),
+        renderQueue([]),
+      ]);
+    $(".queue-summary", root).textContent =
+      `${STATUS_LABEL.RUNNING} ${tasks.length - pending} 个，${STATUS_LABEL.QUEUED} ${pending} 个`;
+    renderQueue(
+      tasks.map((task, index) => ({
+        id: task.id ?? index,
+        title: task.label || "任务",
+        detail: task.detail,
+        progress: task.session_id ? `会话：${task.session_id}` : "",
+        subtitle: task.state === TASK_STATE.PENDING ? STATUS_LABEL.QUEUED : STATUS_LABEL.RUNNING,
+        theme: task.state === TASK_STATE.PENDING ? "secondary" : "primary",
+      })),
+      $(".queue-list", root),
+    );
     return root;
   }
 
@@ -2176,24 +2822,41 @@
     const type = block.type || BLOCK_TYPE.TEXT;
     if (type === BLOCK_TYPE.AGENT_ACTIVITY) return renderAgentActivity(block);
     if (type === BLOCK_TYPE.TASK_QUEUE) return renderTaskQueue();
+    if (type === BLOCK_TYPE.QUEUE)
+      return el("section", { class: "block p-3", "aria-label": block.title }, [
+        el(
+          "div",
+          { class: "d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3" },
+          [
+            el("h3", { class: "fs-md fw-semibold mb-0", text: block.title }),
+            el("span", { class: "fg-2", text: block.summary }),
+          ],
+        ),
+        renderQueue(block.items),
+      ]);
     if (type === BLOCK_TYPE.HTML)
       return openLinksInNewTab(el("div", { class: "block", html: block.html || "" }));
     if (type === BLOCK_TYPE.MARKDOWN) {
       return openLinksInNewTab(
         el("div", {
-          class: "block markdown",
+          class: "block markdown prose",
           html: block.html || escapeHtml(block.text || ""),
         }),
       );
     }
-    if (type === BLOCK_TYPE.TEXT) return el("pre", { class: "block pre", text: block.text ?? "" });
+    if (type === BLOCK_TYPE.TEXT)
+      return el("pre", {
+        class: "block bg-2 border p-3 overflow-auto",
+        text: block.text ?? "",
+      });
     if (type === BLOCK_TYPE.KEYVALUE) {
       const items = Array.isArray(block.items) ? block.items : Object.entries(block.items || {});
-      const grid = el("div", { class: "kv-grid" });
+      const grid = el("dl", { class: "keyvalue border" });
       for (const [k, v] of items) {
-        grid.appendChild(el("div", { class: "k", text: k }));
+        grid.appendChild(el("dt", { class: "bg-2 p-2", text: k }));
         grid.appendChild(
-          el("div", {
+          el("dd", {
+            class: "p-2 text-break",
             text: typeof v === "object" ? JSON.stringify(v) : String(v ?? ""),
           }),
         );
@@ -2202,10 +2865,12 @@
     }
     if (type === BLOCK_TYPE.TABLE) return el("div", { class: "block" }, [renderTable(block)]);
     if (type === BLOCK_TYPE.CARDS) return el("div", { class: "block" }, [renderCards(block)]);
+    if (type === BLOCK_TYPE.DISCLOSURE)
+      return el("div", { class: "block" }, [renderDisclosure(block)]);
     if (type === BLOCK_TYPE.ROWS) return renderRows(block);
     if (type === BLOCK_TYPE.TREE) return el("div", { class: "block" }, [renderTree(block)]);
     if (type === BLOCK_TYPE.LIST) {
-      const list = el("div", { class: "block btn-row" });
+      const list = el("div", { class: "block d-flex flex-wrap gap-2" });
       for (const item of block.items || []) {
         if (typeof item === "string") list.appendChild(el("div", { text: item }));
         else if (item.action)
@@ -2214,7 +2879,7 @@
               item.text || item.label || "执行",
               item.action,
               item.value,
-              item.class || "btn btn-sm",
+              item.class || "btn-solid theme-secondary",
             ),
           );
         else list.appendChild(el("div", { text: item.text || JSON.stringify(item) }));
@@ -2222,14 +2887,14 @@
       return list;
     }
     if (type === BLOCK_TYPE.BUTTONS) {
-      const row = el("div", { class: "block btn-row" });
+      const row = el("div", { class: "block d-flex flex-wrap gap-2" });
       for (const b of block.buttons || []) {
         row.appendChild(
           actionButton(
             b.label || "执行",
             b.action,
             b.value,
-            b.class || (b.primary ? "btn btn-primary" : "btn"),
+            b.class || "btn-solid theme-secondary",
             Boolean(b.disabled),
           ),
         );
@@ -2237,14 +2902,16 @@
       return row;
     }
     if (type === BLOCK_TYPE.FORM) return el("div", { class: "block" }, [renderForm(block)]);
+    if (type === BLOCK_TYPE.SCHEMA_FORM)
+      return el("div", { class: "block" }, [renderSchemaForm(block)]);
     if (type === BLOCK_TYPE.LOG) return el("div", { class: "block" }, [renderLog(block)]);
     if (type === BLOCK_TYPE.IMAGE) {
       return el("div", { class: "block" }, [
-        el("img", { class: "image", src: block.src, alt: block.alt || "" }),
+        el("img", { class: "img-fluid", src: block.src, alt: block.alt || "" }),
       ]);
     }
     if (type === BLOCK_TYPE.VIDEO) {
-      const video = el("video", { controls: "controls", src: block.src });
+      const video = el("video", { class: "w-100", controls: "controls", src: block.src });
       return el("div", { class: "block" }, [video]);
     }
     if (type === BLOCK_TYPE.TABS) return el("div", { class: "block" }, [renderTabs(block)]);
@@ -2255,13 +2922,27 @@
       const value = Number(block.value ?? 0);
       const pct = value <= 1 ? value * 100 : value;
       return el("div", { class: "block" }, [
-        el("div", { class: "progress-label" }, [
+        el("div", { class: "d-flex justify-content-between small fg-2 mb-1" }, [
           el("span", { text: block.label || "进度" }),
           el("span", { text: `${Math.round(pct)}%` }),
         ]),
-        el("div", { class: "progress" }, [
-          el("i", { style: `width:${Math.max(0, Math.min(100, pct))}%` }),
-        ]),
+        el(
+          "div",
+          {
+            class: "progress",
+            role: "progressbar",
+            "aria-label": block.label || "进度",
+            "aria-valuenow": pct,
+            "aria-valuemin": 0,
+            "aria-valuemax": 100,
+          },
+          [
+            el("div", {
+              class: "progress-bar",
+              style: `width:${Math.max(0, Math.min(100, pct))}%`,
+            }),
+          ],
+        ),
       ]);
     }
     if (type === BLOCK_TYPE.BADGE)
@@ -2270,7 +2951,7 @@
         text: block.text || "",
       });
     return el("pre", {
-      class: "block pre",
+      class: "block bg-2 border p-3 overflow-auto",
       text: JSON.stringify(block, null, 2),
     });
   }
@@ -2292,13 +2973,7 @@
   }
 
   function closeMenus() {
-    $$(".menu-wrap.open").forEach((wrap) => {
-      wrap.classList.remove("open");
-      const drop = $(".menu-drop", wrap);
-      if (drop) drop.remove();
-      const btn = $(".menu-btn", wrap);
-      if (btn) btn.classList.remove("open");
-    });
+    for (const button of $$("[data-menu-toggle]", $("#menubar"))) menuBindings.get(button)?.hide();
   }
 
   function runCommand(cmd) {
@@ -2309,10 +2984,62 @@
     return null;
   }
 
+  /* Bootstrap Icons: https://icons.getbootstrap.com/
+   * The MIT License (MIT)
+   *
+   * Copyright (c) 2019-2024 The Bootstrap Authors
+   *
+   * Permission is hereby granted, free of charge, to any person obtaining a copy
+   * of this software and associated documentation files (the "Software"), to deal
+   * in the Software without restriction, including without limitation the rights
+   * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   * copies of the Software, and to permit persons to whom the Software is
+   * furnished to do so, subject to the following conditions:
+   *
+   * The above copyright notice and this permission notice shall be included in
+   * all copies or substantial portions of the Software.
+   *
+   * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+   * THE SOFTWARE.
+   *
+   */
+  const COMMAND_ICONS = Object.freeze({
+    "list-task":
+      '<path fill-rule="evenodd" d="M2 2.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5V3a.5.5 0 0 0-.5-.5zM3 3H2v1h1z"/>\n  <path d="M5 3.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5M5.5 7a.5.5 0 0 0 0 1h9a.5.5 0 0 0 0-1zm0 4a.5.5 0 0 0 0 1h9a.5.5 0 0 0 0-1z"/>\n  <path fill-rule="evenodd" d="M1.5 7a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5H2a.5.5 0 0 1-.5-.5zM2 7h1v1H2zm0 3.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5zm1 .5H2v1h1z"/>',
+    gear: '<path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492M5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0"/>\n  <path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52zm-2.633.283c.246-.835 1.428-.835 1.674 0l.094.319a1.873 1.873 0 0 0 2.693 1.115l.291-.16c.764-.415 1.6.42 1.184 1.185l-.159.292a1.873 1.873 0 0 0 1.116 2.692l.318.094c.835.246.835 1.428 0 1.674l-.319.094a1.873 1.873 0 0 0-1.115 2.693l.16.291c.415.764-.42 1.6-1.185 1.184l-.291-.159a1.873 1.873 0 0 0-2.693 1.116l-.094.318c-.246.835-1.428.835-1.674 0l-.094-.319a1.873 1.873 0 0 0-2.692-1.115l-.292.16c-.764.415-1.6-.42-1.184-1.185l.159-.291A1.873 1.873 0 0 0 1.945 8.93l-.319-.094c-.835-.246-.835-1.428 0-1.674l.319-.094A1.873 1.873 0 0 0 3.06 4.377l-.16-.292c-.415-.764.42-1.6 1.185-1.184l.292.159a1.873 1.873 0 0 0 2.692-1.115z"/>',
+    "arrow-clockwise":
+      '<path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2z"/>\n  <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466"/>',
+    "play-circle":
+      '<path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14m0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16"/>\n  <path d="M6.271 5.055a.5.5 0 0 1 .52.038l3.5 2.5a.5.5 0 0 1 0 .814l-3.5 2.5A.5.5 0 0 1 6 10.5v-5a.5.5 0 0 1 .271-.445"/>',
+    mic: '<path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h3a.5.5 0 0 1 0 1h-7a.5.5 0 0 1 0-1h3v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5"/>\n  <path d="M10 8a2 2 0 1 1-4 0V3a2 2 0 1 1 4 0zM8 0a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V3a3 3 0 0 0-3-3"/>',
+    easel:
+      '<path d="M8 0a.5.5 0 0 1 .473.337L9.046 2H14a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-1.85l1.323 3.837a.5.5 0 1 1-.946.326L11.092 11H8.5v3a.5.5 0 0 1-1 0v-3H4.908l-1.435 4.163a.5.5 0 1 1-.946-.326L3.85 11H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h4.954L7.527.337A.5.5 0 0 1 8 0M2 3v7h12V3z"/>',
+  });
+
+  function commandIcon(name) {
+    const paths = COMMAND_ICONS[name];
+    if (!paths) return null;
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "command-icon");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.innerHTML = paths;
+    return svg;
+  }
+
   function renderMenubar() {
     const bar = $("#menubar");
     if (!bar) return;
+    const signature = JSON.stringify(commands());
+    if (bar.dataset.commands === signature) return;
+    for (const button of $$("[data-menu-toggle]", bar)) menuBindings.get(button)?.dispose();
     bar.replaceChildren();
+    bar.dataset.commands = signature;
     const groups = new Map();
     for (const cmd of commands()) {
       const name = cmd.category || "其他";
@@ -2320,37 +3047,29 @@
       groups.get(name).push(cmd);
     }
     for (const [name, items] of groups) {
-      const wrap = el("div", { class: "menu-wrap" });
-      const btn = el("button", {
-        class: "menu-btn",
+      const button = el("button", {
+        class: "nav-link",
         type: FIELD_INPUT.BUTTON,
         text: name,
+        "data-menu-toggle": "",
+        "aria-expanded": "false",
       });
-      btn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const wasOpen = wrap.classList.contains("open");
-        closeMenus();
-        if (wasOpen) return;
-        wrap.classList.add("open");
-        btn.classList.add("open");
-        const drop = el("div", { class: "menu-drop" });
-        for (const cmd of items) {
-          const item = el("button", { class: "menu-item", type: FIELD_INPUT.BUTTON }, [
-            el("span", {
-              text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}`,
-            }),
-            cmd.subtitle ? el("span", { class: "sub", text: cmd.subtitle }) : null,
-          ]);
-          item.addEventListener("click", (event) => {
-            event.stopPropagation();
-            runCommand(cmd);
-          });
-          drop.appendChild(item);
-        }
-        wrap.appendChild(drop);
-      });
-      wrap.appendChild(btn);
-      bar.appendChild(wrap);
+      const menu = el("div", { class: "menu" });
+      for (const cmd of items) {
+        const item = el(
+          "button",
+          {
+            class: "menu-item command-menu-item",
+            type: FIELD_INPUT.BUTTON,
+          },
+          [commandIcon(cmd.icon), el("span", { text: cmd.title })],
+        );
+        item.disabled = Boolean(cmd.disabled);
+        item.addEventListener("click", () => runCommand(cmd));
+        menu.appendChild(item);
+      }
+      bar.appendChild(el("li", { class: "nav-item position-relative" }, [button, menu]));
+      bindMenu(button, menu);
     }
   }
 
@@ -2362,7 +3081,7 @@
     if (!q) return items;
     return items.filter((cmd) => {
       const hay =
-        `${cmd.title} ${cmd.subtitle || ""} ${cmd.category || ""} ${cmd.keywords || ""}`.toLowerCase();
+        `${cmd.title} ${cmd.description || ""} ${cmd.category || ""} ${cmd.keywords || ""}`.toLowerCase();
       return q.split(/\s+/).every((part) => hay.includes(part));
     });
   }
@@ -2375,7 +3094,7 @@
     state.paletteItems = items;
     if (state.paletteIndex >= items.length) state.paletteIndex = 0;
     if (!items.length) {
-      list.appendChild(el("div", { class: "palette-empty", text: "没有匹配的命令" }));
+      list.appendChild(el("p", { class: "fg-2 p-3", text: "没有匹配的命令" }));
       return;
     }
     items.forEach((cmd, index) => {
@@ -2384,19 +3103,33 @@
         {
           class: `palette-item ${index === state.paletteIndex ? "active" : ""}`,
           type: FIELD_INPUT.BUTTON,
+          role: "option",
+          "aria-selected": String(index === state.paletteIndex),
+          disabled: Boolean(cmd.disabled),
+          "aria-describedby": cmd.description ? `palette-description-${index}` : undefined,
         },
         [
-          cmd.category ? el("span", { class: "cat", text: cmd.category }) : null,
-          el("span", { text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}` }),
-          cmd.subtitle ? el("span", { class: "sub", text: cmd.subtitle }) : null,
+          commandIcon(cmd.icon),
+          el("span", { class: "palette-copy" }, [
+            el("span", { class: "palette-title", text: cmd.title }),
+            cmd.description
+              ? el("span", {
+                  id: `palette-description-${index}`,
+                  class: "palette-description",
+                  text: cmd.description,
+                })
+              : null,
+          ]),
+          cmd.category ? el("span", { class: "palette-category", text: cmd.category }) : null,
         ],
       );
       row.addEventListener("click", () => runCommand(cmd));
       row.addEventListener("mouseenter", () => {
         state.paletteIndex = index;
-        $$(".palette-item", list).forEach((node, i) =>
-          node.classList.toggle("active", i === index),
-        );
+        $$(".palette-item", list).forEach((node, i) => {
+          node.classList.toggle("active", i === index);
+          node.setAttribute("aria-selected", String(i === index));
+        });
       });
       list.appendChild(row);
     });
@@ -2405,7 +3138,7 @@
   function openPalette() {
     const palette = $("#palette");
     if (!palette) return;
-    palette.hidden = false;
+    if (!palette.open) palette.showModal();
     const input = $("#palette-input");
     input.value = "";
     state.paletteIndex = 0;
@@ -2415,16 +3148,17 @@
 
   function closePalette() {
     const palette = $("#palette");
-    if (palette) palette.hidden = true;
+    if (palette?.open) palette.close();
     state.paletteIndex = 0;
   }
 
   function paletteOpen() {
     const palette = $("#palette");
-    return palette && !palette.hidden;
+    return Boolean(palette?.open);
   }
 
   document.addEventListener("keydown", (event) => {
+    if (event.isComposing) return;
     const key = event.key.toLowerCase();
     if ((event.ctrlKey || event.metaKey) && key === "p") {
       event.preventDefault();
@@ -2434,10 +3168,7 @@
     }
     if (!paletteOpen()) return;
     const items = state.paletteItems || [];
-    if (key === "escape") {
-      event.preventDefault();
-      closePalette();
-    } else if (key === "arrowdown") {
+    if (key === "arrowdown") {
       event.preventDefault();
       state.paletteIndex = Math.min(items.length - 1, state.paletteIndex + 1);
       renderPalette($("#palette-input").value);
@@ -2463,33 +3194,45 @@
     }
   });
 
-  document.addEventListener("click", (event) => {
-    if (!event.target.closest("#menubar")) closeMenus();
-  });
-
   function bindPaletteTrigger() {
-    const btn = $("#palette-btn");
-    if (btn) btn.addEventListener("click", () => openPalette());
-    const palette = $("#palette");
-    if (palette) {
-      palette.addEventListener("click", (event) => {
-        if (event.target === palette) closePalette();
+    $("#palette-btn")?.addEventListener("click", openPalette);
+    for (const button of $$("[data-drawer-target]"))
+      button.addEventListener("click", () => {
+        const sidebar = $(button.dataset.drawerTarget);
+        if (!sidebar.open) sidebar.showModal();
       });
-    }
+    for (const dialog of $$("dialog"))
+      dialog.addEventListener("click", (event) => {
+        if (event.target !== dialog) return;
+        const rect = dialog.getBoundingClientRect();
+        if (
+          event.clientX < rect.left ||
+          event.clientX > rect.right ||
+          event.clientY < rect.top ||
+          event.clientY > rect.bottom
+        )
+          dialog.close();
+      });
+    $("[data-toast-close]")?.addEventListener("click", () => $("#toast").classList.remove("show"));
+    $("#palette")?.addEventListener("close", () => {
+      state.paletteIndex = 0;
+    });
   }
 
-  const SIDEBAR_MIN = 200;
-  const SIDEBAR_MAX = 560;
+  const desktopLayout = window.matchMedia("(min-width: 1024px)");
 
   function sidebarWidth(side) {
-    const fallback = side === SIDEBAR_SIDE.LEFT ? 280 : 320;
+    const app = $("#app");
+    app.style.removeProperty(`--${side}-col`);
+    const base = getComputedStyle(app).getPropertyValue(`--${side}-col`).trim();
+    const fallback = base.endsWith("vw") ? (parseFloat(base) * innerWidth) / 100 : parseFloat(base);
     const stored = Number(localStorage.getItem(`lecture-agent.sidebar.${side}.w`));
-    return Number.isFinite(stored) && stored > 0 ? clampWidth(stored) : fallback;
+    return clampWidth(Number.isFinite(stored) && stored > 0 ? stored : fallback);
   }
 
   function clampWidth(value) {
-    const hardMax = Math.min(SIDEBAR_MAX, Math.max(280, window.innerWidth * 0.45));
-    return Math.round(Math.min(hardMax, Math.max(SIDEBAR_MIN, value)));
+    const width = $(".workspace").clientWidth;
+    return Math.round(Math.min(width / 3, Math.max(width / 6, value)));
   }
 
   function applySidebarState() {
@@ -2498,7 +3241,9 @@
     for (const side of Object.values(SIDEBAR_SIDE)) {
       const collapsed = localStorage.getItem(`lecture-agent.sidebar.${side}`) === "true";
       app.classList.toggle(`${side}-collapsed`, collapsed);
-      app.style.setProperty(`--${side}-col`, collapsed ? "0px" : `${sidebarWidth(side)}px`);
+      $(`#sidebar-${side}`).inert = desktopLayout.matches && collapsed;
+      if (collapsed) app.style.removeProperty(`--${side}-col`);
+      else app.style.setProperty(`--${side}-col`, `${sidebarWidth(side)}px`);
     }
   }
 
@@ -2506,13 +3251,21 @@
     const app = $("#app");
     if (!app) return;
     app.classList.toggle(`${side}-collapsed`, collapsed);
-    app.style.setProperty(`--${side}-col`, collapsed ? "0px" : `${sidebarWidth(side)}px`);
+    $(`#sidebar-${side}`).inert = desktopLayout.matches && collapsed;
+    if (collapsed) app.style.removeProperty(`--${side}-col`);
+    else app.style.setProperty(`--${side}-col`, `${sidebarWidth(side)}px`);
     localStorage.setItem(`lecture-agent.sidebar.${side}`, String(collapsed));
   }
 
   function bindSidebarControls() {
     for (const btn of $$(".sidebar-close, .sidebar-restore")) {
       btn.addEventListener("click", () => {
+        if (!desktopLayout.matches) {
+          const sidebar = $(`#sidebar-${btn.dataset.side}`);
+          if (sidebar.open) sidebar.close();
+          else sidebar.showModal();
+          return;
+        }
         const side = btn.dataset.side;
         const collapsed = $("#app").classList.contains(`${side}-collapsed`);
         setSidebarCollapsed(side, !collapsed);
@@ -2524,14 +3277,13 @@
     for (const handle of $$(".resizer")) {
       const side = handle.dataset.side;
       handle.addEventListener("pointerdown", (event) => {
-        if (event.button !== 0) return;
+        if (event.button !== 0 || !desktopLayout.matches) return;
         event.preventDefault();
         const app = $("#app");
         if (app.classList.contains(`${side}-collapsed`)) return;
         const workspace = $(".workspace");
         const rect = workspace.getBoundingClientRect();
         handle.setPointerCapture(event.pointerId);
-        handle.classList.add("dragging");
         document.body.classList.add("resizing");
         const move = (ev) => {
           const width =
@@ -2540,7 +3292,6 @@
           app.style.setProperty(`--${side}-col`, value);
         };
         const stop = () => {
-          handle.classList.remove("dragging");
           document.body.classList.remove("resizing");
           handle.removeEventListener("pointermove", move);
           handle.removeEventListener("pointerup", stop);
@@ -2561,21 +3312,18 @@
         }
       });
     }
-    window.addEventListener("resize", () => {
-      const app = $("#app");
-      if (!app) return;
+    window.addEventListener("resize", applySidebarState);
+    desktopLayout.addEventListener("change", () => {
       for (const side of Object.values(SIDEBAR_SIDE)) {
-        if (app.classList.contains(`${side}-collapsed`)) continue;
-        app.style.setProperty(`--${side}-col`, `${sidebarWidth(side)}px`);
+        const sidebar = $(`#sidebar-${side}`);
+        if (sidebar.open) sidebar.close();
       }
+      applySidebarState();
     });
   }
 
   function hideSelectionMenu() {
-    const menu = $("#selection-menu");
-    if (!menu) return;
-    menu.hidden = true;
-    menu.replaceChildren();
+    $(".selection-popover")?.remove();
   }
 
   function docContext(node) {
@@ -2598,9 +3346,8 @@
   }
 
   function showSelectionMenu() {
-    const menu = $("#selection-menu");
     const page = $("#page-content");
-    if (!menu || !page) return;
+    if (!page) return;
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) return hideSelectionMenu();
     const text = String(sel).trim();
@@ -2609,18 +3356,21 @@
     if (!node || !page.contains(node)) return hideSelectionMenu();
     const ctx = docContext(node);
     if (!ctx) return hideSelectionMenu();
+    const range = sel.getRangeAt(0).cloneRange();
 
-    menu.replaceChildren();
+    hideSelectionMenu();
+    const content = el("div", { class: "d-flex flex-column" });
+    content.addEventListener("mousedown", (event) => event.preventDefault());
     for (const item of ctx.actions) {
       const btn = el("button", {
-        class: "selection-item",
+        class: "menu-item",
         type: FIELD_INPUT.BUTTON,
         text: `${item.icon ? item.icon + " " : ""}${item.label || item.id}`,
       });
       btn.addEventListener("click", () => {
         hideSelectionMenu();
         if (item.kind === SELECTION_ACTION_KIND.PROMPT) {
-          openAskDialog(item, ctx, text);
+          openAskEditor(item, ctx, text, range);
           return;
         }
         postAction(item.action, {
@@ -2631,85 +3381,158 @@
           selection: text,
         });
       });
-      menu.appendChild(btn);
+      content.appendChild(btn);
     }
-    menu.hidden = false;
-    const rect = sel.getRangeAt(0).getBoundingClientRect();
-    const width = menu.offsetWidth;
-    const height = menu.offsetHeight;
-    const left = Math.min(
-      window.innerWidth - width - 10,
-      Math.max(10, rect.left + rect.width / 2 - width / 2),
+    const rect = range.getBoundingClientRect();
+    const popup = el(
+      "div",
+      {
+        class: "popover selection-popover show",
+        role: "dialog",
+        "aria-label": "选中文字操作",
+      },
+      [content],
     );
-    let top = rect.top - height - 8;
-    if (top < 8) top = Math.min(window.innerHeight - height - 10, rect.bottom + 8);
-    menu.style.left = `${Math.round(left)}px`;
-    menu.style.top = `${Math.round(top)}px`;
+    document.body.appendChild(popup);
+    popup.style.left = `${Math.max(4, Math.min(rect.left, innerWidth - popup.offsetWidth - 4))}px`;
+    popup.style.top = `${rect.top >= popup.offsetHeight + 8 ? rect.top - popup.offsetHeight - 8 : rect.bottom + 8}px`;
   }
 
-  let askContext = null;
-
-  function openAskDialog(item, ctx, selection) {
-    askContext = { item, ctx, selection };
-    const modal = $("#ask");
-    if (!modal) return;
-    const preview = $("#ask-selection");
-    preview.textContent = selection.length > 800 ? `${selection.slice(0, 800)}…` : selection;
-    const levels = $("#ask-intensity");
-    if (levels) {
-      levels.replaceChildren();
-      const options =
-        Array.isArray(item.intensities) && item.intensities.length
-          ? item.intensities
-          : [
-              { value: ASK_INTENSITY.INSTANT, label: "快速" },
-              { value: ASK_INTENSITY.RESEARCH, label: "研究" },
-            ];
-      for (const option of options) {
-        const value = typeof option === "object" ? option.value : option;
-        const label = typeof option === "object" ? (option.label ?? option.value) : option;
-        levels.appendChild(el("option", { value: String(value), text: String(label) }));
-      }
-    }
-    const input = $("#ask-input");
-    input.value = "";
-    modal.hidden = false;
-    input.focus();
-  }
-
-  function closeAskDialog() {
-    const modal = $("#ask");
-    if (modal) modal.hidden = true;
-    askContext = null;
-  }
-
-  async function sendAsk() {
-    if (!askContext) return;
-    const input = $("#ask-input");
-    const question = (input.value || "").trim();
-    if (!question) {
-      toast("请先输入问题", TOAST_KIND.ERR);
+  function openAskEditor(item, ctx, selection, range) {
+    const panel = range.endContainer.parentElement?.closest(".tabs-body");
+    if (!panel) return;
+    const active = panel.querySelector("[data-ask-editor]");
+    if (active) {
+      active.querySelector("textarea").focus();
       return;
     }
-    const { item, ctx, selection } = askContext;
-    const intensity = ($("#ask-intensity") || {}).value || ASK_INTENSITY.INSTANT;
-    closeAskDialog();
-    await postAction(item.action, {
-      ...(item.value || {}),
-      doc_key: ctx.docKey,
-      path: ctx.path,
-      page_id: ctx.pageId,
-      selection,
-      question,
-      intensity,
+    const markdown = range.endContainer.parentElement?.closest(".markdown");
+    if (!markdown) return;
+    let anchor =
+      range.endContainer.nodeType === Node.ELEMENT_NODE
+        ? range.endContainer
+        : range.endContainer.parentElement;
+    while (anchor.parentElement !== markdown && anchor !== markdown) anchor = anchor.parentElement;
+    const editor = el("section", {
+      class: "card min-w-0 not-prose",
+      dataset: { askEditor: "" },
+      "aria-label": "提问",
     });
+    const input = el("textarea", {
+      class: "form-control",
+      rows: "3",
+      "aria-label": "问题",
+      placeholder: "输入问题",
+    });
+    const levels = el("select", { class: "form-control w-auto", "aria-label": "强度" });
+    const options = item.intensities?.length
+      ? item.intensities
+      : [
+          { value: ASK_INTENSITY.INSTANT, label: "快速" },
+          { value: ASK_INTENSITY.RESEARCH, label: "研究" },
+        ];
+    for (const option of options) {
+      const value = typeof option === "object" ? option.value : option;
+      const label = typeof option === "object" ? (option.label ?? option.value) : option;
+      levels.appendChild(el("option", { value: String(value), text: String(label) }));
+    }
+    const cancel = el("button", {
+      class: "btn-solid theme-secondary btn-sm",
+      type: "button",
+      text: "取消",
+    });
+    const send = el("button", {
+      class: "btn-solid theme-primary btn-sm",
+      type: "submit",
+      text: "发送",
+    });
+    const form = el("form", { class: "card-body d-flex flex-column gap-3" }, [
+      el("blockquote", { class: "border-start ps-3 fg-2 mb-0", text: selection }),
+      input,
+      el("div", { class: "d-flex flex-wrap align-items-center gap-2" }, [
+        levels,
+        el("div", { class: "ms-auto d-flex gap-2" }, [cancel, send]),
+      ]),
+    ]);
+    editor.append(
+      el("div", { class: "card-header flex-row align-items-center gap-2" }, [
+        el("span", { class: "badge theme-primary", text: "问" }),
+        el("span", { text: "提问" }),
+      ]),
+      form,
+    );
+    cancel.addEventListener("click", () => {
+      editor.remove();
+      state.pageKey = null;
+      loadState({ quiet: true });
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (send.disabled) return;
+      const question = input.value.trim();
+      for (const control of [input, levels, send, cancel]) control.disabled = true;
+      try {
+        const result = await api("/api/ui/action", {
+          method: "POST",
+          body: JSON.stringify({
+            action: item.action,
+            values: {
+              ...(item.value || {}),
+              doc_key: ctx.docKey,
+              path: ctx.path,
+              page_id: ctx.pageId,
+              selection,
+              question,
+              intensity: levels.value,
+            },
+            page_id: ctx.pageId,
+            navigation: navigationFromUrl(),
+          }),
+        });
+        if (!result.ok) throw new Error(result.message || "提交问题失败");
+        const block = {
+          type: BLOCK_TYPE.QA,
+          id: result.data.qa_id,
+          path: ctx.path,
+          question,
+          intensity: levels.value,
+          status: QA_STATUS.PENDING,
+          collapsed: false,
+        };
+        const answer = renderQA(block);
+        answer._blockKey = stableBlockKey(block, 0);
+        answer.dataset.askSubmitted = "";
+        editor.replaceWith(answer);
+        state.pageKey = null;
+        await loadState({ quiet: true });
+      } catch (error) {
+        toast(`提交问题失败：${error.message}`, TOAST_KIND.ERR);
+        for (const control of [input, levels, send, cancel]) control.disabled = false;
+        input.focus();
+      }
+    });
+    input.addEventListener("keydown", (event) => {
+      if (
+        event.key === "Enter" &&
+        (event.shiftKey || event.ctrlKey) &&
+        !event.isComposing &&
+        event.keyCode !== 229
+      ) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+    if (anchor === markdown) markdown.appendChild(editor);
+    else anchor.after(editor);
+    window.getSelection()?.removeAllRanges();
+    input.focus();
   }
 
   function bindSelectionMenu() {
     document.addEventListener("mouseup", (event) => {
       const target = event.target instanceof Element ? event.target : null;
-      if (target && target.closest("#selection-menu")) return;
-      if (target && target.closest("#ask")) return;
+      if (target && target.closest(".selection-popover")) return;
+      if (target && target.closest("[data-ask-editor]")) return;
       window.setTimeout(showSelectionMenu, 0);
     });
     document.addEventListener("selectionchange", () => {
@@ -2718,38 +3541,9 @@
     });
     document.addEventListener("scroll", hideSelectionMenu, true);
 
-    const menu = $("#selection-menu");
-    if (menu) {
-      // Keep the text selection alive while the menu is being clicked.
-      menu.addEventListener("mousedown", (event) => event.preventDefault());
-    }
-  }
-
-  function bindAskDialog() {
-    const cancel = $("#ask-cancel");
-    if (cancel) cancel.addEventListener("click", closeAskDialog);
-    const close = $("#ask-close");
-    if (close) close.addEventListener("click", closeAskDialog);
-    const send = $("#ask-send");
-    if (send) send.addEventListener("click", sendAsk);
-    const input = $("#ask-input");
-    if (input) {
-      input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" && !event.shiftKey) {
-          event.preventDefault();
-          sendAsk();
-        } else if (event.key === "Escape") {
-          event.preventDefault();
-          closeAskDialog();
-        }
-      });
-    }
-    const modal = $("#ask");
-    if (modal) {
-      modal.addEventListener("click", (event) => {
-        if (event.target === modal) closeAskDialog();
-      });
-    }
+    document.addEventListener("mousedown", (event) => {
+      if (!event.target.closest(".selection-popover")) hideSelectionMenu();
+    });
   }
 
   function pickTab(tabs, side) {
@@ -2771,17 +3565,18 @@
     }
     box.hidden = false;
     box.replaceChildren(
-      el("div", { class: "context-title", text: context.title || "" }),
-      el("div", { class: "context-sub" }, [
-        context.state ? el("span", { class: `dot ${context.state}` }) : null,
-        el("span", { text: context.subtitle || "" }),
-        context.recent ? el("span", { class: "context-tag", text: "最近一节" }) : null,
-      ]),
+      el("div", { class: "fw-semibold text-break", text: context.title || "" }),
+      el("div", { class: "fg-2", text: context.subtitle || "" }),
     );
   }
 
   function renderSidebar(side) {
     const tabs = side === SIDEBAR_SIDE.LEFT ? state.ui.left_tabs : state.ui.right_tabs;
+    if (side === SIDEBAR_SIDE.LEFT) {
+      $("#refresh-courses").hidden = !commands().some(
+        (command) => command.action === "input.refresh_courses",
+      );
+    }
     const tabsEl = $(`#${side}-tabs`);
     const toolboxEl = $(`#${side}-toolbox`);
     const sidebarKey = JSON.stringify([
@@ -2800,10 +3595,7 @@
       tabsEl.replaceChildren();
       tabsEl.hidden = true;
       toolboxEl.replaceChildren(
-        el("div", { class: "sidebar-empty" }, [
-          el("b", { text: "还没有选择课程" }),
-          el("span", { text: "从左侧课程树展开课程，点一节课开始。" }),
-        ]),
+        el("div", { class: "vstack gap-2 fg-2" }, [el("b", { text: "未选择课次" })]),
       );
       return;
     }
@@ -2816,11 +3608,11 @@
       const btn = el(
         "button",
         {
-          class: `side-tab ${tab.id === active ? "active" : ""}`,
+          class: `nav-link ${tab.id === active ? "active" : ""}`,
           type: FIELD_INPUT.BUTTON,
         },
         [
-          tab.icon ? el("span", { class: "icon", text: tab.icon }) : null,
+          tab.icon ? el("span", { "aria-hidden": "true", text: tab.icon }) : null,
           el("span", { text: tab.title || tab.id }),
         ],
       );
@@ -2839,42 +3631,34 @@
     toolboxEl.replaceChildren();
     const current = (tabs || []).find((t) => t.id === active);
     if (!current || !(current.toolbox || []).length) {
-      toolboxEl.appendChild(el("div", { class: "empty", text: "这个 tab 还没有工具" }));
+      toolboxEl.appendChild(el("p", { class: "fg-2", text: "这个标签页还没有工具" }));
       return;
     }
     for (const item of current.toolbox) {
-      const panel = el("section", {
-        class: `toolbox-item ${item.title || item.description ? "" : "bare"}`,
-      });
+      if (!(item.blocks || []).length && !item.title && !item.description && !item.page) continue;
+      const panel = el("section", { class: "mb-3" });
       const pageId = item.page || null;
-      if (item.title || item.description) {
-        const head = el("div", { class: "toolbox-head" }, [
-          el("div", { class: "toolbox-title", text: item.title || item.id }),
-          item.description ? el("div", { class: "toolbox-desc", text: item.description }) : null,
+      const title = item.title && item.title !== current.title ? item.title : "";
+      if (title || item.description || pageId) {
+        const head = el("div", { class: "d-flex flex-wrap align-items-center gap-2 mb-2" }, [
+          title ? el("h3", { class: "h6 mb-0", text: title }) : null,
+          item.description ? el("small", { class: "fg-2", text: item.description }) : null,
         ]);
         if (pageId) {
           const open = actionButton(
             "打开页面",
             "ui.open_page",
             { page_id: pageId },
-            "btn btn-sm btn-ghost",
+            "btn-outline theme-secondary btn-sm ms-auto",
           );
-          open.style.float = "right";
           head.appendChild(open);
         }
         panel.appendChild(head);
       }
-      const body = el("div", { class: "toolbox-body" });
+      const body = el("div");
       if (item.blocks && item.blocks.length) {
         body.appendChild(
           renderBlocks(item.blocks.filter((block) => block.type !== BLOCK_TYPE.AGENT_ACTIVITY)),
-        );
-      } else {
-        body.appendChild(
-          el("div", {
-            class: "empty",
-            text: pageId ? "在页面中查看" : "暂无内容",
-          }),
         );
       }
       panel.appendChild(body);
@@ -2892,22 +3676,34 @@
     );
     for (const page of pages) {
       const active = page.id === state.ui.active_page;
-      const tab = el("div", { class: `page-tab ${active ? "active" : ""}` }, [
-        el("span", { text: page.title || page.id }),
-        page.closable
-          ? el("button", {
-              class: "close",
-              type: FIELD_INPUT.BUTTON,
-              text: "×",
-              title: "关闭",
-            })
-          : null,
-      ]);
+      const open = el("button", {
+        type: FIELD_INPUT.BUTTON,
+        text: page.title || page.id,
+        "aria-current": active ? "page" : undefined,
+      });
+      const closeButton = page.closable
+        ? el("button", {
+            type: FIELD_INPUT.BUTTON,
+            class: "position-absolute end-0 top-50 translate-middle-y me-2",
+            text: "×",
+            "aria-label": `关闭 ${page.title || page.id}`,
+            dataset: { closePage: page.id },
+          })
+        : null;
+      const tab = el(
+        "div",
+        {
+          class:
+            "page-tab nav-link position-relative d-flex align-items-center justify-content-center px-9",
+        },
+        [open, closeButton],
+      );
+      tab.classList.toggle("active", active);
       tab.addEventListener("click", async (event) => {
-        if (event.target.classList.contains("close")) return;
+        if (event.target.closest("[data-close-page]")) return;
         if (page.id !== state.ui.active_page) await openPage(page.id);
       });
-      const close = $(".close", tab);
+      const close = closeButton;
       if (close) {
         close.addEventListener("click", async (event) => {
           event.stopPropagation();
@@ -2982,13 +3778,7 @@
     if (!active || !blocks) {
       if (!samePage || !container.children.length)
         container.replaceChildren(
-          el("div", { class: "welcome" }, [
-            el("div", { class: "welcome-mark", text: "∮" }),
-            el("h2", { text: "选择一节课" }),
-            el("p", {
-              text: "左侧课程树里展开课程，选择录播或直播．按 Ctrl+P 打开命令面板．",
-            }),
-          ]),
+          el("div", { class: "text-center p-5" }, [el("h2", { text: "未选择课次" })]),
         );
     } else complete = updateBlocks(container, blocks);
     state.pageKey = complete ? key : null;
@@ -3020,7 +3810,10 @@
       (block.type === BLOCK_TYPE.TABS &&
         (block.tabs || []).some((tab) => (tab.blocks || []).some(hasActivityBlock))) ||
       (block.type === BLOCK_TYPE.CARDS &&
-        (block.items || []).some((item) => (item.blocks || []).some(hasActivityBlock)))
+        (block.items || []).some((item) => (item.blocks || []).some(hasActivityBlock))) ||
+      (block.type === BLOCK_TYPE.DISCLOSURE && (block.blocks || []).some(hasActivityBlock)) ||
+      (block.type === BLOCK_TYPE.TABLE &&
+        (block.rows || []).some((row) => (row.details || []).some(hasActivityBlock)))
     );
   }
 
@@ -3029,57 +3822,49 @@
     const session = status.session || {};
     const runtime = status.runtime || {};
     const bar = $("#statusbar");
-    bar.replaceChildren();
+    const items = el("ul", { class: "nav flex-nowrap align-items-center text-nowrap" });
+    bar.replaceChildren(items);
 
-    const item = (label, value, cls = "") =>
-      el("span", { class: "status-item" }, [
-        cls ? el("span", { class: `dot ${cls}` }) : null,
-        el("span", { text: label }),
-        el("b", { text: String(value) }),
+    const item = (label, value, page = null) =>
+      el("li", { class: "nav-item flex-shrink-0" }, [
+        el(
+          page ? "a" : "span",
+          {
+            class: "nav-link d-inline-flex align-items-center gap-2 fg-body",
+            href: page ? `/?page=${encodeURIComponent(page)}` : undefined,
+            "aria-label": page ? `打开${label}，共 ${value} 个任务` : undefined,
+            onclick: page
+              ? (event) => {
+                  event.preventDefault();
+                  openPage(page);
+                }
+              : undefined,
+          },
+          [el("span", { text: label }), el("b", { text: String(value) })],
+        ),
       ]);
 
-    bar.appendChild(item("会话", shortId(session.session_id)));
-    bar.appendChild(item("音频", fmtSeconds(session.audio_seconds)));
-    bar.appendChild(item("视频", fmtSeconds(session.video_seconds)));
-    bar.appendChild(
+    const connection = item(
+      "状态",
+      state.connected === null ? "连接中" : state.connected ? "已连接" : "连接断开",
+    );
+    $("b", connection).id = "connection";
+    $("b", connection).setAttribute("role", "status");
+    items.appendChild(connection);
+    items.appendChild(item("会话", shortId(session.session_id)));
+    items.appendChild(item("音频", fmtSeconds(session.audio_seconds)));
+    items.appendChild(item("视频", fmtSeconds(session.video_seconds)));
+    items.appendChild(
       item("转写", `${session.transcript_chars ?? 0} 字 / ${session.transcript_items ?? 0} 段`),
     );
-    bar.appendChild(
+    items.appendChild(
       item("板书", `${session.visual_chars ?? 0} 字 / ${session.visual_items ?? 0} 段`),
     );
-    bar.appendChild(
-      item(
-        "插件",
-        (runtime.plugins_loaded || runtime.plugin_order || []).length || 0,
-        runtime.started ? "ok" : "",
-      ),
+    items.appendChild(
+      item("插件", (runtime.plugins_loaded || runtime.plugin_order || []).length || 0),
     );
     const tasks = state.ui.tasks || [];
-    bar.appendChild(
-      el(
-        "button",
-        {
-          type: FIELD_INPUT.BUTTON,
-          class: "status-item status-task-link",
-          "aria-label": `打开任务队列，共 ${tasks.length} 个任务`,
-          onclick: () => openPage("ui:tasks"),
-        },
-        [
-          tasks.length ? el("span", { class: "dot busy" }) : null,
-          el("span", { text: "任务队列" }),
-          el("b", { text: String(tasks.length) }),
-        ],
-      ),
-    );
-
-    const sessionPill = $("#session-pill");
-    if (session.session_id) {
-      sessionPill.textContent = `会话 ${shortId(session.session_id)}`;
-      sessionPill.className = "pill pill-ok";
-    } else {
-      sessionPill.textContent = "无会话";
-      sessionPill.className = "pill pill-muted";
-    }
+    items.appendChild(item("任务队列", tasks.length, "ui:tasks"));
   }
 
   async function openPage(pageId) {
@@ -3156,7 +3941,7 @@
             navigation,
           }),
         });
-        if (result.message) toast(result.message, result.ok ? TOAST_KIND.OK : TOAST_KIND.ERR);
+        if (result.message) toast(result.message, result.ok ? TOAST_KIND.DEFAULT : TOAST_KIND.ERR);
         if (result.open_url && /^https?:\/\//i.test(result.open_url)) {
           const opened = window.open(result.open_url, "_blank", "noopener");
           if (opened) opened.opener = null;
@@ -3201,6 +3986,16 @@
     const form = btn.closest("form");
     if (form) values = { ...formValues(form), ...values };
     postAction(action, values, btn.dataset.pageId || null, btn.dataset.itemId || null);
+  });
+
+  document.addEventListener("change", (event) => {
+    const input = event.target.closest("input[data-change-action], select[data-change-action]");
+    if (!input) return;
+    const values =
+      input.type === FIELD_INPUT.CHECKBOX
+        ? { enabled: input.checked }
+        : { [input.name]: input.value };
+    postAction(input.dataset.changeAction, values);
   });
 
   document.addEventListener("submit", (event) => {
@@ -3254,7 +4049,6 @@
     bindSidebarControls();
     bindSidebarResize();
     bindSelectionMenu();
-    bindAskDialog();
     bindPaletteTrigger();
     window.addEventListener("popstate", () => restoreNavigation());
     await restoreNavigation();

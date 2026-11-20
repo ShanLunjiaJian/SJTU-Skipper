@@ -856,15 +856,13 @@ class TestInputPluginUI:
         finally:
             plugin.teardown()
 
-    def test_action_stop_stops_source(self):
+    def test_action_stop_without_source(self):
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
 
-        plugin._playback_class_id = "manual-test"
-        plugin._processing = True
-        result = ctx.ui.dispatch_action("input.stop", {"id": "manual-test"})
-        assert result.ok
+        result = ctx.ui.dispatch_action("input.stop", {})
+        assert not result.ok
 
         plugin.teardown()
 
@@ -877,8 +875,8 @@ class TestInputPluginUI:
         plugin._processing = True
         result_pause = ctx.ui.dispatch_action("input.pause", {"id": "manual-test"})
         assert result_pause.ok
-        result_resume = ctx.ui.dispatch_action("input.resume", {"id": "manual-test"})
-        assert result_resume.ok
+        result_resume = ctx.ui.dispatch_action("input.resume", {})
+        assert not result_resume.ok
 
         plugin.teardown()
 
@@ -1388,7 +1386,9 @@ class TestClassPlayer:
             )
             assert result.ok
             assert _course(plugin).finished
-            assert _course(plugin).session_id == current_navigation().class_id == class_id
+            assert (
+                _course(plugin).session_id == current_navigation().class_id == class_id
+            )
             ctx.streams.start_session("other-class", meta={"course_name": "后台课程"})
             assert current_navigation().class_id == class_id
             assert ctx.service("input").resolve_class(class_id)["name"] == "高等数学"
@@ -1407,37 +1407,133 @@ class TestClassPlayer:
         finally:
             plugin.teardown()
 
-    def test_reprocess_restarts_from_the_first_part(self, monkeypatch, tmp_path):
-        """Reprocessing starts at the first recording part."""
-
+    @pytest.mark.parametrize("failed", [False, True])
+    def test_delete_results_requires_explicit_start(
+        self, monkeypatch, tmp_path, failed
+    ):
         ctx = _make_context(tmp_path)
         plugin = InputPlugin()
         plugin.setup(ctx)
         monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
-
-        directory = tmp_path / "sessions" / "1-20261105-0800"
+        sid = "1-20261105-0800"
+        directory = tmp_path / "sessions" / sid
         directory.mkdir(parents=True, exist_ok=True)
+        (directory / "meta.json").write_text(
+            json.dumps(
+                {
+                    "session_id": sid,
+                    "started_at": 1,
+                    "ended_at": 2,
+                    "meta": {"class_id": sid, "course_name": "高等数学"},
+                }
+            )
+        )
         for name in ("transcript.jsonl", "visual.jsonl", "coverage.json"):
             (directory / name).write_text("old")
+        media = directory / "media" / "recording.mp4"
+        media.parent.mkdir()
+        media.write_bytes(b"original media")
+        board = directory / "vlm" / "000000-000010.jpg"
+        board.parent.mkdir()
+        board.write_bytes(b"derived board")
         reset = mock.Mock()
         ctx.services.register("notes", SimpleNamespace(reset=reset))
+        stt_reset = mock.Mock()
+        vlm_reset = mock.Mock()
+        vlm_cancel = mock.Mock()
+        ctx.services.register(
+            "stt", SimpleNamespace(reset=stt_reset, processing=lambda sid: False)
+        )
+        ctx.services.register(
+            "vlm",
+            SimpleNamespace(
+                cancel=vlm_cancel, reset=vlm_reset, processing=lambda sid: False
+            ),
+        )
         self._open_class(ctx, plugin, videos=("v1", "v2"))
-        monkeypatch.setattr(plugin, "_resolve_job_streams", lambda job: None)
-        _course(plugin).streams = {StreamView.MAIN: "https://example.com/v2.mp4"}
-        _course(plugin).streams_loading = False
-        _course(plugin).finished = True
+        session = ctx.streams.start_session(sid, meta={"class_id": sid})
+        session.transcript.append("old transcript", start=0, end=10)
+        session.visual.append("old board", start=0, end=10)
+        ctx.streams.end_session("finished")
+        dispatch = mock.Mock()
+        monkeypatch.setattr(plugin, "_dispatch_jobs", dispatch)
+        if failed:
+            ctx.ui.dispatch_action("input.start_processing", {})
+            plugin._jobs[sid].state = JobState.FAILED
+        dispatch.reset_mock()
+        before = plugin._render_session_item()[0]["html"]
+        assert 'data-action="input.delete"' in before
+        assert "删除板书" in before
+        assert not ctx.ui.has_action("input.reprocess")
 
-        result = ctx.ui.dispatch_action("input.reprocess", {})
+        result = ctx.ui.dispatch_action("input.delete", {})
+
         assert result.ok
-        assert plugin._jobs["1-20261105-0800"].input_part_index == 0
-        assert plugin._jobs["1-20261105-0800"].streams == {}
-        assert plugin._jobs["1-20261105-0800"].streams_loading is True
-        reset.assert_called_once_with("1-20261105-0800")
+        dispatch.assert_not_called()
+        assert sid not in plugin._jobs
+        assert sid not in plugin._queue
+        assert plugin._active_job is None
+        assert plugin._processing is False
+        assert plugin._sources.state == SourceState.IDLE
+        assert not session.transcript
+        assert not session.visual
+        assert not ctx.streams.text_progress(sid, StreamKind.TRANSCRIPT).errors
+        assert not ctx.streams.text_progress(sid, StreamKind.VISUAL).errors
+        reset.assert_called_once_with(sid)
+        stt_reset.assert_called_once_with(sid)
+        vlm_reset.assert_called_once_with(sid)
+        vlm_cancel.assert_called_once_with(sid)
         assert not any(
             (directory / name).exists()
             for name in ("transcript.jsonl", "visual.jsonl", "coverage.json")
         )
+        assert not board.exists()
+        assert media.read_bytes() == b"original media"
+        assert json.loads((directory / "meta.json").read_text())["ended_at"] == 0
+        plugin._remember_class(dict(plugin._current_class))
+        assert _course(plugin).finished is False
+        after = plugin._render_session_item()[0]["html"]
+        assert (
+            'class="btn-solid theme-primary" data-action="input.start_processing"'
+            in after
+        )
+        assert 'data-action="input.delete"' not in after
 
+        result = ctx.ui.dispatch_action("input.start_processing", {})
+
+        assert result.ok
+        dispatch.assert_called_once_with()
+        assert plugin._jobs[sid].input_part_index == 0
+        assert plugin._jobs[sid].streams == {}
+        assert plugin._jobs[sid].streams_loading is True
+        plugin.teardown()
+
+    def test_queue_retry_preserves_results(self, monkeypatch, tmp_path):
+        ctx = _make_context(tmp_path)
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
+        monkeypatch.setattr(plugin, "_dispatch_jobs", lambda: None)
+        self._open_class(ctx, plugin)
+        ctx.ui.dispatch_action("input.start_processing", {})
+        sid = "1-20261105-0800"
+        plugin._jobs[sid].state = JobState.FAILED
+        directory = tmp_path / "sessions" / sid
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in ("transcript.jsonl", "visual.jsonl", "coverage.json"):
+            (directory / name).write_text("retained")
+        reset = mock.Mock()
+        ctx.services.register("notes", SimpleNamespace(reset=reset))
+
+        result = ctx.ui.dispatch_action("input.queue_retry", {"id": sid})
+
+        assert result.ok
+        assert plugin._jobs[sid].state == JobState.QUEUED
+        assert all(
+            (directory / name).read_text() == "retained"
+            for name in ("transcript.jsonl", "visual.jsonl", "coverage.json")
+        )
+        reset.assert_not_called()
         plugin.teardown()
 
     def test_player_page_shows_both_video_streams(self, monkeypatch):
@@ -1455,7 +1551,7 @@ class TestClassPlayer:
         ctx.ui.open_page("input:session")
         blocks = ctx.ui.state()["page_content"]["input:session"]
         player = next(block for block in blocks if block["type"] == BlockType.PLAYER)
-        assert [src["label"] for src in player["sources"]] == ["课堂", "屏幕"]
+        assert [src["key"] for src in player["sources"]] == [StreamView.MAIN, StreamView.SCREEN]
         assert player["processing"] is False
 
         plugin.teardown()
@@ -1468,8 +1564,6 @@ class TestClassPlayer:
         self._open_class(ctx, plugin, kind=SourceKind.RECORDING)
         _course(plugin).streams = {StreamView.MAIN: "https://example.com/main.mp4"}
         _course(plugin).streams_loading = False
-        plugin._processing = True
-        plugin._playback_class_id = current_navigation().class_id
         _course(plugin).session_meta["total_media_seconds"] = 3600.0
         _course(plugin).session_id = current_navigation().class_id
         session = ctx.streams.start_session(current_navigation().class_id)
@@ -1483,7 +1577,8 @@ class TestClassPlayer:
         progress = [b for b in blocks if b["type"] == BlockType.PROGRESS]
         assert progress, "recording page must show processing progress"
 
-        ctx.streams.current.meta["media_name"] = "clip.mp4"
+        session.meta["media_name"] = "clip.mp4"
+        _course(plugin).finished = True
         ctx.ui.open_page("input:session")
         blocks = ctx.ui.state()["page_content"]["input:session"]
         links = [
@@ -1535,7 +1630,11 @@ class TestClassPlayer:
         plugin._processing = True
         from plugins.input.plugin import _Job
 
-        job = _Job(current_navigation().class_id, dict(current_navigation().class_meta), state=JobState.RUNNING)
+        job = _Job(
+            current_navigation().class_id,
+            dict(current_navigation().class_meta),
+            state=JobState.RUNNING,
+        )
         plugin._jobs[job.id] = job
         plugin._active_job = job
         calls: list[str] = []
@@ -1559,7 +1658,11 @@ class TestClassPlayer:
         plugin._processing = True
         from plugins.input.plugin import _Job
 
-        job = _Job(current_navigation().class_id, dict(current_navigation().class_meta), state=JobState.RUNNING)
+        job = _Job(
+            current_navigation().class_id,
+            dict(current_navigation().class_meta),
+            state=JobState.RUNNING,
+        )
         plugin._jobs[job.id] = job
         plugin._active_job = job
         calls: list[str] = []
@@ -1656,7 +1759,11 @@ class TestClassPlayer:
         plugin._processing = True
         from plugins.input.plugin import _Job
 
-        job = _Job(current_navigation().class_id, dict(current_navigation().class_meta), state=JobState.RUNNING)
+        job = _Job(
+            current_navigation().class_id,
+            dict(current_navigation().class_meta),
+            state=JobState.RUNNING,
+        )
         plugin._jobs[job.id] = job
         plugin._active_job = job
         monkeypatch.setattr(plugin._sources, "stop", lambda: None)
@@ -1664,7 +1771,8 @@ class TestClassPlayer:
         result = ctx.ui.dispatch_action("input.stop", {})
         assert result.ok
         assert plugin._processing is False
-        assert job.state is JobState.CANCELED
+        assert job.id not in plugin._jobs
+        assert plugin._active_job is None
 
         plugin.teardown()
 
@@ -1870,6 +1978,9 @@ class TestProcessingQueue:
         assert result.ok
         assert plugin._queue == ["class:b"]
         assert plugin._active_job.id == "class:a"
+        tasks = {task["id"]: task for task in ctx.ui.get_tasks()}
+        assert tasks["queue:class:b"]["state"] == "pending"
+        assert tasks["input"].get("state", "running") == "running"
 
         first = plugin._active_job
         plugin._finish_job(first, "test finished")
@@ -1887,7 +1998,6 @@ class TestProcessingQueue:
 
     @pytest.mark.parametrize("selected", ["first", "last"])
     def test_queue_order_and_cancel(self, monkeypatch, selected):
-        from bs4 import BeautifulSoup
         from plugins.input.plugin import _Job
 
         ctx, plugin, _started = self._setup(monkeypatch)
@@ -1901,31 +2011,69 @@ class TestProcessingQueue:
             plugin._enqueue_job_locked(last)
             plugin._enqueue_job_locked(first)
             current_navigation().class_id = selected
-            current_navigation().class_meta = dict(plugin._jobs[selected].cls, id=selected)
+            current_navigation().class_meta = dict(
+                plugin._jobs[selected].cls, id=selected
+            )
 
-            html = plugin._render_queue_item()[0]["html"]
-            rows = BeautifulSoup(html, "html.parser").select("li")
-            assert [row.select_one("button")["data-id"] for row in rows] == [
-                "active",
-                "first",
-                "last",
-            ]
-            assert all(row.select_one("button").text == "取消" for row in rows[1:])
-            control = next(
-                row.select_one("button")
+            block = plugin._render_queue_item()[0]
+            assert block["summary"] == "处理中 1 个，排队中 2 个"
+            rows = block["items"]
+            assert [row["id"] for row in rows] == ["active", "first", "last"]
+            assert all(
+                any(
+                    action["action"] == "input.queue_cancel"
+                    for action in row["actions"]
+                )
                 for row in rows
-                if row.select_one("button")["data-id"] == selected
             )
-            result = ctx.ui.dispatch_action(control["data-action"], {"id": selected})
+            control = next(
+                action
+                for row in rows
+                if row["id"] == selected
+                for action in row["actions"]
+                if action["action"] == "input.queue_cancel"
+            )
+            result = ctx.ui.dispatch_action(control["action"], control["value"])
             assert result.ok
-            assert plugin._jobs[selected].state == JobState.CANCELED
+            assert selected not in plugin._jobs
             assert plugin._active_job is active
-            remaining = BeautifulSoup(
-                plugin._render_queue_item()[0]["html"], "html.parser"
+            remaining = plugin._render_queue_item()[0]["items"]
+            assert [row["id"] for row in remaining] == [
+                "active",
+                "last" if selected == "first" else "first",
+            ]
+        finally:
+            plugin.teardown()
+
+    def test_cancel_returns_to_start(self, monkeypatch):
+        ctx, plugin, started = self._setup(monkeypatch)
+        try:
+            self._open(ctx, plugin, "course", "复分析")
+            course = _course(plugin)
+            course.streams = {StreamView.MAIN: "https://example.com/main.mp4"}
+            course.streams_loading = False
+            monkeypatch.setattr(plugin, "_probe_job_durations", lambda job: None)
+            assert ctx.ui.dispatch_action("input.start_processing", {}).ok
+            job = plugin._active_job
+            session = ctx.streams.start_session(
+                "course", meta={"class_id": "course", "kind": SourceKind.RECORDING}
             )
-            assert [
-                row.select_one("button")["data-id"] for row in remaining.select("li")
-            ] == ["active", "last" if selected == "first" else "first"]
+            job.session_id = session.session_id
+            session.transcript.append("保留识别结果", start=0, end=1)
+            assert ctx.events.flush()
+
+            assert ctx.ui.dispatch_action("input.queue_cancel", {"id": job.id}).ok
+            assert ctx.events.flush()
+            assert job.id not in plugin._jobs
+            assert plugin._active_job is None
+            assert not course.finished
+            assert plugin._find_finished_class(job.id) is None
+            assert session.transcript[0].text == "保留识别结果"
+            assert "开始处理" in plugin._render_session_item()[0]["html"]
+
+            assert ctx.ui.dispatch_action("input.start_processing", {}).ok
+            assert plugin._active_job is not job
+            assert len(started) == 2
         finally:
             plugin.teardown()
 
@@ -1959,14 +2107,15 @@ class TestProcessingQueue:
         _course(plugin).streams = {StreamView.MAIN: "https://example.com/a.mp4"}
         _course(plugin).streams_loading = False
         ctx.ui.dispatch_action("input.start_processing", {})
-        plugin._tree["nodes"] = plugin._apply_tree_state(plugin._tree["nodes"])
-        child = plugin._tree["nodes"][0]["children"][0]
+        decorated = plugin._apply_tree_state(plugin._tree["nodes"])
+        child = decorated[0]["children"][0]
         assert child["badge"] == "处理中"
         assert child["badge_class"] == TreeBadge.LIVE
+        assert "badge" not in plugin._tree["nodes"][0]["children"][0]
 
         self._open(ctx, plugin, "class:b", "线性代数")
-        plugin._tree["nodes"] = plugin._apply_tree_state(plugin._tree["nodes"])
-        child = plugin._tree["nodes"][0]["children"][0]
+        decorated = plugin._apply_tree_state(plugin._tree["nodes"])
+        child = decorated[0]["children"][0]
         assert child["badge"] == "处理中"
         plugin.teardown()
 
@@ -2024,7 +2173,8 @@ class TestProcessingQueue:
             wait.assert_not_called()
             context = ctx.ui.state()["context"]
             assert context["title"] == "线性代数"
-            assert "11-05" in context["subtitle"]
+            assert "高等数学" not in context["subtitle"]
+            assert plugin._render_queue_item()[0]["items"][0]["title"] == "高等数学"
             assert context["selected"] is True
             assert not [
                 b for b in plugin._render_session() if b["type"] == BlockType.PROGRESS
@@ -2092,8 +2242,28 @@ def test_gap_fill_combines_audio_transport_and_video_consumer_gates(
 def test_fill_reuses_class_timeline(tmp_path, monkeypatch):
     from datetime import datetime
     from core.coverage import CoverageStore
+    from dataclasses import replace
+    from plugins.notes.plugin import NotesPlugin, NotesService
+    from plugins.notes.view import NotesView
 
     ctx = _make_context(tmp_path)
+    view = NotesView()
+    view.ctx = replace(
+        ctx,
+        plugin_id="notes",
+        allowed_dependencies={
+            "notes",
+            *NotesPlugin.requires,
+            *NotesPlugin.optional_requires,
+        },
+    )
+    view.settings = FakeSettings({"notes.fill_max_attempts": 1})
+    view.pipeline = SimpleNamespace(finalize=mock.Mock())
+    view.stop_event = threading.Event()
+    view.fill_threads = []
+    view.notices = {}
+    view.gap_filler = None
+    ctx.services.register("notes", NotesService(view.pipeline, view), plugin_id="notes")
     plugin = InputPlugin()
     plugin.setup(ctx)
     sid = "1-20261105-0800"
@@ -2123,7 +2293,11 @@ def test_fill_reuses_class_timeline(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(plugin, "_start_fill_part", lambda *args, **kwargs: True)
     try:
-        assert plugin._fill_gaps(sid)
+        assert view._fill_again({"session_id": sid})["ok"]
+        for thread in view.fill_threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+        view.pipeline.finalize.assert_not_called()
         record = json.loads((directory / "transcript.jsonl").read_text())
         assert (record["start"], record["end"]) == (60, 80)
         assert CoverageStore(tmp_path, sid).covers(MediaKind.AUDIO, 60, 80)

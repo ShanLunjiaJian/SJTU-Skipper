@@ -35,7 +35,9 @@ class BlockType(StrEnum):
     TEXT = "text"
     HTML = "html"
     TABS = "tabs"
+    DISCLOSURE = "disclosure"
     FORM = "form"
+    SCHEMA_FORM = "schema_form"
     TREE = "tree"
     BUTTONS = "buttons"
     KEYVALUE = "keyvalue"
@@ -48,6 +50,7 @@ class BlockType(StrEnum):
     AGENT_ACTIVITY = "agent_activity"
     IMAGE = "image"
     TASK_QUEUE = "task_queue"
+    QUEUE = "queue"
     TABLE = "table"
     CARDS = "cards"
     LIST = "list"
@@ -71,6 +74,19 @@ class FormInputType(StrEnum):
 class TaskState(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
+
+
+class StatusLabel(StrEnum):
+    NOT_STARTED = "未开始"
+    QUEUED = "排队中"
+    PREPARING = "准备中"
+    RUNNING = "处理中"
+    PAUSED = "已暂停"
+    FINISHED = "已结束"
+    FAILED = "失败"
+    CANCELLED = "已取消"
+    IDLE = "空闲"
+    DISABLED = "未启用"
 
 
 Renderer = Callable[[], Any]
@@ -283,9 +299,9 @@ class _Action:
 class _Command:
     id: str
     title: str
-    subtitle: str
+    icon: str
+    description: str
     category: str
-    icon: str | None
     order: float
     page_id: str | None
     action: str | None
@@ -338,6 +354,8 @@ class UIManager:
         self.register_command(
             "ui.tasks",
             "任务队列",
+            icon="list-task",
+            description="查看任务进度和处理队列",
             category="视图",
             page_id="ui:tasks",
             keywords="tasks queue 任务 队列",
@@ -547,9 +565,9 @@ class UIManager:
         command_id: str,
         title: str,
         *,
-        subtitle: str = "",
+        icon: str = "",
+        description: str = "",
         category: str = "",
-        icon: str | None = None,
         order: float = 0,
         page_id: str | None = None,
         action: str | None = None,
@@ -564,9 +582,9 @@ class UIManager:
             self._commands[command_id] = _Command(
                 id=command_id,
                 title=title,
-                subtitle=subtitle,
-                category=category,
                 icon=icon,
+                description=description,
+                category=category,
                 order=float(order),
                 page_id=page_id,
                 action=action,
@@ -598,9 +616,9 @@ class UIManager:
             {
                 "id": c.id,
                 "title": c.title,
-                "subtitle": c.subtitle,
-                "category": c.category,
                 "icon": c.icon,
+                "description": c.description,
+                "category": c.category,
                 "page": c.page_id,
                 "action": c.action,
                 "keywords": c.keywords,
@@ -791,7 +809,7 @@ class UIManager:
             return [
                 {
                     "type": BlockType.HTML,
-                    "html": f'<div class="ui-error">渲染失败：{_escape(str(exc))}</div>',
+                    "html": f'<div class="alert theme-danger" role="alert">渲染失败：{_escape(str(exc))}</div>',
                 }
             ]
 
@@ -830,7 +848,16 @@ class UIManager:
                 tab["blocks"] = self._normalize(tab.get("blocks", []))
                 tabs.append(tab)
             block["tabs"] = tabs
-        elif btype == BlockType.FORM:
+        elif btype == BlockType.DISCLOSURE:
+            block["blocks"] = self._normalize(block.get("blocks", []))
+        elif btype == BlockType.TABLE:
+            block["rows"] = [
+                {**row, "details": self._normalize(row["details"])}
+                if isinstance(row, dict) and "details" in row
+                else row
+                for row in block.get("rows", [])
+            ]
+        elif btype in (BlockType.FORM, BlockType.SCHEMA_FORM):
             block.setdefault("fields", [])
         elif btype == BlockType.TREE:
             block["nodes"] = _normalize_tree_nodes(block.get("nodes", []))

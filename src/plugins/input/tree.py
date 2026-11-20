@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 
 from core.media import SourceKind
+from collections.abc import Iterable
 
 from typing import Any
 from core.lecture import lecture_id, source_id
@@ -26,6 +27,8 @@ class LiveState(StrEnum):
 class TreeBadge(StrEnum):
     LIVE = "live"
     UPCOMING = "upcoming"
+    PAUSED = "paused"
+    ENDED = "ended"
 
 
 _TIME_FORMATS = (
@@ -309,6 +312,8 @@ def _live_group_child(
         "badge": state,
         "badge_class": TreeBadge.LIVE
         if state == LiveState.LIVE
+        else TreeBadge.ENDED
+        if state == LiveState.ENDED
         else TreeBadge.UPCOMING,
         "live": state == LiveState.LIVE,
         "action": {

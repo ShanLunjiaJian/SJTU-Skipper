@@ -1,19 +1,10 @@
-"""Blocks for the LLM settings page.
-
-The page is a workflow, not a list of fields:
-
-``概览``     what is configured, what still blocks a run
-``提供方``   one card per endpoint, credentials included
-``模型``     pick a provider, compare its models, edit one
-``角色``     pick a role, choose its model
-``原始配置`` the two YAML files, as an escape hatch
-
-Rendering is a pure function of the catalog plus the current selection, so the
-plugin keeps state and actions while this module keeps layout and wording.
-"""
+"""Render LLM settings with shared table editors."""
 
 from __future__ import annotations
 
+import json
+from copy import deepcopy
+from html import escape
 from typing import Any, Mapping
 
 from core.ui import BlockType, FormInputType
@@ -23,20 +14,14 @@ PAGE_ID = "llm:configuration"
 # Endpoint presets: protocol, auth mode and URL are decided here so the UI never
 # asks the user to remember spellings.
 PROVIDER_PRESETS: tuple[tuple[str, str], ...] = (
-    ("opencode-go", "OpenCode Go 套餐（浏览器授权）"),
-    ("deepseek", "DeepSeek（API Key）"),
-    ("custom", "自定义 OpenAI 兼容端点"),
+    ("custom", "OpenAI 兼容端点"),
+    ("opencode-go", "OpenCode Go"),
 )
 PRESETS: dict[str, dict[str, str]] = {
     "opencode-go": {
         "base_url": "https://opencode.ai/inference/go/openai/v1",
         "api": "openai-completions",
         "auth": "oauth",
-    },
-    "deepseek": {
-        "base_url": "https://api.deepseek.com",
-        "api": "openai-completions",
-        "auth": "apiKey",
     },
     "custom": {"base_url": "", "api": "openai-completions", "auth": "apiKey"},
 }
@@ -62,13 +47,14 @@ THINKING_LEVELS: tuple[str, ...] = (
     "medium",
     "high",
     "xhigh",
+    "auto",
     "max",
 )
 ROLE_TITLES: dict[str, str] = {
     "default": "默认",
     "ask_instant": "快速问答",
     "ask_research": "研究问答",
-    "note_chunk": "笔记分段",
+    "note_chunk": "分段笔记",
     "note_writer": "笔记写作",
     "note_review": "笔记审阅",
     "board_recognition": "板书识别",
@@ -135,8 +121,10 @@ def role_titles(roles: list[str]) -> str:
 def selector_parts(selector: str) -> tuple[str, str]:
     """Split ``provider/model:level`` without mistaking the model for a level."""
 
-    target, _, level = selector.partition(":")
-    return target, level
+    if "," in selector:
+        return selector, ""
+    target, separator, level = selector.rpartition(":")
+    return (target, level) if separator and level in THINKING_LEVELS else (selector, "")
 
 
 def providers(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -193,48 +181,20 @@ def issues(catalog: Mapping[str, Any]) -> list[str]:
 
 
 class SettingsView:
-    """Render the LLM section for one catalog and one selection."""
+    """Render LLM tasks and their provider-scoped content."""
 
     def __init__(
         self,
         catalog: Mapping[str, Any],
-        selection: Mapping[str, str],
         checks: Mapping[str, Mapping[str, Any]] | None = None,
         login: Mapping[str, Any] | None = None,
         status: str = "",
     ) -> None:
         self.catalog = catalog
-        self.selection = dict(selection)
         self.checks = dict(checks or {})
         # An authorization in flight: {provider, uri, code, remaining}.
         self.login = dict(login) if login else None
         self.login_status = status
-
-    # ---- what is being edited
-
-    def provider(self) -> dict[str, Any] | None:
-        items = providers(self.catalog)
-        for item in items:
-            if item["id"] == self.selection.get("provider"):
-                return item
-        return items[0] if items else None
-
-    def model(self, provider: Mapping[str, Any] | None) -> dict[str, Any] | None:
-        if provider is None:
-            return None
-        models = list(provider.get("models", []))
-        for model in models:
-            if model["id"] == self.selection.get("model"):
-                return model
-        return models[0] if models else None
-
-    def role(self) -> str:
-        selectors = self.catalog.get("selectors", {})
-        if self.selection.get("role") in selectors:
-            return self.selection["role"]
-        if "default" in selectors:
-            return "default"
-        return next(iter(selectors), "")
 
     # ---- pages
 
@@ -256,40 +216,37 @@ class SettingsView:
             if item.get("auth") != "none" and not item.get("configured")
         ]
         blocks: list[dict[str, Any]] = [
+            {"type": BlockType.MARKDOWN, "text": "### 配置摘要"},
             {
                 "type": BlockType.KEYVALUE,
                 "items": [
-                    ["默认模型", self._selector_text("default")],
                     ["提供方", f"{len(items)} 个"],
                     ["模型", f"{models} 个"],
                     [
                         "凭据",
-                        "全部已配置" if not missing else "缺 " + "、".join(missing),
+                        "全部已配置" if not missing else f"缺少：{'、'.join(missing)}",
                     ],
                 ],
-            }
+            },
         ]
-        lines = ["### 待处理"]
-        found = issues(self.catalog)
-        if found:
-            lines.extend(f"- {item}" for item in found)
-        else:
-            lines.append("- 无．配置可用于新会话．")
-        blocks.append({"type": BlockType.MARKDOWN, "text": "\n".join(lines)})
+        for problem in reversed(issues(self.catalog)):
+            blocks.insert(
+                0,
+                {
+                    "type": BlockType.HTML,
+                    "html": f'<div class="alert theme-danger" role="alert">{escape(problem)}</div>',
+                },
+            )
 
-        lines = [
-            "### 角色分配",
-            "",
-            "| 角色 | 设置 | 生效模型 |",
-            "| --- | --- | --- |",
-        ]
-        for role in self.catalog.get("selectors", {}):
-            info = resolved(self.catalog, role)
+        blocks.append({"type": BlockType.MARKDOWN, "text": "### 角色分配"})
+        assignments = []
+        for role in ROLE_TITLES:
+            selector = self.catalog["selectors"][role]
             label = ROLE_TITLES.get(role, role)
-            target = f"`{info.get('provider', '')}/{info.get('model', '')}`"
-            selector = str(self.catalog.get("selectors", {}).get(role, "@default"))
-            lines.append(f"| {label} `{role}` | `{selector}` | {target} |")
-        blocks.append({"type": BlockType.MARKDOWN, "text": "\n".join(lines)})
+            target = self._selector_text(role)
+            value = target if selector == target else f"{selector} -> {target}"
+            assignments.append([f"{label} ({role})", value])
+        blocks.append({"type": BlockType.KEYVALUE, "items": assignments})
         return blocks
 
     def _selector_text(self, role: str) -> str:
@@ -298,35 +255,93 @@ class SettingsView:
             return "—"
         # Plain text: the key-value block does not render Markdown.
         text = f"{info.get('provider')}/{info.get('model')}"
-        selector = str(self.catalog.get("selectors", {}).get(role, ""))
-        _target, level = selector_parts(selector)
+        level = info.get("thinkingLevel")
         if level:
-            text += f" · {level}"
+            text += f":{level}"
         return text
 
     def _provider_page(self) -> list[dict[str, Any]]:
         items = providers(self.catalog)
-        blocks: list[dict[str, Any]] = [
-            {
-                "type": BlockType.MARKDOWN,
-                "text": (
-                    "### 提供方\n\n"
-                    "一个提供方是一组端点、协议与凭据．模型属于提供方，"
-                    "在「模型」页比较和编辑．"
-                ),
-            }
-        ]
-        blocks.extend(self._login_panel())
+        blocks = self._login_panel()
         if items:
-            blocks.append({"type": BlockType.CARDS, "items": self._cards(items)})
-        elif self.login_status:
-            blocks.append({"type": BlockType.MARKDOWN, "text": self.login_status})
-        blocks.append({"type": BlockType.MARKDOWN, "text": "### 接入新提供方"})
-        blocks.append({"type": BlockType.FORM, **self._add_form()})
+            blocks.append(
+                {
+                    "type": BlockType.TABLE,
+                    "id": "llm:providers",
+                    "editor": True,
+                    "columns": [
+                        {"key": "provider", "label": "提供方"},
+                        {"key": "models", "label": "模型数"},
+                        {"key": "auth", "label": "鉴权"},
+                        {"key": "credentials", "label": "凭据"},
+                    ],
+                    "rows": [
+                        {
+                            "id": item["id"],
+                            "provider": item["id"],
+                            "models": len(item.get("models", [])),
+                            "auth": AUTH_LABELS.get(item.get("auth"), item.get("auth", "")),
+                            "credentials": (
+                                "无需鉴权" if item.get("auth") == "none"
+                                else "已配置" if item.get("configured") else "未配置"
+                            ),
+                            "details": [self._provider_form(item)],
+                            "actions": self._provider_actions(item),
+                        }
+                        for item in items
+                    ],
+                    "row_actions": [
+                        {
+                            "label": "删除",
+                            "icon": "trash",
+                            "action": "llm.provider.remove",
+                            "keys": ["provider"],
+                            "class": "btn-text theme-danger btn-sm",
+                        }
+                    ],
+                }
+            )
+        else:
+            blocks.append(
+                {"type": BlockType.MARKDOWN, "text": "尚无提供方．添加提供方后可配置连接与模型．"}
+            )
+        blocks.append(
+            {
+                "type": BlockType.DISCLOSURE,
+                "id": "llm:add-provider",
+                "title": "添加提供方",
+                "open": not items,
+                "blocks": [
+                    {"type": BlockType.FORM, **self._add_form()},
+                    self._new_provider_form(),
+                    self._definition_form(
+                        "llm:models-extensions", "配置扩展参数",
+                        {"type": "object", "properties": {}},
+                        {key: value for key, value in self.catalog["definitions"]["models"].items() if key != "providers"},
+                        {"scope": "models_extensions"},
+                    ),
+                ],
+            }
+        )
         return blocks
 
+    @staticmethod
+    def _provider_tabs(
+        key: str, label: str, tabs: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": BlockType.TABS,
+                "id": key,
+                "label": label,
+                "layout": "settings-pages",
+                "hide_single": True,
+                "tabs": tabs,
+            }
+        ]
+
     def _login_panel(self) -> list[dict[str, Any]]:
-        """Keep the authorization link on the page; a toast cannot be copied."""
+        """Keep the authorization URL and code available until login completes."""
 
         if self.login is None:
             if not self.login_status or not providers(self.catalog):
@@ -341,11 +356,11 @@ class SettingsView:
             "### 等待 OpenCode 授权",
             "",
             f"1. 在浏览器打开：[打开授权页面]({uri})（新标签页）",
-            f"2. 确认页面显示的验证码：`{code}`",
+            f"2. 确认页面显示的验证码：{code}",
             "",
             (
-                f"链接与验证码 {minutes} 分钟内有效，授权完成后本页自动刷新；"
-                "超时请点「重新开始授权」．"
+                f"链接与验证码 {minutes} 分钟内有效．授权完成后本页自动刷新．"
+                "超时后可重新开始授权．"
             ),
             "",
             f"浏览器没有弹出时，复制这个地址：`{uri}`",
@@ -360,119 +375,114 @@ class SettingsView:
                         "label": "重新开始授权",
                         "action": "llm.opencode_login",
                         "value": {"provider": pid, "force": True},
+                        "class": "btn-outline theme-secondary",
                     },
                     {
                         "label": "取消授权",
                         "action": "llm.opencode_cancel",
                         "value": {"provider": pid},
-                        "class": "btn btn-ghost",
+                        "class": "btn-outline theme-secondary",
                     },
                 ],
             },
         ]
 
-    def _cards(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        cards: list[dict[str, Any]] = []
-        for provider in items:
-            pid = provider["id"]
-            oauth = provider.get("auth") == "oauth"
-            configured = bool(provider.get("configured"))
-            actions: list[dict[str, Any]] = []
-            if oauth:
-                actions.append(
-                    {
-                        "label": "关联套餐",
-                        "action": "llm.opencode_login",
-                        "value": {"provider": pid},
-                        "class": "btn btn-primary btn-sm",
-                    }
-                )
-            if configured:
-                actions.append(
-                    {
-                        "label": "删除凭据",
-                        "action": "llm.logout",
-                        "value": {"provider": pid},
-                        "class": "btn btn-danger btn-sm",
-                    }
-                )
-            if len(items) > 1:
-                actions.append(
-                    {
-                        "label": "删除提供方",
-                        "action": "llm.provider.remove",
-                        "value": {"provider": pid},
-                        "class": "btn btn-danger btn-sm",
-                    }
-                )
-            cards.append(
+    def _provider_actions(
+        self, provider: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        pid = provider["id"]
+        actions: list[dict[str, Any]] = []
+        if provider.get("auth") == "oauth" and not provider.get("configured") and self.login is None:
+            actions.append(
                 {
-                    "id": pid,
-                    "title": pid,
-                    "subtitle": provider.get("baseUrl") or "未填写端点地址",
-                    "meta": [
-                        ("协议", provider.get("api", API_OPTIONS[0])),
-                        (
-                            "鉴权",
-                            AUTH_LABELS.get(
-                                str(provider.get("auth")), str(provider.get("auth"))
-                            ),
-                        ),
-                        ("凭据", "已配置" if configured else "未配置"),
-                        ("模型", f"{len(provider.get('models', []))} 个"),
-                    ],
-                    "blocks": [
-                        {"type": BlockType.FORM, **self._provider_form(provider)}
-                    ],
-                    "actions": actions,
+                    "label": "关联套餐",
+                    "icon": "link",
+                    "action": "llm.opencode_login",
+                    "value": {"provider": pid},
+                    "class": "btn-text theme-secondary btn-sm",
                 }
             )
-        return cards
+        if provider.get("auth") != "none" and provider.get("configured"):
+            actions.append(
+                {
+                    "label": "删除凭据",
+                    "icon": "key",
+                    "action": "llm.logout",
+                    "value": {"provider": pid},
+                    "class": "btn-text theme-danger btn-sm",
+                }
+            )
+        return actions
+
+    def _provider_form(self, provider: Mapping[str, Any]) -> dict[str, Any]:
+        pid = str(provider["id"])
+        schema = self._provider_schema()
+        schema["properties"]["models"]["x-hidden"] = True
+        schema["properties"]["modelOverrides"]["x-hidden"] = True
+        definition = self.catalog["definitions"]["models"]["providers"][pid]
+        return self._definition_form(
+            f"llm:provider:{pid}", f"连接与凭据 {pid}", schema, definition,
+            {"scope": "provider", "provider": pid},
+        )
+
+    def _provider_schema(self) -> dict[str, Any]:
+        schema = deepcopy(self.catalog["definition_schema"]["properties"]["providers"]["additionalProperties"])
+        self._label_schema(schema)
+        return schema
+
+    @classmethod
+    def _label_schema(cls, schema: dict[str, Any]) -> None:
+        labels = {
+            "baseUrl": "端点地址", "apiKey": "API Key", "api": "协议",
+            "auth": "鉴权方式", "headers": "请求头", "compat": "协议兼容",
+            "remoteCompaction": "服务端上下文压缩", "discovery": "端点模型发现",
+            "models": "模型", "modelOverrides": "模型覆盖", "id": "模型 ID",
+            "name": "显示名称", "kind": "模型用途", "reasoning": "支持思考",
+            "thinking": "思考控制", "input": "输入类型", "contextWindow": "上下文窗口",
+            "maxContextWindow": "最大上下文窗口", "maxTokens": "输出 token 上限",
+            "cost": "模型价格", "promptCache": "提示词缓存", "tokenizer": "分词器",
+            "supportsTools": "支持工具调用", "extraBody": "额外请求参数",
+            "whenThinking": "思考模式兼容设置", "mode": "控制模式",
+            "efforts": "支持的思考级别", "defaultLevel": "默认思考级别",
+            "effortMap": "思考级别映射", "authHeader": "发送鉴权头",
+            "requestMetadata": "请求元数据", "transport": "传输方式",
+            "contextPromotionTarget": "扩展上下文目标", "compactionModel": "压缩模型",
+        }
+        for key, child in schema.get("properties", {}).items():
+            child["title"] = labels.get(key, key)
+            cls._label_schema(child)
+        for key in ("items", "additionalProperties"):
+            if isinstance(schema.get(key), dict):
+                cls._label_schema(schema[key])
 
     @staticmethod
-    def _provider_form(provider: Mapping[str, Any]) -> dict[str, Any]:
-        pid = str(provider["id"])
+    def _definition_form(
+        key: str, title: str, schema: dict[str, Any], value: Any, context: dict[str, Any]
+    ) -> dict[str, Any]:
         return {
-            "fields": [
-                field(
-                    "provider",
-                    "提供方",
-                    pid,
-                    readonly=True,
-                    description="用作 roles 前缀，创建后不可改名",
-                ),
-                field("base_url", "端点地址", provider.get("baseUrl", "")),
-                field(
-                    "api",
-                    "协议",
-                    provider.get("api", API_OPTIONS[0]),
-                    type=FormInputType.SELECT,
-                    input=FormInputType.SELECT,
-                    options=list(API_OPTIONS),
-                ),
-                field(
-                    "auth",
-                    "鉴权方式",
-                    provider.get("auth", AUTH_OPTIONS[0]),
-                    type=FormInputType.SELECT,
-                    input=FormInputType.SELECT,
-                    options=list(AUTH_OPTIONS),
-                ),
-                field(
-                    "key",
-                    "API Key",
-                    input=FormInputType.PASSWORD,
-                    visible_when=("auth", ("apiKey",)),
-                    description="留空保持不变",
-                ),
-            ],
-            "submit": {"label": "保存提供方", "action": "llm.provider.save"},
+            "type": BlockType.SCHEMA_FORM, "id": key, "title": title,
+            "schema": schema, "value": value, "context": context,
+            "submit": {"action": "llm.definition.save", "label": "保存"},
         }
+
+    def _new_provider_form(self) -> dict[str, Any]:
+        schema = self._provider_schema()
+        schema["properties"] = {
+            "_provider_id": {"type": "string", "title": "提供方标识"},
+            **schema["properties"],
+        }
+        schema["required"] = ["_provider_id", "models"]
+        return self._definition_form(
+            "llm:new-provider", "手动配置提供方", schema,
+            {"_provider_id": "", "models": [{"id": ""}]},
+            {"scope": "provider", "provider": ""},
+        )
 
     @staticmethod
     def _add_form() -> dict[str, Any]:
         custom = ("preset", ("custom",))
         return {
+            "description": "保存后自动获取端点模型．",
             "fields": [
                 field(
                     "preset",
@@ -481,14 +491,20 @@ class SettingsView:
                     type=FormInputType.SELECT,
                     input=FormInputType.SELECT,
                     options=[value for value, _label in PROVIDER_PRESETS],
-                    description="预设已带端点、协议与鉴权方式；保存后自动获取模型",
+                    option_items=[
+                        {"value": value, "label": label}
+                        for value, label in PROVIDER_PRESETS
+                    ],
+                    description="OpenCode Go 使用浏览器授权．",
+                    section="提供方",
                 ),
                 field(
                     "provider",
-                    "标识",
+                    "提供方标识",
                     "",
-                    placeholder="默认为预设名，如 opencode-go",
-                    description="作为 roles.yml 的前缀",
+                    section="提供方",
+                    placeholder="例如 lecture",
+                    description="模型选择器的提供方前缀，创建后不可修改",
                 ),
                 field(
                     "base_url",
@@ -496,6 +512,7 @@ class SettingsView:
                     "",
                     visible_when=custom,
                     placeholder="https://example.com/v1",
+                    section="连接",
                 ),
                 field(
                     "api",
@@ -505,6 +522,7 @@ class SettingsView:
                     input=FormInputType.SELECT,
                     options=list(API_OPTIONS),
                     visible_when=custom,
+                    section="连接",
                 ),
                 field(
                     "auth",
@@ -514,84 +532,83 @@ class SettingsView:
                     input=FormInputType.SELECT,
                     options=list(AUTH_OPTIONS),
                     visible_when=custom,
+                    section="凭据",
                 ),
                 field(
                     "key",
                     "API Key",
                     input=FormInputType.PASSWORD,
-                    visible_when=("preset", ("deepseek", "custom")),
-                    description="可留空，之后在提供方卡片里补填",
+                    visible_when=custom,
+                    description="可留空，之后在提供方编辑器中填写",
+                    section="凭据",
                 ),
             ],
-            "submit": {"label": "保存并获取模型", "action": "llm.provider.save"},
+            "submit": {"label": "保存提供方", "action": "llm.provider.save"},
         }
 
     def _model_page(self) -> list[dict[str, Any]]:
         items = providers(self.catalog)
-        blocks: list[dict[str, Any]] = [
-            {
-                "type": BlockType.MARKDOWN,
-                "text": (
-                    "### 模型\n\n"
-                    "先选提供方，再看端点提供了什么、本地配置了什么，"
-                    "最后编辑选中的那一个．"
-                ),
-            }
-        ]
         if not items:
-            blocks.append(
+            return [
                 {
                     "type": BlockType.MARKDOWN,
-                    "text": "尚无提供方，请先在「提供方」页接入端点．",
+                    "text": "尚无提供方．请先在「提供方」页接入端点．",
                 }
-            )
-            return blocks
-        provider = self.provider()
-        assert provider is not None
-        blocks.append(
-            {
-                "type": BlockType.ROWS,
-                "items": [
-                    {
-                        "title": item["id"],
-                        "subtitle": item.get("baseUrl") or "未填写端点地址",
-                        "meta": (
-                            f"{len(item.get('models', []))} 个模型 · "
-                            f"{AUTH_LABELS.get(str(item.get('auth')), item.get('auth'))} · "
-                            f"{'凭据已配置' if item.get('configured') else '凭据未配置'}"
-                        ),
-                        "active": item["id"] == provider["id"],
-                        "action": "llm.select.provider",
-                        "value": {"provider": item["id"]},
-                        "label": "查看",
-                    }
-                    for item in items
-                ],
-            }
+            ]
+        return self._provider_tabs(
+            "llm:models",
+            "模型提供方",
+            [
+                {
+                    "id": item["id"],
+                    "title": item["id"],
+                    "blocks": self._provider_models(item),
+                }
+                for item in items
+            ],
         )
+
+    def _provider_models(self, provider: Mapping[str, Any]) -> list[dict[str, Any]]:
         pid = provider["id"]
-        blocks.append(
-            {
-                "type": BlockType.MARKDOWN,
-                "text": f"#### `{pid}`\n\n`{provider.get('baseUrl') or '未填写端点地址'}`",
-            }
-        )
-        blocks.append(
-            {
-                "type": BlockType.BUTTONS,
-                "buttons": [
-                    {
-                        "label": "检查端点模型",
-                        "action": "llm.check",
-                        "value": {"provider": pid},
-                        "primary": True,
-                    }
-                ],
-            }
-        )
-        blocks.extend(self._discovery(provider))
+        blocks: list[dict[str, Any]] = []
         blocks.extend(self._model_table(provider))
-        blocks.extend(self._model_editor(provider))
+        model_schema = self._provider_schema()["properties"]["models"]["items"]
+        blocks.append({
+            "type": BlockType.DISCLOSURE, "id": f"llm:add-model:{pid}",
+            "title": "添加模型",
+            "blocks": [self._definition_form(
+                f"llm:new-model:{pid}", "手动配置模型", model_schema, {"id": ""},
+                {"scope": "model", "provider": pid, "index": -1},
+            )],
+        })
+        overrides = self.catalog["definitions"]["models"]["providers"][pid].get("modelOverrides", {})
+        override_schema = self._provider_schema()["properties"]["modelOverrides"]["additionalProperties"]
+        blocks.append({
+            "type": BlockType.DISCLOSURE, "id": f"llm:overrides:{pid}",
+            "title": "模型覆盖",
+            "blocks": [self._definition_form(
+                f"llm:override:{pid}", "覆盖模型设置",
+                {"type": "object", "properties": {}, "additionalProperties": override_schema},
+                overrides, {"scope": "overrides", "provider": pid},
+            )],
+        })
+        blocks.extend(
+            [
+                {"type": BlockType.MARKDOWN, "text": "### 发现端点模型"},
+                {
+                    "type": BlockType.BUTTONS,
+                    "buttons": [
+                        {
+                            "label": "检查端点模型",
+                            "action": "llm.check",
+                            "value": {"provider": pid},
+                            "class": "btn-outline theme-secondary",
+                        }
+                    ],
+                },
+                *self._discovery(provider),
+            ]
+        )
         return blocks
 
     def _discovery(self, provider: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -601,10 +618,7 @@ class SettingsView:
             return [
                 {
                     "type": BlockType.MARKDOWN,
-                    "text": (
-                        "端点模型尚未检查．点击「检查端点模型」读取 "
-                        "`${baseUrl}/models`，只列出本地尚无的模型．"
-                    ),
+                    "text": "尚未检查端点模型．检查结果只列出本地未添加的模型．",
                 }
             ]
         if check.get("error"):
@@ -657,7 +671,7 @@ class SettingsView:
                         "action": "llm.model.add",
                         "keys": ["model"],
                         "value": {"provider": pid},
-                        "class": "btn btn-ghost btn-sm",
+                        "class": "btn-outline theme-secondary btn-sm",
                     }
                 ],
             },
@@ -665,9 +679,10 @@ class SettingsView:
                 "type": BlockType.BUTTONS,
                 "buttons": [
                     {
-                        "label": f"全部添加（{len(missing)}）",
+                        "label": f"添加全部（{len(missing)}）",
                         "action": "llm.model.add_all",
                         "value": {"provider": pid},
+                        "class": "btn-outline theme-secondary",
                     }
                 ],
             },
@@ -677,27 +692,36 @@ class SettingsView:
         pid = str(provider["id"])
         models = list(provider.get("models", []))
         blocks: list[dict[str, Any]] = [
-            {"type": BlockType.MARKDOWN, "text": "#### 已配置模型"}
+            {"type": BlockType.MARKDOWN, "text": f"### {pid} 的已配置模型"}
         ]
         if not models:
-            blocks.append({"type": BlockType.MARKDOWN, "text": "该提供方尚无模型．"})
+            blocks.append(
+                {
+                    "type": BlockType.MARKDOWN,
+                    "text": "尚无模型．检查端点模型后可添加模型．",
+                }
+            )
             return blocks
         rows = []
-        for model in models:
+        for index, model in enumerate(models):
             roles = roles_using(self.catalog, pid, model["id"])
             rows.append(
                 {
+                    "id": model["id"],
                     "model": model["id"],
                     "context": size(model.get("contextWindow")),
                     "output": size(model.get("maxTokens")),
                     "input": "/".join(model.get("input", [])) or "—",
                     "reasoning": "是" if model.get("reasoning") else "否",
                     "roles": "、".join(roles) if roles else "—",
+                    "details": self._model_editor(provider, model, index),
                 }
             )
         blocks.append(
             {
                 "type": BlockType.TABLE,
+                "id": f"llm:models:{pid}",
+                "editor": True,
                 "columns": [
                     {"key": "model", "label": "模型"},
                     {"key": "context", "label": "上下文"},
@@ -709,108 +733,35 @@ class SettingsView:
                 "rows": rows,
                 "row_actions": [
                     {
-                        "label": "编辑",
-                        "action": "llm.select.model",
-                        "keys": ["model"],
-                        "value": {"provider": pid},
-                        "class": "btn btn-ghost btn-sm",
-                    },
-                    {
                         "label": "删除",
+                        "icon": "trash",
                         "action": "llm.model.remove",
                         "keys": ["model"],
                         "value": {"provider": pid},
-                        "class": "btn btn-danger btn-sm",
+                        "class": "btn-text theme-danger btn-sm",
                     },
                 ],
             }
         )
         return blocks
 
-    def _model_editor(self, provider: Mapping[str, Any]) -> list[dict[str, Any]]:
-        model = self.model(provider)
-        if model is None:
-            return []
-        pid, mid = provider["id"], model["id"]
-        formats = set(model.get("input", []))
-        roles = roles_using(self.catalog, pid, mid)
-        hint = f"使用角色：{'、'.join(roles)}" if roles else "当前没有角色使用该模型．"
-        return [
-            {
-                "type": BlockType.MARKDOWN,
-                "text": f"#### 编辑 `{pid}/{mid}`\n\n{hint}",
-            },
-            {
-                "type": BlockType.FORM,
-                "fields": [
-                    field("provider", "提供方", pid, readonly=True),
-                    field("model", "模型", mid, readonly=True),
-                    field(
-                        "context_window",
-                        "上下文窗口",
-                        number(model.get("contextWindow")),
-                        type=FormInputType.NUMBER,
-                        input=FormInputType.NUMBER,
-                        description="一次请求可容纳的 token 上限；留空沿用端点/默认值",
-                    ),
-                    field(
-                        "max_tokens",
-                        "输出上限",
-                        number(model.get("maxTokens")),
-                        type=FormInputType.NUMBER,
-                        input=FormInputType.NUMBER,
-                        description="单次回复上限",
-                    ),
-                    field(
-                        "input_text",
-                        "输入文本",
-                        "text" in formats,
-                        type=FormInputType.CHECKBOX,
-                        input=FormInputType.CHECKBOX,
-                    ),
-                    field(
-                        "input_image",
-                        "输入图像",
-                        "image" in formats,
-                        type=FormInputType.CHECKBOX,
-                        input=FormInputType.CHECKBOX,
-                        description="板书识别要求所选模型勾选此项",
-                    ),
-                    field(
-                        "reasoning",
-                        "推理模型",
-                        bool(model.get("reasoning")),
-                        type=FormInputType.CHECKBOX,
-                        input=FormInputType.CHECKBOX,
-                        description="支持思考级别时，角色可以设置 :high 等后缀",
-                    ),
-                ],
-                "submit": {"label": "保存模型", "action": "llm.model.save"},
-            },
-        ]
+    def _model_editor(
+        self, provider: Mapping[str, Any], model: Mapping[str, Any], index: int
+    ) -> list[dict[str, Any]]:
+        pid = provider["id"]
+        schema = self._provider_schema()["properties"]["models"]["items"]
+        return [self._definition_form(
+            f"llm:model:{pid}:{model['id']}", f"模型 {model['id']}", schema, dict(model),
+            {"scope": "model", "provider": pid, "index": index},
+        )]
 
     def _role_page(self) -> list[dict[str, Any]]:
         selectors = dict(self.catalog.get("selectors", {}))
         if not selectors:
             return [{"type": BlockType.MARKDOWN, "text": "尚未配置角色．"}]
-        options: list[str] = ["@default"]
-        for provider in providers(self.catalog):
-            for model in provider.get("models", []):
-                options.append(f"{provider['id']}/{model['id']}")
-        role = self.role()
-        blocks: list[dict[str, Any]] = [
-            {
-                "type": BlockType.MARKDOWN,
-                "text": (
-                    "### 角色\n\n"
-                    "每个任务选择一个模型与思考级别．选择「编辑」后在下方修改，"
-                    "保存即对新会话生效．"
-                ),
-            }
-        ]
+        blocks: list[dict[str, Any]] = []
         rows = []
-        for name in selectors:
-            info = resolved(self.catalog, name)
+        for name in ROLE_TITLES:
             status = ""
             if name == "board_recognition":
                 status = (
@@ -818,16 +769,20 @@ class SettingsView:
                 )
             rows.append(
                 {
+                    "id": name,
                     "role": name,
                     "title": ROLE_TITLES.get(name, name),
-                    "selector": selectors.get(name, "@default"),
-                    "active": f"{info.get('provider')}/{info.get('model')}",
+                    "selector": selectors[name],
+                    "active": self._selector_text(name),
                     "status": status,
+                    "details": self._role_editor(name),
                 }
             )
         blocks.append(
             {
                 "type": BlockType.TABLE,
+                "id": "llm:roles",
+                "editor": True,
                 "columns": [
                     {"key": "title", "label": "角色"},
                     {"key": "role", "label": "标识"},
@@ -836,100 +791,69 @@ class SettingsView:
                     {"key": "status", "label": "状态"},
                 ],
                 "rows": rows,
-                "row_actions": [
-                    {
-                        "label": "编辑",
-                        "action": "llm.select.role",
-                        "keys": ["role"],
-                        "class": "btn btn-ghost btn-sm",
-                    }
-                ],
-            }
-        )
-        if not role:
-            return blocks
-        selector = selectors.get(role, "@default")
-        target, level = selector_parts(selector)
-        if target.startswith("@"):
-            target = "@default"
-            level = level or "off"
-        if target not in options:
-            target = options[0]
-        info = resolved(self.catalog, role)
-        note = f"当前生效：`{info.get('provider')}/{info.get('model')}`"
-        if role == "board_recognition" and not image_ok(self.catalog, role):
-            note += "．板书识别需要勾选 `image` 输入的模型．"
-        blocks.append(
-            {"type": BlockType.MARKDOWN, "text": f"#### 编辑 `{role}`\n\n{note}"}
-        )
-        blocks.append(
-            {
-                "type": BlockType.FORM,
-                "fields": [
-                    field(
-                        "role",
-                        "角色",
-                        role,
-                        type=FormInputType.SELECT,
-                        input=FormInputType.SELECT,
-                        options=list(selectors),
-                    ),
-                    field(
-                        "model",
-                        "模型",
-                        target,
-                        type=FormInputType.SELECT,
-                        input=FormInputType.SELECT,
-                        options=options,
-                    ),
-                    field(
-                        "level",
-                        "思考级别",
-                        level or "off",
-                        type=FormInputType.SELECT,
-                        input=FormInputType.SELECT,
-                        options=list(THINKING_LEVELS),
-                    ),
-                ],
-                "submit": {"label": "保存角色", "action": "llm.role.save"},
             }
         )
         return blocks
 
-    def _raw_page(self) -> list[dict[str, Any]]:
-        lines = [
-            "### 原始配置",
-            "",
-            (
-                "上面的页面覆盖常用操作；这里的文本会整体替换两份配置文件，"
-                "由运行时校验后原子写入．"
-            ),
-            "",
-        ]
-        for provider in providers(self.catalog):
-            status = "已配置" if provider.get("configured") else "未配置"
-            lines.append(
-                f"- `{provider['id']}`：凭据{status}（{provider.get('source')}）"
-            )
-        if self.login_status:
-            lines.extend(["", self.login_status])
+    def _role_editor(self, role: str) -> list[dict[str, Any]]:
+        selectors = dict(self.catalog.get("selectors", {}))
+        selector = selectors[role]
+        target, level = selector_parts(selector)
+        note = "保存后对新会话生效．"
+        if role == "board_recognition" and not image_ok(self.catalog, role):
+            note += "板书识别需要支持 image 输入的模型．"
         return [
-            {"type": BlockType.MARKDOWN, "text": "\n".join(lines)},
             {
                 "type": BlockType.FORM,
+                "id": f"llm:role:{role}",
+                "title": f"编辑角色 {ROLE_TITLES.get(role, role)}",
+                "description": note,
+                "fields": [
+                    field("role", "角色", role, readonly=True, hidden=True),
+                    field(
+                        "model",
+                        "模型或角色引用",
+                        target,
+                        section="模型分配",
+                        description="模型选择器或 @角色引用，支持逗号分隔的候选序列．",
+                    ),
+                    field(
+                        "level",
+                        "思考级别",
+                        level,
+                        type=FormInputType.SELECT,
+                        input=FormInputType.SELECT,
+                        options=["", *THINKING_LEVELS],
+                        option_items=[
+                            {"value": value, "label": value or "-"}
+                            for value in ("", *THINKING_LEVELS)
+                        ],
+                        section="模型分配",
+                        description="- 表示不指定思考级别；off 表示关闭思考．",
+                    ),
+                ],
+                "submit": {"label": "保存角色", "action": "llm.role.save"},
+            }
+        ]
+
+    def _raw_page(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": BlockType.FORM,
+                "description": "保存会整体替换模型与角色配置．通过校验后才会写入．",
                 "fields": [
                     field(
-                        "models_yaml",
-                        "models.yml",
-                        self.catalog.get("models_yaml", ""),
+                        "models_json",
+                        "模型与提供方 JSON",
+                        json.dumps(self.catalog["definitions"]["models"], ensure_ascii=False, indent=2),
                         type=FormInputType.TEXT,
                         input=FormInputType.TEXTAREA,
                         rows=18,
                     ),
                     field(
-                        "roles_yaml",
-                        "roles.yml",
-                        self.catalog.get("roles_yaml", ""),
+                        "roles_json",
+                        "角色 JSON",
+                        json.dumps(self.catalog["definitions"]["roles"], ensure_ascii=False, indent=2),
                         type=FormInputType.TEXT,
                         input=FormInputType.TEXTAREA,
                         rows=12,

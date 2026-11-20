@@ -24,7 +24,7 @@ from core.lecture import source_id
 from core.media import MediaKind, SourceKind, ProcessingMode
 from core.navigation import current_navigation
 from core.streams import StreamKind
-from core.ui import BlockType, FormInputType, Side
+from core.ui import BlockType, FormInputType, Side, StatusLabel, TaskState
 from core.plugin import Plugin, PluginContext
 from core.settings_spec import SettingType, SettingsSpec
 from integrations.sjtu_canvas import InputError
@@ -51,7 +51,7 @@ _ACTION_IDS = (
     "input.refresh_courses",
     "input.open_class",
     "input.start_processing",
-    "input.reprocess",
+    "input.delete",
     "input.pause_processing",
     "input.queue_pause",
     "input.queue_resume",
@@ -79,10 +79,17 @@ class JobState(StrEnum):
     PAUSED = "paused"
     DONE = "done"
     FAILED = "failed"
-    CANCELED = "canceled"
 
 
-_JOB_TERMINAL = {JobState.DONE, JobState.FAILED, JobState.CANCELED}
+_JOB_TERMINAL = {JobState.DONE, JobState.FAILED}
+_JOB_LABELS = {
+    JobState.QUEUED: StatusLabel.QUEUED,
+    JobState.PREPARING: StatusLabel.PREPARING,
+    JobState.RUNNING: StatusLabel.RUNNING,
+    JobState.PAUSED: StatusLabel.PAUSED,
+    JobState.DONE: StatusLabel.FINISHED,
+    JobState.FAILED: StatusLabel.FAILED,
+}
 
 
 class StreamView(StrEnum):
@@ -314,6 +321,9 @@ class InputPlugin(Plugin):
 
         # ---- Register input service ----
         ctx.register_service("input", self._create_service())
+        self._gap_fill_notes = ctx.service("notes")
+        if self._gap_fill_notes is not None:
+            self._gap_fill_notes.set_gap_filler(self._fill_gaps)
 
         def _input_meta() -> dict[str, Any]:
             session = ctx.streams.current
@@ -368,6 +378,8 @@ class InputPlugin(Plugin):
         ctx = getattr(self, "_ctx", None)
         if ctx is None:
             return
+        if self._gap_fill_notes is not None:
+            self._gap_fill_notes.set_gap_filler(None)
         ui = ctx.ui
         # Drop every contribution this plugin made: pages, toolbox items,
         # tabs, actions and commands (idempotent; the manager does the same on
@@ -444,7 +456,9 @@ class InputPlugin(Plugin):
                     if session is not None:
                         session.meta["download_progress"] = self._download_progress(job)
                 else:
-                    course = self._courses.get(self._fill_target or self._playback_class_id)
+                    course = self._courses.get(
+                        self._fill_target or self._playback_class_id
+                    )
                     if course is not None:
                         course.download = progress
             self._ctx.ui.refresh("input.download")
@@ -455,7 +469,9 @@ class InputPlugin(Plugin):
             with self._class_lock:
                 job = self._active_job
                 if job is None:
-                    course = self._courses.get(self._fill_target or self._playback_class_id)
+                    course = self._courses.get(
+                        self._fill_target or self._playback_class_id
+                    )
                     if course is not None:
                         course.error = self._last_error
             if job is not None:
@@ -520,9 +536,9 @@ class InputPlugin(Plugin):
             JobState.PAUSED,
         }:
             if active_state == JobState.PREPARING:
-                detail = "准备视频…"
+                detail = StatusLabel.PREPARING
             elif active_state == JobState.PAUSED:
-                detail = "已暂停"
+                detail = StatusLabel.PAUSED
             else:
                 detail = read_progress
             tasks.append(
@@ -534,10 +550,11 @@ class InputPlugin(Plugin):
                 }
             )
         for position, job in enumerate(queued[:3], start=1):
-            detail = "排队等待"
+            detail = StatusLabel.QUEUED
             tasks.append(
                 {
                     "id": f"queue:{job.id}",
+                    "state": TaskState.PENDING,
                     "label": f"排队 {position}：{job.title()}",
                     "detail": detail,
                     "started": job.enqueued_at,
@@ -547,6 +564,7 @@ class InputPlugin(Plugin):
             tasks.append(
                 {
                     "id": "queue:more",
+                    "state": TaskState.PENDING,
                     "label": "处理队列",
                     "detail": f"另有 {len(queued) - 3} 节等待",
                     "started": 0.0,
@@ -565,7 +583,8 @@ class InputPlugin(Plugin):
             job = self._job_for_locked(self._current_class_id) if cls else None
             job_state = job.state if job is not None else None
             if cls and self._current_class_id in {
-                self._fill_target, self._playback_class_id
+                self._fill_target,
+                self._playback_class_id,
             }:
                 job_state = JobState.RUNNING if self._processing else JobState.PAUSED
 
@@ -635,7 +654,9 @@ class InputPlugin(Plugin):
             if course is not None:
                 course.session_id = sid
                 course.session_meta = meta
-                course.finished = event.type == "session.stopped"
+                course.finished = event.type == "session.stopped" and not meta.get(
+                    "processing_cancelled"
+                )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             if event.type == "session.started":
@@ -664,7 +685,11 @@ class InputPlugin(Plugin):
                     and data["started_at"] != event.get("started_at")
                 ):
                     return
-                data["ended_at"] = float(event.get("ended_at") or time.time())
+                data["ended_at"] = (
+                    0
+                    if meta.get("processing_cancelled")
+                    else float(event.get("ended_at") or time.time())
+                )
                 data["meta"] = dict(event.get("meta") or data.get("meta") or {})
                 temporary = path.with_suffix(".tmp")
                 temporary.write_text(
@@ -679,7 +704,9 @@ class InputPlugin(Plugin):
             data = json.loads(self._session_meta_path(class_id).read_text("utf-8"))
         except (OSError, ValueError):
             return None
-        if data.get("ended_at"):
+        if data.get("ended_at") and not (data.get("meta") or {}).get(
+            "processing_cancelled"
+        ):
             return data
         return None
 
@@ -707,10 +734,12 @@ class InputPlugin(Plugin):
                         str(part["video_id"])
                         for part in meta.get("media_parts") or []
                         if part.get("video_id")
-                    ] or ([str(meta["video_id"])] if meta.get("video_id") else []),
+                    ]
+                    or ([str(meta["video_id"])] if meta.get("video_id") else []),
                     "live_id": str(meta.get("live_id") or ""),
                 }
             else:
+
                 def find(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
                     for node in nodes:
                         if node.get("id") == class_id:
@@ -1015,11 +1044,6 @@ class InputPlugin(Plugin):
             def list_courses(self) -> list[dict[str, Any]]:
                 return cat.list_courses()
 
-            def fill_gaps(self, session_id: str) -> bool:
-                """Process the class recording, skipping covered ranges."""
-
-                return plugin._fill_gaps(session_id)
-
             def session_meta(self, session_id: str) -> dict[str, Any]:
                 """Session metadata from ``sessions/<id>/meta.json`` (no parsing
                 of internal files by callers)."""
@@ -1056,7 +1080,7 @@ class InputPlugin(Plugin):
         )
 
         # Right sidebar: functional areas for the selected class.
-        ui.add_tab(Side.RIGHT, "session", "课程", order=10, plugin_id=pid)
+        ui.add_tab(Side.RIGHT, "session", "课次", order=10, plugin_id=pid)
         ui.add_toolbox_item(
             "session",
             "input.session",
@@ -1076,7 +1100,7 @@ class InputPlugin(Plugin):
 
         ui.add_page(
             "input:session",
-            "课堂",
+            "课次",
             render=lambda: self._render_session(),
             plugin_id=pid,
         )
@@ -1091,7 +1115,7 @@ class InputPlugin(Plugin):
             ("input.refresh_courses", self._act_refresh_courses),
             ("input.open_class", self._act_open_class),
             ("input.start_processing", self._act_start_processing),
-            ("input.reprocess", self._act_reprocess),
+            ("input.delete", self._act_delete),
             ("input.pause_processing", self._act_pause_processing),
             ("input.queue_pause", self._act_queue_pause),
             ("input.queue_resume", self._act_queue_resume),
@@ -1108,8 +1132,9 @@ class InputPlugin(Plugin):
         ui.register_command(
             "input.refresh",
             "刷新课程列表",
+            icon="arrow-clockwise",
+            description="重新加载课程列表",
             category="课程",
-            icon="🔄",
             order=0,
             action="input.refresh_courses",
             plugin_id=pid,
@@ -1117,9 +1142,9 @@ class InputPlugin(Plugin):
         ui.register_command(
             "input.manual",
             "手动播放 URL",
-            subtitle="HLS / FLV / mp4 / 本地文件",
+            icon="play-circle",
+            description="打开手动播放页面，输入视频或直播地址",
             category="调试",
-            icon="🔗",
             order=10,
             page_id="input:manual",
             plugin_id=pid,
@@ -1140,7 +1165,7 @@ class InputPlugin(Plugin):
                             "label": "去设置",
                             "action": "ui.open_page",
                             "value": {"page_id": "settings:main"},
-                            "class": "btn btn-primary btn-sm",
+                            "class": "btn-outline theme-primary btn-sm",
                         }
                     ],
                 },
@@ -1257,14 +1282,11 @@ class InputPlugin(Plugin):
                 value = node["action"].get("value") or {}
                 job_state = job_states.get(str(value.get("id", "")))
                 if job_state:
-                    node["badge"] = {
-                        JobState.QUEUED: "排队",
-                        JobState.PREPARING: "准备中",
-                        JobState.RUNNING: "处理中",
-                        JobState.PAUSED: "已暂停",
-                    }.get(job_state, "")
+                    node["badge"] = _JOB_LABELS[job_state]
                     node["badge_class"] = (
-                        TreeBadge.LIVE
+                        TreeBadge.PAUSED
+                        if job_state == JobState.PAUSED
+                        else TreeBadge.LIVE
                         if job_state in {JobState.PREPARING, JobState.RUNNING}
                         else TreeBadge.UPCOMING
                     )
@@ -1419,7 +1441,8 @@ class InputPlugin(Plugin):
             )
             error = job_error or (course.error if course is not None else "")
             standalone = self._current_class_id in {
-                self._fill_target, self._playback_class_id
+                self._fill_target,
+                self._playback_class_id,
             }
             if standalone:
                 finished = False
@@ -1429,21 +1452,23 @@ class InputPlugin(Plugin):
             return []
 
         if job_state:
-            state_label = {
-                JobState.QUEUED: "排队中",
-                JobState.PREPARING: "准备中",
-                JobState.RUNNING: "处理中",
-                JobState.PAUSED: "已暂停",
-                JobState.DONE: "已结束",
-                JobState.FAILED: "失败",
-                JobState.CANCELED: "已取消",
-            }.get(job_state, job_state)
+            state_label = _JOB_LABELS[job_state]
         elif finished:
-            state_label = "已结束"
+            state_label = StatusLabel.FINISHED
         elif loading:
-            state_label = "准备中"
+            state_label = StatusLabel.PREPARING
         else:
-            state_label = "未开始"
+            state_label = StatusLabel.NOT_STARTED
+        state_theme = {
+            JobState.QUEUED: "secondary",
+            JobState.PREPARING: "primary",
+            JobState.RUNNING: "primary",
+            JobState.PAUSED: "warning",
+            JobState.DONE: "success",
+            JobState.FAILED: "danger",
+        }.get(
+            job_state, "success" if finished else "primary" if loading else "secondary"
+        )
 
         details = []
         if error:
@@ -1451,31 +1476,35 @@ class InputPlugin(Plugin):
 
         buttons: list[dict[str, Any]] = []
         if standalone:
-            buttons.extend([
-                {
-                    "label": "暂停处理" if self._processing else "继续处理",
-                    "action": "input.pause_processing" if self._processing else "input.resume",
-                    "class": "btn btn-ghost",
-                },
-                {
-                    "label": "停止处理",
-                    "action": "input.stop",
-                    "class": "btn btn-danger",
-                },
-            ])
+            buttons.extend(
+                [
+                    {
+                        "label": "暂停处理" if self._processing else "继续处理",
+                        "action": "input.pause_processing"
+                        if self._processing
+                        else "input.resume",
+                        "class": "btn-solid theme-secondary",
+                    },
+                    {
+                        "label": "停止处理",
+                        "action": "input.stop",
+                        "class": "btn-solid theme-secondary",
+                    },
+                ]
+            )
         elif job is not None and job_state == JobState.RUNNING:
             buttons.append(
                 {
                     "label": "暂停处理",
                     "action": "input.pause_processing",
-                    "class": "btn btn-ghost",
+                    "class": "btn-solid theme-secondary",
                 }
             )
             buttons.append(
                 {
                     "label": "停止处理",
                     "action": "input.queue_cancel",
-                    "class": "btn btn-danger",
+                    "class": "btn-solid theme-secondary",
                 }
             )
         elif job is not None and job_state in {JobState.QUEUED, JobState.PREPARING}:
@@ -1483,14 +1512,14 @@ class InputPlugin(Plugin):
                 {
                     "label": "提前处理",
                     "action": "input.start_processing",
-                    "class": "btn btn-primary",
+                    "class": "btn-solid theme-primary",
                 }
             )
             buttons.append(
                 {
                     "label": "取消排队",
                     "action": "input.pause_processing",
-                    "class": "btn btn-ghost",
+                    "class": "btn-solid theme-secondary",
                 }
             )
         elif job is not None and job_state == JobState.PAUSED:
@@ -1498,22 +1527,22 @@ class InputPlugin(Plugin):
                 {
                     "label": "继续处理",
                     "action": "input.start_processing",
-                    "class": "btn btn-primary",
+                    "class": "btn-solid theme-primary",
                 }
             )
             buttons.append(
                 {
                     "label": "放弃",
                     "action": "input.stop",
-                    "class": "btn btn-danger",
+                    "class": "btn-solid theme-secondary",
                 }
             )
         elif finished:
             buttons.append(
                 {
-                    "label": "重新转写和识别板书",
-                    "action": "input.reprocess",
-                    "class": "btn btn-ghost",
+                    "label": "删除板书",
+                    "action": "input.delete",
+                    "class": "btn-solid theme-danger",
                 }
             )
             if self._ctx.ui.has_action("notes.fill_again"):
@@ -1521,15 +1550,15 @@ class InputPlugin(Plugin):
                     {
                         "label": "补录缺失内容",
                         "action": "notes.fill_again",
-                        "class": "btn btn-ghost",
+                        "class": "btn-solid theme-secondary",
                     }
                 )
         elif job is not None and job_state == JobState.FAILED:
             buttons.append(
                 {
-                    "label": "重试",
-                    "action": "input.reprocess",
-                    "class": "btn btn-primary",
+                    "label": "删除板书",
+                    "action": "input.delete",
+                    "class": "btn-solid theme-danger",
                 }
             )
         else:
@@ -1537,7 +1566,7 @@ class InputPlugin(Plugin):
                 {
                     "label": "开始处理",
                     "action": "input.start_processing",
-                    "class": "btn btn-primary",
+                    "class": "btn-solid theme-primary",
                 }
             )
         controls = "".join(
@@ -1546,19 +1575,19 @@ class InputPlugin(Plugin):
             for button in buttons
         )
         detail_html = "".join(
-            f'<p class="form-status">{escape(detail)}</p>' for detail in details
+            f'<p class="fg-2 mt-2 mb-0">{escape(detail)}</p>' for detail in details
         )
         return [
             {
                 "type": BlockType.HTML,
-                "html": f"""<section class="block" aria-label="课程处理">
-          <div class="toolbox-head">
-            <h3 class="block-title">课程处理</h3>
-            <span class="muted" role="status">{escape(state_label)}</span>
+                "html": f"""<section class="p-3 border-bottom" aria-label="课次处理">
+          <div class="d-flex align-items-center justify-content-between gap-2">
+            <h3 class="fs-md fw-semibold mb-0">课次处理</h3>
+            <span class="badge theme-{state_theme}" role="status">{escape(state_label)}</span>
           </div>
           {detail_html}
-          <div class="btn-row">
-            <button type="button" class="btn btn-primary" data-action="ui.open_page" data-value='{{"page_id":"input:session"}}'>打开课程</button>
+          <div class="d-flex flex-wrap align-items-center gap-2 mt-3">
+            <button type="button" class="btn-outline theme-primary" data-action="ui.open_page" data-value='{{"page_id":"input:session"}}'>打开课次</button>
             {controls}
           </div>
         </section>""",
@@ -1570,7 +1599,6 @@ class InputPlugin(Plugin):
 
         with self._class_lock:
             active = self._active_job
-            selected_id = self._current_class_id
             ordered: list[_Job] = []
             if active is not None:
                 ordered.append(active)
@@ -1586,71 +1614,66 @@ class InputPlugin(Plugin):
             return []
         rows: list[dict[str, Any]] = []
         for job in ordered:
+            progress = ""
+            state = _JOB_LABELS[job.state]
+            action, label = "", ""
             if job is active:
                 if job.state == JobState.RUNNING:
-                    state = "处理中"
                     consumed = self._consumed_seconds()
                     total = job.total_seconds
-                    state = f"处理中 {_fmt_clock(consumed)} / {_fmt_clock(total) if total else '未知时长'}"
+                    progress = f"{_fmt_clock(consumed)} / {_fmt_clock(total) if total else '未知时长'}"
                     if total > 0:
-                        state += f" ({min(100, int(consumed * 100 / total))}%)"
+                        progress += f" ({min(100, int(consumed * 100 / total))}%)"
                     action, label = "input.queue_pause", "暂停"
                 elif job.state == JobState.PAUSED:
-                    state = "已暂停"
                     action, label = "input.queue_resume", "继续"
-                elif job.state == JobState.PREPARING:
-                    state = "准备中"
-                    action, label = "input.queue_cancel", "取消"
-                else:
-                    state = "等待中"
-                    action, label = "input.queue_cancel", "取消"
-            else:
-                state = ""
-                action, label = "input.queue_cancel", "取消"
-            detail = "；".join(
-                part
-                for part in (
-                    "直播" if job.kind == SourceKind.LIVE else "录播",
-                    state,
+            kind = "直播" if job.kind == SourceKind.LIVE else "录播"
+            actions = []
+            if action:
+                actions.append(
+                    {
+                        "action": action,
+                        "label": label,
+                        "icon": "pause" if job.state == JobState.RUNNING else "play",
+                        "value": {"id": job.id},
+                    }
                 )
-                if part
-            )
-            rows.append(
+            actions.append(
                 {
-                    "title": job.title(),
-                    "subtitle": detail,
-                    "action": action,
-                    "label": label,
+                    "action": "input.queue_cancel",
+                    "label": "取消",
+                    "icon": "x",
+                    "theme": "danger",
                     "value": {"id": job.id},
                 }
             )
-        entries = []
-        for row in rows:
-            job_id = escape(row["value"]["id"], quote=True)
-            entries.append(f"""<li class="row-item">
-              <div class="row-main">
-                <div class="row-title">{escape(row["title"])}</div>
-                <div class="row-sub">{escape(row["subtitle"])}</div>
-              </div>
-              <button type="button" class="btn btn-sm btn-ghost" data-action="{row["action"]}" data-id="{job_id}">{escape(row["label"])}</button>
-            </li>""")
-        controls = []
-        if active is not None and active.id != selected_id:
-            controls.append(
-                f'<button type="button" class="btn btn-danger" '
-                f'data-action="input.queue_cancel" data-id="{escape(active.id, quote=True)}">停止当前处理</button>'
+            rows.append(
+                {
+                    "id": job.id,
+                    "title": job.course or "课程",
+                    "detail": f"{job.label} {kind}".strip(),
+                    "subtitle": state,
+                    "progress": progress,
+                    "theme": "warning"
+                    if job.state == JobState.PAUSED
+                    else "secondary"
+                    if job.state == JobState.QUEUED
+                    else "info"
+                    if job.state == JobState.PREPARING
+                    else "primary",
+                    "actions": actions,
+                }
             )
+        running = sum(
+            job.state in {JobState.RUNNING, JobState.PREPARING} for job in ordered
+        )
+        pending = sum(job.state == JobState.QUEUED for job in ordered)
         return [
             {
-                "type": BlockType.HTML,
-                "html": f"""<section class="block" aria-label="处理队列">
-          <div class="toolbox-head">
-            <h3 class="block-title">处理队列</h3>
-            <span class="muted">{len(ordered)} 节待处理</span>
-          </div>
-          <ul class="row-list">{"".join(entries)}</ul>
-          <div class="btn-row">{"".join(controls)}</div>
-        </section>""",
+                "type": BlockType.QUEUE,
+                "title": "处理队列",
+                "summary": f"{StatusLabel.RUNNING} {running} 个，{StatusLabel.QUEUED} {pending} 个",
+                "items": rows,
             }
         ]
 
@@ -1666,9 +1689,12 @@ class InputPlugin(Plugin):
             error = job.error if job is not None else course.error
             job_state = job.state if job is not None else None
             session_id = job.session_id if job is not None else course.session_id
-            session_meta = dict(job.session_meta if job is not None else course.session_meta)
+            session_meta = dict(
+                job.session_meta if job is not None else course.session_meta
+            )
             standalone = self._current_class_id in {
-                self._fill_target, self._playback_class_id
+                self._fill_target,
+                self._playback_class_id,
             }
             if standalone:
                 active = True
@@ -1686,7 +1712,13 @@ class InputPlugin(Plugin):
             paused = (standalone and not self._processing) or (
                 active and job_state == JobState.PAUSED
             )
-            finished = False if standalone else job.state == JobState.DONE if job is not None else course.finished
+            finished = (
+                False
+                if standalone
+                else job.state == JobState.DONE
+                if job is not None
+                else course.finished
+            )
             download = (
                 self._download_progress(job)
                 if job is not None
@@ -1704,16 +1736,16 @@ class InputPlugin(Plugin):
             return [
                 {
                     "type": BlockType.TEXT,
-                    "text": "未选择课程",
+                    "text": "未选择课次",
                 }
             ]
 
         parts = len(cls.get("videos") or []) or 1
         live = cls.get("kind") == SourceKind.LIVE
-        title = str(cls.get("label", "") or cls.get("name", "") or "课堂")
+        title = str(cls.get("label", "") or cls.get("name", "") or "课次")
         name = str(cls.get("name", "") or "")
         heading = f"### {name} {title}" if name else f"### {title}"
-        heading += "  `直播`" if live else "  `录播`"
+        heading += "  直播" if live else "  录播"
         blocks: list[dict[str, Any]] = [{"type": BlockType.MARKDOWN, "text": heading}]
 
         if job is not None and job_state == JobState.QUEUED and not active:
@@ -1726,12 +1758,6 @@ class InputPlugin(Plugin):
             blocks.append({"type": BlockType.TEXT, "text": text})
             if not live:
                 return blocks
-        if job is not None and job_state == JobState.CANCELED:
-            blocks.append({"type": BlockType.TEXT, "text": "已取消处理。"})
-        if paused:
-            blocks.append(
-                {"type": BlockType.TEXT, "text": "已暂停；点「继续处理」从暂停处继续。"}
-            )
         if loading:
             blocks.append({"type": BlockType.TEXT, "text": "正在获取视频地址…"})
         if error:
@@ -1801,7 +1827,7 @@ class InputPlugin(Plugin):
             sources.append(
                 {
                     "key": StreamView.MAIN,
-                    "label": "课堂",
+                    "label": "课堂画面",
                     "src": streams[StreamView.MAIN],
                 }
             )
@@ -1809,7 +1835,7 @@ class InputPlugin(Plugin):
             sources.append(
                 {
                     "key": StreamView.SCREEN,
-                    "label": "屏幕",
+                    "label": "屏幕画面",
                     "src": streams[StreamView.SCREEN],
                     "muted": True,
                 }
@@ -2022,7 +2048,7 @@ class InputPlugin(Plugin):
                     continue
                 location = str(error.get("source") or "来源读取")
                 if error.get("chunk") is not None:
-                    location = f"笔记片段 {error['chunk'] + 1}"
+                    location = f"分段笔记 第 {error['chunk'] + 1} 段"
                 if error.get("start") is not None and error.get("end") is not None:
                     location += f" {error['start']:.1f}-{error['end']:.1f}s"
                 messages.append(f"{location}：{message}")
@@ -2031,7 +2057,7 @@ class InputPlugin(Plugin):
                 blocks.append(
                     {
                         "type": BlockType.HTML,
-                        "html": f'<div class="form-status err" role="alert"><pre class="log session-errors" aria-label="处理错误">{escape(text)}</pre></div>',
+                        "html": f'<div class="alert theme-danger" role="alert"><pre class="session-errors overflow-auto mb-0" aria-label="处理错误">{escape(text)}</pre></div>',
                     }
                 )
 
@@ -2089,7 +2115,7 @@ class InputPlugin(Plugin):
             try:
                 cls = self._resolve_class(class_id)
             except KeyError:
-                return {"ok": False, "message": "未找到课程"}
+                return {"ok": False, "message": "未找到课次"}
         else:
             kind = SourceKind(payload.get("kind") or SourceKind.RECORDING)
             videos = payload.get("videos") or []
@@ -2194,7 +2220,12 @@ class InputPlugin(Plugin):
         """Start the next queued class when the engine is free."""
 
         with self._class_lock:
-            if self._active_job is not None or self._processing or self._playback_class_id or self._fill_target:
+            if (
+                self._active_job is not None
+                or self._processing
+                or self._playback_class_id
+                or self._fill_target
+            ):
                 return
             job: _Job | None = None
             while self._queue:
@@ -2428,38 +2459,38 @@ class InputPlugin(Plugin):
         except KeyError:
             return None
 
-    def _act_reprocess(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _act_delete(self, payload: dict[str, Any]) -> dict[str, Any]:
         cls = self._class_from_payload(payload)
         if cls is None:
-            return {"ok": False, "message": "未选择课程"}
+            return {"ok": False, "message": "未选择课次"}
         if str(cls["id"]) in {self._fill_target, self._playback_class_id}:
             self._act_stop({"id": str(cls["id"])})
         with self._class_lock:
             job = self._jobs.get(str(cls.get("id", "")))
             was_active = job is not None and self._active_job is job
             if was_active:
-                job.state = JobState.CANCELED
-                job.finished_at = time.time()
                 self._active_job = None
                 self._processing = False
             if job is not None:
                 self._jobs.pop(job.id, None)
                 while job.id in self._queue:
                     self._queue.remove(job.id)
-            self._courses[str(cls["id"])] = _Course(cls=dict(cls))
         sid = str(cls["id"])
         session = self._ctx.streams.get_session(sid)
         if session is not None:
             session.meta["processing_cancelled"] = True
         if was_active:
             self._sources.stop()
-            self._end_open_session("reprocess")
+            self._end_open_session("results deleted")
         vlm = self._ctx.service("vlm")
         if vlm is not None:
             vlm.cancel(sid)
-        while (
-            session is self._ctx.streams.current and self._ctx.streams.consumers_busy()
-        ):
+        consumers = [
+            service
+            for name in ("stt", "vlm")
+            if (service := self._ctx.service(name)) is not None
+        ]
+        while any(service.processing(sid) for service in consumers):
             time.sleep(0.05)
         notes = self._ctx.service("notes")
         if notes is not None:
@@ -2467,7 +2498,32 @@ class InputPlugin(Plugin):
         directory = self._ctx.data_dir / "sessions" / sid
         for name in ("transcript.jsonl", "visual.jsonl", "coverage.json"):
             (directory / name).unlink(missing_ok=True)
-        return self._act_start_processing(payload)
+        shutil.rmtree(directory / "vlm", ignore_errors=True)
+        path = self._session_meta_path(sid)
+        if path.exists():
+            try:
+                record = json.loads(path.read_text("utf-8"))
+            except (OSError, ValueError):
+                record = {"session_id": sid, "meta": {}}
+            record["ended_at"] = 0
+            meta = record.get("meta") or {}
+            for key in ("processing_cancelled", "input_failed"):
+                meta.pop(key, None)
+            record["meta"] = meta
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(record, ensure_ascii=False, indent=2), "utf-8"
+            )
+            temporary.replace(path)
+        self._ctx.streams.clear_results(sid)
+        for name in ("stt", "vlm"):
+            service = self._ctx.service(name)
+            if service is not None:
+                service.reset(sid)
+        with self._class_lock:
+            self._courses[sid] = _Course(cls=dict(cls))
+        self._jobs_changed("input.results.deleted")
+        return {"ok": True, "message": "已删除板书"}
 
     def _act_start_processing(self, payload: dict[str, Any]) -> dict[str, Any]:
         resume = False
@@ -2476,18 +2532,20 @@ class InputPlugin(Plugin):
         cls = self._class_from_payload(payload)
         with self._class_lock:
             if cls is None:
-                return {"ok": False, "message": "未选择课程"}
+                return {"ok": False, "message": "未选择课次"}
             class_id = str(cls["id"])
             if class_id in {self._playback_class_id, self._fill_target}:
                 if self._processing:
                     return {"ok": True, "message": "正在处理"}
                 return self._act_resume({"id": class_id})
             if class_id.startswith("manual_"):
-                return self._act_play_url({
-                    "url": cls.get("url", ""),
-                    "title": cls.get("name", ""),
-                    "kind": cls.get("kind", SourceKind.URL),
-                })
+                return self._act_play_url(
+                    {
+                        "url": cls.get("url", ""),
+                        "title": cls.get("name", ""),
+                        "kind": cls.get("kind", SourceKind.URL),
+                    }
+                )
             job = self._jobs.get(str(cls.get("id", "")))
             if job is not None and job.state in {JobState.PREPARING, JobState.RUNNING}:
                 if self._active_job is job:
@@ -2534,8 +2592,8 @@ class InputPlugin(Plugin):
         with self._class_lock:
             if job.state == JobState.FAILED:
                 return {"ok": False, "message": job.error or "处理失败"}
-            if job.state == JobState.CANCELED:
-                return {"ok": False, "message": "处理已取消"}
+            if self._jobs.get(job.id) is not job:
+                return {"ok": True}
             if self._active_job is job:
                 if job.state == JobState.RUNNING:
                     return {"ok": True, "message": "开始处理"}
@@ -2567,20 +2625,7 @@ class InputPlugin(Plugin):
             self._processing = False
             kind = job.kind
         if kind == SourceKind.LIVE:
-            # A live stream cannot be paused; stop ingesting and free the
-            # engine for the next queued class.
-            self._sources.stop()
-            self._end_open_session("live paused")
-            with self._class_lock:
-                job.state = JobState.CANCELED
-                job.finished_at = time.time()
-                job.session_id = ""
-                job.session_meta = {}
-                if self._active_job is job:
-                    self._active_job = None
-            self._jobs_changed("input.queue.paused")
-            self._dispatch_jobs()
-            return {"ok": True, "message": "已停止直播处理"}
+            return self._act_queue_cancel({"id": job.id})
         self._sources.pause()
         self._jobs_changed("input.queue.paused")
         return {"ok": True, "message": "已暂停处理"}
@@ -2604,25 +2649,36 @@ class InputPlugin(Plugin):
             return {"ok": False, "message": "没有可取消的任务"}
         with self._class_lock:
             was_active = self._active_job is job
-            job.state = JobState.CANCELED
-            job.finished_at = time.time()
+            self._jobs.pop(job.id, None)
             while job.id in self._queue:
                 self._queue.remove(job.id)
             if was_active:
                 self._active_job = None
                 self._processing = False
+                course = self._courses.get(job.id)
+                if course is not None:
+                    course.finished = False
         if was_active:
+            session = self._ctx.streams.get_session(job.session_id or job.id)
+            if session is not None:
+                session.meta["processing_cancelled"] = True
+            vlm = self._ctx.service("vlm")
+            if vlm is not None:
+                vlm.cancel(job.session_id or job.id)
+            notes = self._ctx.service("notes")
+            if notes is not None:
+                notes.stop(job.session_id or job.id)
             self._sources.stop()
             self._end_open_session("processing canceled")
         self._jobs_changed("input.queue.canceled")
         self._dispatch_jobs()
-        return {"ok": True, "message": "已取消处理"}
+        return {"ok": True}
 
     def _act_queue_retry(self, payload: dict[str, Any]) -> dict[str, Any]:
         job = self._job_from_payload(payload)
         if job is None:
             return {"ok": False, "message": "任务记录已清理"}
-        return self._act_reprocess({"id": job.id})
+        return self._act_start_processing({"id": job.id})
 
     def _act_queue_clear(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._class_lock:
@@ -2706,53 +2762,22 @@ class InputPlugin(Plugin):
                 session.meta["total_media_seconds"] = total
 
     def _act_pause_processing(self, payload: dict[str, Any]) -> dict[str, Any]:
-        cancel_active = False
-        canceled_queue = False
-        kind: SourceKind | None = None
+        job = self._job_from_payload(payload)
+        if job is not None:
+            if job.state in {JobState.QUEUED, JobState.PREPARING}:
+                return self._act_queue_cancel({"id": job.id})
+            if self._active_job is job and job.state == JobState.RUNNING:
+                return self._act_queue_pause({"id": job.id})
+            return {"ok": True, "message": "当前没有处理任务"}
         with self._class_lock:
-            job = self._job_from_payload(payload)
-            if job is not None:
-                if self._active_job is job and job.state == JobState.RUNNING:
-                    job.state = JobState.PAUSED
-                    self._processing = False
-                    kind = job.kind
-                    if kind == SourceKind.LIVE:
-                        # Live is time-sensitive: stop now, the user can start
-                        # a fresh pass later (the queue moves on).
-                        job.state = JobState.CANCELED
-                        job.finished_at = time.time()
-                        self._active_job = None
-                        cancel_active = True
-                elif job.state in {JobState.QUEUED, JobState.PREPARING}:
-                    job.state = JobState.CANCELED
-                    job.finished_at = time.time()
-                    while job.id in self._queue:
-                        self._queue.remove(job.id)
-                    if self._active_job is job:
-                        self._active_job = None
-                        self._processing = False
-                        cancel_active = True
-                    canceled_queue = True
-                else:
-                    return {"ok": True, "message": "当前没有处理任务"}
-            else:
-                class_id = str(payload.get("id") or current_navigation().class_id)
-                if not class_id or class_id not in {
-                    self._fill_target, self._playback_class_id
-                }:
-                    return {"ok": True, "message": "当前没有处理任务"}
-                kind = self._ctx.streams.current.meta.get("kind")
-                self._processing = False
-
-        if canceled_queue and not cancel_active:
-            self._jobs_changed("input.queue.canceled")
-            return {"ok": True, "message": "已取消排队"}
-        if cancel_active:
-            self._sources.stop()
-            self._end_open_session("processing canceled")
-            self._jobs_changed("input.queue.canceled")
-            self._dispatch_jobs()
-            return {"ok": True, "message": "已取消处理"}
+            class_id = str(payload.get("id") or current_navigation().class_id)
+            if not class_id or class_id not in {
+                self._fill_target,
+                self._playback_class_id,
+            }:
+                return {"ok": True, "message": "当前没有处理任务"}
+            kind = self._ctx.streams.current.meta.get("kind")
+            self._processing = False
         if kind == SourceKind.LIVE:
             # A live stream cannot be paused: stop our ingestion and resume at
             # the live edge later.
@@ -2916,12 +2941,23 @@ class InputPlugin(Plugin):
             meta={"url": url},
         )
         with self._class_lock:
-            if self._active_job is not None or self._processing or self._playback_class_id or self._fill_target:
+            if (
+                self._active_job is not None
+                or self._processing
+                or self._playback_class_id
+                or self._fill_target
+            ):
                 return {"ok": False, "message": "输入源正在使用中"}
             self._processing = True
             self._processing_started = time.time()
             self._playback_class_id = class_id
-            cls = {"id": class_id, "name": title, "kind": kind, "videos": [], "url": url}
+            cls = {
+                "id": class_id,
+                "name": title,
+                "kind": kind,
+                "videos": [],
+                "url": url,
+            }
             course = _Course(cls=cls, streams={StreamView.MAIN: url})
             self._courses[class_id] = course
         navigation = current_navigation()
@@ -2962,7 +2998,8 @@ class InputPlugin(Plugin):
         class_id = str(payload.get("id") or current_navigation().class_id)
         with self._class_lock:
             if not class_id or class_id not in {
-                self._fill_target, self._playback_class_id
+                self._fill_target,
+                self._playback_class_id,
             }:
                 return {"ok": False, "message": "当前没有处理任务"}
             self._processing = False
@@ -2993,7 +3030,8 @@ class InputPlugin(Plugin):
         class_id = str(payload.get("id") or current_navigation().class_id)
         with self._class_lock:
             if not class_id or class_id not in {
-                self._fill_target, self._playback_class_id
+                self._fill_target,
+                self._playback_class_id,
             }:
                 return {"ok": False, "message": "当前没有处理任务"}
             self._processing = True
@@ -3008,16 +3046,16 @@ class InputPlugin(Plugin):
 _INPUT_SETTINGS: list[SettingsSpec] = [
     SettingsSpec(
         key="input.canvas_token",
-        label="Canvas Token",
+        label="访问令牌",
         type=SettingType.SECRET,
         default="",
         group="Canvas",
-        description="SJTU Canvas 访问令牌（Bearer Token）；留空表示未配置，修改后保存即可生效。",
+        section="连接与认证",
+        description="SJTU Canvas 的 Bearer Token．留空表示未配置．",
         order=0,
         secret=True,
-        placeholder="粘贴 Canvas 访问令牌…",
+        placeholder="Canvas 访问令牌",
         env=("CANVAS_TOKEN",),
-        group_note="Token 可来自根目录 `.env` 的 `CANVAS_TOKEN`；首次启动会把环境值写入设置（已配置时显示掩码），之后以设置页为准。",
     ),
     SettingsSpec(
         key="input.canvas_base_url",
@@ -3025,56 +3063,59 @@ _INPUT_SETTINGS: list[SettingsSpec] = [
         type=SettingType.STRING,
         default="https://oc.sjtu.edu.cn",
         group="Canvas",
-        description="Canvas 实例地址",
+        section="连接与认证",
+        description="Canvas 实例的根地址，例如 https://oc.sjtu.edu.cn．",
         order=1,
         env=("CANVAS_BASE_URL",),
     ),
     SettingsSpec(
         key="input.video_fps",
-        label="视频帧率",
+        label="视频帧率（帧/秒）",
         type=SettingType.FLOAT,
         default=4.0,
         group="播放",
-        description="每秒提取的视频帧数．下次播放生效．",
+        section="视频输出",
+        description="下次播放生效．",
         order=10,
     ),
     SettingsSpec(
         key="input.video_width",
-        label="视频宽度",
+        label="视频宽度（像素）",
         type=SettingType.INT,
         default=0,
         group="播放",
-        description="视频输出宽度；0 表示保持原分辨率，不做缩放；下次播放生效。",
+        section="视频输出",
+        description="0 表示保持原分辨率，不缩放画面．下次播放生效．",
         order=11,
     ),
     SettingsSpec(
         key="input.audio_rate",
-        label="音频采样率",
+        label="音频采样率（Hz）",
         type=SettingType.INT,
         default=16000,
         group="播放",
-        description="音频采样率（Hz）；下次播放生效。",
+        section="音频输出",
+        description="下次播放生效．",
         order=12,
     ),
     SettingsSpec(
         key="input.keep_recordings",
-        label="本地保留录像",
+        label="录像保留数量（节）",
         type=SettingType.INT,
         default=4,
         group="录播",
-        description=(
-            "录播先下载到会话目录再全速处理，便于回看；"
-            "只保留最近 N 节，超出按时间从旧到新删除（0 = 全部删除）。"
-        ),
+        section="本地存储",
+        description="超出保留数量时先删除最旧录像，当前会话除外．0 表示不保留历史录像．",
         order=13,
     ),
     SettingsSpec(
         key="input.live_device",
-        label="直播设备",
+        label="默认设备索引",
         type=SettingType.SELECT,
         default="0",
         group="直播",
-        description="默认使用的直播设备索引",
+        section="直播来源",
+        description="",
         options=("0", "1", "2", "3"),
         order=20,
     ),
@@ -3084,7 +3125,8 @@ _INPUT_SETTINGS: list[SettingsSpec] = [
         type=SettingType.BOOL,
         default=True,
         group="直播",
-        description="断线时自动重连；下次播放生效。",
+        section="断线处理",
+        description="直播连接中断后自动尝试重新连接．下次播放生效．",
         order=21,
     ),
 ]

@@ -25,7 +25,13 @@ class ScopedPlugin(Plugin):
         ctx.ui.add_tab(Side.LEFT, "scoped.tab", "范围")
         ctx.ui.add_page("scoped.page", "范围页", render=lambda: "hi")
         ctx.ui.register_action("scoped.ping", lambda payload: {"ok": True})
-        ctx.ui.register_command("scoped.cmd", "命令", page_id="scoped.page")
+        ctx.ui.register_command(
+            "scoped.cmd",
+            "命令",
+            icon="gear",
+            description="打开范围页",
+            page_id="scoped.page",
+        )
         ctx.ui.register_task_provider(lambda: [{"id": "t"}])
         ctx.events.on("scoped.event", lambda event: None)
         ctx.meta.register("scoped", lambda: "ok")
@@ -42,6 +48,14 @@ def test_context_injects_plugin_id_and_cleanup_removes_everything(
         assert snapshot["tabs"] == {"scoped.tab": "left"}
         assert "scoped.page" in snapshot["pages"]
         assert "scoped.ping" in snapshot["actions"]
+        command = next(
+            command
+            for command in runtime.ui.state()["commands"]
+            if command["id"] == "scoped.cmd"
+        )
+        assert command["icon"] == "gear"
+        assert command["description"] == "打开范围页"
+        assert command["page"] == "scoped.page"
         assert runtime.bus.handler_count("scoped.event") == 1
         assert runtime.services.owner("scoped") == "scoped"
         assert runtime.ui.state()["tasks"] == [{"id": "t"}]

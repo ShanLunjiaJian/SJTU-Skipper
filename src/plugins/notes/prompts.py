@@ -6,9 +6,9 @@ LABELS = {
     NoteKind.GOSSIP: "闲话与分享",
     NoteKind.NOTICE: "通知",
 }
-NOTE_HEADERS = {f"note_{kind}.md": f"# 笔记：{LABELS[kind]}\n\n" for kind in KINDS}
+NOTE_HEADERS = {f"note_{kind}.md": f"# 完整笔记：{LABELS[kind]}\n\n" for kind in KINDS}
 CHUNK_NOTE_HEADERS = {
-    f"chunk_note_{kind}.md": f"# 课堂笔记：{LABELS[kind]}\n\n> 未审阅\n\n"
+    f"chunk_note_{kind}.md": f"# 分段笔记：{LABELS[kind]}\n\n> 未审阅\n\n"
     for kind in KINDS
 }
 SOURCE_FILENAME = "lecture_source.md"
@@ -63,7 +63,7 @@ REVIEW_SYSTEM = (
 - 非有意设计：不得把明确保留的来源缺口或不确定性当作缺陷．
 - 属于受审文稿：不得把来源本身的识别错误归咎于正确标注缺口的笔记．
 - 不依赖未声明假设：不得猜测教师意图或缺失语境．
-- 严谨程度相称：不得要求超过课程来源和复习用途的严谨程度．
+- 严谨程度相称：不得要求超过课堂来源和复习用途的严谨程度．
 
 同一根因合并为一项．已修正的问题不得重复报告．全文仍须核对．
 
@@ -81,11 +81,11 @@ REVIEW_SYSTEM = (
 """
 )
 
-CHUNK = """本任务只整理 source.md 核心范围内的课堂内容，生成三份片段笔记．
+CHUNK = """本任务只整理 source.md 核心范围内的课堂内容，生成三份分段笔记．
 context.md 是左侧重叠原文，visual_history.md 是此前的板书增量．两者仅用于理解前文，不得重复输出核心范围以外的内容．
 lecture_source.md 保留截至本任务的课堂来源，可用于核对跨段依据．"""
 
-WRITER = """本任务整理整堂课的内容，生成三份完整笔记．
+WRITER = """本任务整理一个课次的全部内容，生成三份完整笔记．
 核心来源是 lecture_source.md．参考底稿由 index.md 列出．
 启用审阅时，审阅意见可能有误．可依据课堂来源和独立计算提出反驳，通过 review_notes 的 message 参数说明修复内容或异议并请求复核．不得为迎合审阅而改错原本正确的内容．"""
 

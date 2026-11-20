@@ -1,8 +1,9 @@
 import json
 import threading
 from enum import StrEnum
+from html import escape
 from core.navigation import current_navigation
-from core.ui import BlockType, FormInputType, Side
+from core.ui import BlockType, Side, StatusLabel
 from core.settings_spec import SettingsSpec, SettingType
 from .types import GenerationState, NoteKind, NotePublication
 
@@ -62,10 +63,23 @@ class NotesView:
         self.stop_event = threading.Event()
         self.notices = {}
         self.fill_threads = []
+        self.gap_filler = None
         self.log_pages = set()
-        for key, default, label, order in (
-            ("fill_wait_minutes", 20, "补录重试间隔（分钟）", 110),
-            ("fill_max_attempts", 6, "补录尝试次数上限", 120),
+        for key, default, label, description, order in (
+            (
+                "fill_wait_minutes",
+                20,
+                "补录重试间隔（分钟）",
+                "未取得录播时等待的时长，至少为 1 分钟．",
+                110,
+            ),
+            (
+                "fill_max_attempts",
+                6,
+                "补录尝试上限（次）",
+                "至少尝试 1 次．达到上限仍未取得录播时，使用已有来源生成笔记．",
+                120,
+            ),
         ):
             self.settings.register(
                 SettingsSpec(
@@ -74,6 +88,8 @@ class NotesView:
                     type=SettingType.INT,
                     label=label,
                     group="笔记",
+                    section="课次结束策略",
+                    description=description,
                     order=order,
                 ),
                 plugin_id=self.id,
@@ -83,9 +99,11 @@ class NotesView:
                 key="notes.on_stop",
                 default=OnStopAction.DIRECT,
                 type=SettingType.SELECT,
-                label="课后处理",
+                label="课次结束策略",
                 options=list(self.ON_STOP_LABELS),
                 group="笔记",
+                section="课次结束策略",
+                description="先补全再生成会等待可用录播．不自动生成时仍可手动生成笔记．",
                 order=100,
             ),
             plugin_id=self.id,
@@ -128,67 +146,60 @@ class NotesView:
             return []
         state = self.pipeline.status(sid)["generation_state"]
         state_label = {
-            GenerationState.NOT_STARTED: "未开始",
-            GenerationState.GENERATING: "正在生成",
-            GenerationState.FINISHED: "生成结束",
+            GenerationState.NOT_STARTED: StatusLabel.NOT_STARTED,
+            GenerationState.GENERATING: StatusLabel.RUNNING,
+            GenerationState.FINISHED: StatusLabel.FINISHED,
         }[state]
+        state_theme = {
+            GenerationState.NOT_STARTED: "secondary",
+            GenerationState.GENERATING: "primary",
+            GenerationState.FINISHED: "success",
+        }[state]
+        generation_action = {
+            GenerationState.NOT_STARTED: (
+                "generate",
+                "生成笔记",
+                "btn-solid theme-primary",
+            ),
+            GenerationState.GENERATING: (
+                "stop",
+                "停止生成",
+                "btn-solid theme-secondary",
+            ),
+            GenerationState.FINISHED: ("delete", "删除笔记", "btn-solid theme-danger"),
+        }[state]
+        action, label, style = generation_action
         mode = OnStopAction(self.settings.get("notes.on_stop", OnStopAction.DIRECT))
-        blocks = [
+        options = "".join(
+            f'<option value="{key}"{" selected" if key == mode else ""}>{text}</option>'
+            for key, text in self.ON_STOP_LABELS
+        )
+        notice = (
+            f'<p class="fg-2 mt-2 mb-0">{escape(self.notices[sid])}</p>'
+            if sid in self.notices
+            else ""
+        )
+        return [
             {
-                "type": BlockType.BUTTONS,
-                "buttons": [
-                    {
-                        "label": "打开笔记",
-                        "action": "notes.read",
-                        "class": "btn btn-sm",
-                    },
-                    {
-                        "label": "查看日志",
-                        "action": "notes.logs",
-                        "class": "btn btn-sm btn-ghost",
-                    },
-                ],
-            },
-            {"type": BlockType.KEYVALUE, "items": [["笔记状态", state_label]]},
-            {
-                "type": BlockType.BUTTONS,
-                "buttons": [
-                    {
-                        "label": "生成笔记",
-                        "action": "notes.generate",
-                        "class": "btn btn-sm btn-primary",
-                        "disabled": state != GenerationState.NOT_STARTED,
-                    },
-                    {
-                        "label": "停止生成",
-                        "action": "notes.stop",
-                        "class": "btn btn-sm",
-                        "disabled": state != GenerationState.GENERATING,
-                    },
-                    {
-                        "label": "删除笔记",
-                        "action": "notes.delete",
-                        "class": "btn btn-sm btn-danger",
-                        "disabled": state != GenerationState.FINISHED,
-                    },
-                ],
-            },
-            {
-                "type": BlockType.FORM,
-                "fields": [
-                    {
-                        "name": "mode",
-                        "label": "课后处理",
-                        "type": FormInputType.SELECT,
-                        "options": [
-                            {"value": key, "label": label}
-                            for key, label in self.ON_STOP_LABELS
-                        ],
-                        "value": mode,
-                    }
-                ],
-                "submit": {"label": "保存", "action": "notes.set_mode"},
-            },
+                "type": BlockType.HTML,
+                "html": f'''<section class="p-3 border-bottom" aria-label="完整笔记">
+              <div class="d-flex align-items-center justify-content-between gap-2 mb-3">
+                <h3 class="fs-md fw-semibold mb-0">完整笔记</h3>
+                <span class="badge theme-{state_theme}" role="status">{state_label}</span>
+              </div>
+              <div class="d-flex flex-wrap align-items-center gap-2">
+                <button type="button" class="btn-outline theme-primary" data-action="notes.read">打开完整笔记</button>
+                <button type="button" class="btn-outline theme-secondary" data-action="notes.logs">查看日志</button>
+                <button type="button" class="{style}" data-action="notes.{action}">{label}</button>
+              </div>
+              {notice}
+              <div class="mt-3 pt-3 border-top">
+                <label class="d-block fw-semibold mb-2" for="notes-on-stop">课次结束策略</label>
+                <select id="notes-on-stop" name="mode" class="form-control min-w-0"
+                  data-change-action="notes.set_mode">{options}</select>
+              </div>
+            </section>''',
+            }
         ]
         if sid in self.notices:
             blocks.insert(1, {"type": BlockType.TEXT, "text": self.notices[sid]})
@@ -201,16 +212,16 @@ class NotesView:
     def _delete(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         deleted = self.pipeline.delete(sid)
         if not deleted:
-            return {"ok": False, "refresh": True, "message": "仅生成结束的笔记可删除"}
+            return {"ok": False, "refresh": True, "message": "仅已结束的笔记可删除"}
         return {"ok": True, "refresh": True, "message": "已删除笔记"}
 
     def _generate(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         started = self.pipeline.start(sid)
         if not started:
             return {
@@ -223,7 +234,7 @@ class NotesView:
     def _stop(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         stopped = self.pipeline.stop(sid)
         if not stopped:
             return {"ok": False, "refresh": True, "message": "仅正在生成的笔记可停止"}
@@ -232,7 +243,7 @@ class NotesView:
     def _read(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         docs = [
             {
                 "key": key,
@@ -244,7 +255,7 @@ class NotesView:
             ).items()
         ]
         page = self.ctx.require("reader").show(
-            title="笔记",
+            title="完整笔记",
             docs=docs,
             active=str(
                 payload.get("doc") or current_navigation().doc or NoteKind.KNOWLEDGE
@@ -257,7 +268,7 @@ class NotesView:
     def _logs(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         page = f"notes:logs:{sid}"
         if not self.ctx.ui.has_page(page):
             self.ctx.ui.add_page(
@@ -279,7 +290,7 @@ class NotesView:
         return blocks or [
             {
                 "type": BlockType.TEXT,
-                "text": "还没有 Agent 日志．生成笔记后，日志会显示在这里．",
+                "text": "无 Agent 日志．",
             }
         ]
 
@@ -329,7 +340,7 @@ class NotesView:
     def _fill_again(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         self._request_fill(sid)
         return {"ok": True, "message": "正在查找可补录的内容", "refresh": True}
 
@@ -343,13 +354,13 @@ class NotesView:
         thread.start()
 
     def _fill(self, sid):
-        service = self.ctx.service("input")
+        gap_filler = self.gap_filler
         attempts = max(1, int(self.settings.get("notes.fill_max_attempts", 6)))
         for attempt in range(attempts):
             if self.stop_event.is_set():
                 return
             try:
-                if service is not None and service.fill_gaps(sid):
+                if gap_filler is not None and gap_filler(sid):
                     return
             except Exception as exc:
                 self.notices[sid] = f"补录查询失败：{exc}"
@@ -392,25 +403,21 @@ class NotesView:
         gaps = f"，缺口 {errors} 项" if errors else ""
         return [
             {
-                "type": BlockType.SWITCH,
-                "label": "分段笔记",
-                "checked": enabled,
-                "action": "notes.chunk_toggle",
-            },
-            {
-                "type": BlockType.TEXT,
-                "text": f"已发布至 {status['published_end']:.0f} 秒{gaps}",
-            },
-            {
-                "type": BlockType.BUTTONS,
-                "buttons": [
-                    {
-                        "label": "打开分段笔记",
-                        "action": "notes.chunk_read",
-                        "class": "btn btn-sm",
-                    }
-                ],
-            },
+                "type": BlockType.HTML,
+                "html": f'''<section class="px-3 pb-3" aria-label="分段笔记">
+              <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                <h3 class="fs-md fw-semibold mb-0">分段笔记</h3>
+                <div class="d-flex align-items-center gap-2">
+                  <div class="switch">
+                    <input id="chunk-notes-enabled" type="checkbox" role="switch" switch
+                      data-change-action="notes.chunk_toggle"{" checked" if enabled else ""}>
+                  </div>
+                </div>
+              </div>
+              <p class="fg-2 mb-2" role="status">已发布至 {status["published_end"]:.0f} 秒{gaps}</p>
+              <button type="button" class="btn-outline theme-primary" data-action="notes.chunk_read">打开分段笔记</button>
+            </section>''',
+            }
         ]
 
     def _chunk_toggle(self, payload):
@@ -424,7 +431,7 @@ class NotesView:
     def _chunk_read(self, payload):
         sid = self._action_sid(payload)
         if not sid:
-            return {"ok": False, "message": "请先选择课程"}
+            return {"ok": False, "message": "请先选择课次"}
         docs = [
             {
                 "key": key,

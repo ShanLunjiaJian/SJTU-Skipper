@@ -14,7 +14,7 @@ from core.media import MediaKind, ProcessingMode
 from core.plugin import Plugin, PluginContext
 from core.settings_spec import SettingsSpec, SettingType
 from core.streams import StreamKind, TextSource
-from core.ui import BlockType
+from core.ui import BlockType, StatusLabel
 
 from . import providers
 from .client import SttEventType, retryable
@@ -71,6 +71,20 @@ class STTService:
     def flushing(self) -> bool:
         return self._plugin.flushing()
 
+    def processing(self, session_id: str) -> bool:
+        with self._plugin._lock:
+            session = self._plugin._processing_session
+            return session is not None and session.session_id == session_id
+
+    def reset(self, session_id: str) -> None:
+        """Clear cached recognition state after the session stops."""
+        with self._plugin._lock:
+            self._plugin._states.pop(session_id, None)
+            self._plugin._state_sessions.pop(session_id, None)
+            self._plugin._sessions.pop(session_id, None)
+            self._plugin._coverage_cache.pop(session_id, None)
+            self._plugin._disabled_at.pop(session_id, None)
+
     def transcribe(
         self, start: float | None = None, end: float | None = None
     ) -> dict[str, Any]:
@@ -124,9 +138,9 @@ class STTPlugin(Plugin):
         ctx.ui.register_command(
             "stt.debug",
             "语音转写（调试）",
-            subtitle="查看临时文字、定稿与处理进度",
+            icon="mic",
+            description="打开语音转写调试页面，查看转写结果",
             category="调试",
-            icon="🎙",
             order=20,
             page_id=PAGE_ID,
             keywords="stt transcript debug 转写",
@@ -216,17 +230,14 @@ class STTPlugin(Plugin):
         specs = (
             SettingsSpec(
                 key="stt.provider",
-                label="服务供应商",
+                label="服务提供方",
                 type=SettingType.SELECT,
                 default="compatible",
                 group="STT",
-                description="选择外部语音识别服务及其协议适配器",
+                section="服务连接",
+                description="",
                 options=providers.PROVIDER_OPTIONS,
-                group_note=(
-                    "`compatible` 使用 HTTP/WebSocket 兼容服务；`google` 使用 "
-                    "Google Cloud Speech-to-Text v2（OAuth），按窗口批量识别．"
-                ),
-                order=0,
+                order=10,
             ),
             SettingsSpec(
                 key="stt.enabled",
@@ -234,8 +245,9 @@ class STTPlugin(Plugin):
                 type=SettingType.BOOL,
                 default=True,
                 group="STT",
+                section="服务连接",
                 description="",
-                order=1,
+                order=0,
             ),
             SettingsSpec(
                 key="stt.timeout",
@@ -243,17 +255,19 @@ class STTPlugin(Plugin):
                 type=SettingType.FLOAT,
                 default=60.0,
                 group="STT",
-                description="单次请求的超时时间",
-                order=2,
+                section="服务连接",
+                description="超过时限仍未完成的请求将失败．",
+                order=30,
             ),
             SettingsSpec(
                 key="stt.buffer_seconds",
-                label="本地音频缓冲（秒）",
+                label="本地缓冲上限（秒）",
                 type=SettingType.FLOAT,
                 default=240.0,
                 group="STT",
-                description="暂停读取前允许保留的未处理音频时长",
-                order=3,
+                section="缓冲与批量处理",
+                description="未处理音频达到上限时暂停读取．",
+                order=100,
             ),
             SettingsSpec(
                 key="stt.window_seconds",
@@ -261,11 +275,12 @@ class STTPlugin(Plugin):
                 type=SettingType.FLOAT,
                 default=DEFAULT_WINDOW_SECONDS,
                 group="STT",
+                section="缓冲与批量处理",
                 description=(
-                    "批量协议每次请求的音频长度；服务商上限更低时以服务商为准"
-                    f"（Google v2 为 {MAX_WINDOW_SECONDS:g} 秒）"
+                    "每次批量请求的音频时长，至少为 1 秒．超过服务上限时按上限处理"
+                    f"（Google v2 为 {MAX_WINDOW_SECONDS:g} 秒）．"
                 ),
-                order=4,
+                order=110,
             ),
             SettingsSpec(
                 key="stt.server_url",
@@ -273,53 +288,57 @@ class STTPlugin(Plugin):
                 type=SettingType.STRING,
                 default="http://127.0.0.1:8766",
                 group="STT",
-                description="兼容 STT HTTP API 的服务地址",
+                section="服务连接",
+                description="兼容 STT HTTP API 的根地址，例如 http://127.0.0.1:8766．",
                 env=("STT_SERVER_URL",),
                 visible_when=compatible,
-                order=5,
+                order=20,
             ),
             SettingsSpec(
                 key="stt.language",
-                label="语言",
+                label="转写语言",
                 type=SettingType.STRING,
                 default="Chinese",
                 group="STT",
-                description="服务使用的转写语言",
+                section="兼容服务识别",
+                description="",
                 visible_when=compatible,
-                order=6,
+                order=90,
             ),
             SettingsSpec(
                 key="stt.send_window_seconds",
-                label="发送确认窗口（秒）",
+                label="待确认音频上限（秒）",
                 type=SettingType.FLOAT,
                 default=120.0,
                 group="STT",
-                description="录播已发送但未确认接收的音频上限；服务负责语音分段",
+                section="缓冲与批量处理",
+                description="录播已发送但服务尚未确认接收的音频达到上限时暂停发送．",
                 visible_when=compatible,
-                order=8,
+                order=120,
             ),
             SettingsSpec(
                 key="stt.concurrency",
-                label="服务端录播并发数",
+                label="录播推理并发数",
                 type=SettingType.INT,
                 default=1,
                 group="STT",
-                description="请求的活动推理数，由服务端限制到可用容量",
+                section="缓冲与批量处理",
+                description="服务端可将请求的并发数限制为可用容量．",
                 visible_when=compatible,
-                order=9,
+                order=130,
             ),
             SettingsSpec(
                 key="stt.google.credentials_json",
-                label="服务账号 JSON",
+                label="Google 凭据 JSON",
                 type=SettingType.SECRET,
                 default="",
                 group="STT",
+                section="Google 认证",
                 description=(
-                    "粘贴 service_account 或 authorized_user JSON；"
-                    "以 secret 形式保存，不会回显"
+                    "支持 service_account 或 authorized_user JSON．凭据不会回显．"
                 ),
                 visible_when=google,
-                order=10,
+                order=40,
             ),
             SettingsSpec(
                 key="stt.google.credentials_file",
@@ -327,32 +346,35 @@ class STTPlugin(Plugin):
                 type=SettingType.STRING,
                 default="",
                 group="STT",
+                section="Google 认证",
                 description=(
-                    "可选 JSON 文件；留空时回退到 GOOGLE_APPLICATION_CREDENTIALS / ADC"
+                    "留空时使用 GOOGLE_APPLICATION_CREDENTIALS 或应用默认凭据（ADC）．"
                 ),
                 env=("GOOGLE_APPLICATION_CREDENTIALS",),
                 visible_when=google,
-                order=11,
+                order=50,
             ),
             SettingsSpec(
                 key="stt.google.project_id",
-                label="Project ID",
+                label="项目 ID",
                 type=SettingType.STRING,
                 default="",
                 group="STT",
-                description="Google Cloud 项目 ID；留空则从凭据读取",
+                section="Google 认证",
+                description="留空时从 Google Cloud 凭据读取．",
                 visible_when=google,
-                order=12,
+                order=60,
             ),
             SettingsSpec(
                 key="stt.google.location",
-                label="区域（location）",
+                label="识别区域",
                 type=SettingType.STRING,
                 default=DEFAULT_LOCATION,
                 group="STT",
-                description="v2 recognizer 区域；chirp_* 需使用区域端点",
+                section="Google 识别",
+                description="使用 Google v2 支持的区域标识．chirp_* 模型需要区域端点．",
                 visible_when=google,
-                order=13,
+                order=70,
             ),
             SettingsSpec(
                 key="stt.google.model",
@@ -360,10 +382,11 @@ class STTPlugin(Plugin):
                 type=SettingType.SELECT,
                 default=DEFAULT_MODEL,
                 group="STT",
-                description="v2 模型；模型与区域不匹配时会自动降级",
+                section="Google 识别",
+                description="模型与区域不匹配时会自动降级．",
                 options=MODEL_OPTIONS,
                 visible_when=google,
-                order=14,
+                order=71,
             ),
             SettingsSpec(
                 key="stt.google.language_code",
@@ -371,9 +394,10 @@ class STTPlugin(Plugin):
                 type=SettingType.STRING,
                 default="cmn-Hans-CN",
                 group="STT",
-                description="BCP-47 语言代码，例如 cmn-Hans-CN 或 en-US",
+                section="Google 识别",
+                description="使用 BCP-47 语言代码，例如 cmn-Hans-CN 或 en-US．",
                 visible_when=google,
-                order=15,
+                order=72,
             ),
             SettingsSpec(
                 key="stt.google.enable_punctuation",
@@ -381,9 +405,10 @@ class STTPlugin(Plugin):
                 type=SettingType.BOOL,
                 default=True,
                 group="STT",
-                description="请求 Google 自动添加标点",
+                section="Google 识别",
+                description="",
                 visible_when=google,
-                order=16,
+                order=73,
             ),
         )
         for spec in specs:
@@ -1202,9 +1227,17 @@ class STTPlugin(Plugin):
     def _render_page(self) -> list[dict[str, Any]]:
         status = self.status()
         rows = [
-            ["状态", status["state"]],
             [
-                "供应商",
+                "状态",
+                {
+                    SttState.DISABLED: StatusLabel.DISABLED,
+                    SttState.ERROR: StatusLabel.FAILED,
+                    SttState.RUNNING: StatusLabel.RUNNING,
+                    SttState.IDLE: StatusLabel.IDLE,
+                }[status["state"]],
+            ],
+            [
+                "提供方",
                 status["provider_label"]
                 + ("（未配置）" if not status["configured"] else ""),
             ],
@@ -1268,7 +1301,7 @@ class STTPlugin(Plugin):
                         "label": "打开设置",
                         "action": "ui.open_page",
                         "value": {"page_id": "settings:main"},
-                        "class": "btn btn-ghost btn-sm",
+                        "class": "btn-outline theme-primary btn-sm",
                     }
                 ],
             }

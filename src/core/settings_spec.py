@@ -113,6 +113,7 @@ class SettingsSpec:
     default: Any = None
     nullable: bool = False
     group: str = "General"
+    section: str = ""
     description: str = ""
     options: tuple[Any, ...] = ()
     order: float = 0
@@ -123,7 +124,6 @@ class SettingsSpec:
     # Only show this field when another setting has one of the given values.
     # Example: ("input.mode", ("advanced",)).
     visible_when: tuple[str, tuple[Any, ...]] | None = None
-    group_note: str = ""
     # Internal fields can be persisted/masked without appearing in the form.
     hidden: bool = False
     # Read-only display field; never saved from the browser.

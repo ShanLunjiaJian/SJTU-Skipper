@@ -26,7 +26,7 @@ from core.file_access import publication_lock
 from core.events import Event
 from core.navigation import current_navigation
 from core.streams import StreamKind
-from core.ui import TaskState
+from core.ui import StatusLabel, TaskState
 from core.settings_spec import SettingsSpec, SettingType
 from core.workspace import FileWorkspace
 from core.note_document import parse_blocks, strip_blocks
@@ -60,19 +60,88 @@ class NotesPipeline:
         self.ctx = ctx
         self.settings = ctx.require("settings")
         self.agent = ctx.require("agent")
-        for order, (key, default, kind, label) in enumerate(
+        for key, default, kind, label, section, description, order in (
             (
-                ("chunks_enabled", True, SettingType.BOOL, "课中自动整理"),
-                ("chunk_seconds", 600, SettingType.INT, "分段时长（秒）"),
-                ("overlap_seconds", 60, SettingType.INT, "前文时长（秒）"),
-                ("concurrency", 8, SettingType.INT, "笔记并发数"),
-                ("review_enabled", True, SettingType.BOOL, "启用审阅"),
-                ("review_max_rounds", 0, SettingType.INT, "审阅轮数上限（0 为不限）"),
-                ("chunk_system_prompt", SYSTEM, SettingType.TEXT, "课中整理提示词"),
-                ("system_prompt", SYSTEM, SettingType.TEXT, "完整笔记提示词"),
-                ("reviewer_prompt", REVIEW_SYSTEM, SettingType.TEXT, "审阅提示词"),
+                "chunks_enabled",
+                True,
+                SettingType.BOOL,
+                "自动生成分段笔记",
+                "分段笔记",
+                "",
+                10,
             ),
-            start=1,
+            (
+                "chunk_seconds",
+                600,
+                SettingType.INT,
+                "分段时长（秒）",
+                "分段笔记",
+                "每段笔记覆盖的课次时长，至少为 1 秒．",
+                20,
+            ),
+            (
+                "overlap_seconds",
+                60,
+                SettingType.INT,
+                "前文时长（秒）",
+                "分段笔记",
+                "生成分段笔记时额外提供的前文范围．",
+                30,
+            ),
+            (
+                "concurrency",
+                8,
+                SettingType.INT,
+                "笔记任务并发数",
+                "任务并发",
+                "修改后重启服务生效．",
+                70,
+            ),
+            (
+                "review_enabled",
+                True,
+                SettingType.BOOL,
+                "审阅完整笔记",
+                "笔记审阅",
+                "",
+                80,
+            ),
+            (
+                "review_max_rounds",
+                0,
+                SettingType.INT,
+                "审阅轮数上限（轮）",
+                "笔记审阅",
+                "0 表示不限制审阅轮数．",
+                90,
+            ),
+            (
+                "chunk_system_prompt",
+                SYSTEM,
+                SettingType.TEXT,
+                "分段笔记提示词",
+                "提示词",
+                "留空时使用默认提示词．",
+                200,
+            ),
+            (
+                "system_prompt",
+                SYSTEM,
+                SettingType.TEXT,
+                "完整笔记提示词",
+                "提示词",
+                "留空时使用默认提示词．",
+                210,
+            ),
+            (
+                "reviewer_prompt",
+                REVIEW_SYSTEM,
+                SettingType.TEXT,
+                "笔记审阅提示词",
+                "提示词",
+                "留空时使用默认提示词．",
+                220,
+            ),
         ):
             self.settings.register(
                 SettingsSpec(
@@ -81,8 +150,9 @@ class NotesPipeline:
                     type=kind,
                     label=label,
                     group="笔记",
-                    order=order * 10,
-                    description="修改后重启服务生效" if key == "concurrency" else "",
+                    section=section,
+                    order=order,
+                    description=description,
                 ),
                 plugin_id=self.id,
             )
@@ -348,9 +418,9 @@ class NotesPipeline:
                 self.writer_messages[sid].append(text)
                 return {"ok": True, "refresh": True}
             if stage == ContinuationStage.STARTING:
-                return reject("主写作正在恢复，请稍后发送")
+                return reject("笔记写作正在恢复，请稍后发送")
             if stage == ContinuationStage.FINISHING:
-                return reject("主写作正在发布，请稍后发送")
+                return reject("笔记写作正在发布，请稍后发送")
             live = any(
                 task["session_id"] == sid
                 and any(
@@ -361,7 +431,7 @@ class NotesPipeline:
             )
             if not live:
                 if not writer:
-                    return reject("主写作会话记录不可用")
+                    return reject("笔记写作会话记录不可用")
                 if not is_writer or not (
                     state["phase"] == NotePhase.PUBLISHED
                     or (
@@ -377,10 +447,10 @@ class NotesPipeline:
                     return reject("笔记任务尚未结束，请稍后发送")
                 try:
                     if not self.agent.can_resume(writer["session_id"])[0]:
-                        return reject("主写作会话记录不可用")
+                        return reject("笔记写作会话记录不可用")
                     self._writer_inputs(sid, writer)
                 except (OSError, ValueError, RuntimeError) as exc:
-                    return reject(f"主写作会话记录不可用：{exc}")
+                    return reject(f"笔记写作会话记录不可用：{exc}")
                 self.writer_messages[sid] = [text]
                 self.continuations[sid] = ContinuationStage.QUEUED
                 # Only initial publication keeps this request set after a failure.
@@ -637,7 +707,7 @@ class NotesPipeline:
                         },
                         "label": f"笔记 {sid}",
                         "detail": (
-                            f"分段整理；片段 {task['chunk']}；{elapsed} 秒"
+                            f"分段笔记；第 {task['chunk'] + 1} 段；{elapsed} 秒"
                             if phase == NotePhase.CHUNKING
                             else f"笔记写作；{elapsed} 秒"
                         ),
@@ -648,7 +718,11 @@ class NotesPipeline:
                     "id": f"notes:{sid}:{kind}:{index}",
                     "session_id": sid,
                     "label": f"笔记 {sid}",
-                    "detail": f"排队；{kind}；片段 {index}",
+                    "detail": (
+                        f"{StatusLabel.QUEUED}；分段笔记；第 {index + 1} 段"
+                        if kind == NoteTaskKind.CHUNK
+                        else f"{StatusLabel.QUEUED}；笔记写作"
+                    ),
                     "phase": kind,
                     "state": TaskState.PENDING,
                     "cancel": {
@@ -956,7 +1030,7 @@ class NotesPipeline:
                     ExecutionRole.REVIEWER if reviewer else ExecutionRole.WRITER,
                     {
                         AgentRole.NOTE_REVIEW: "笔记审阅",
-                    }.get(event.get("role"), task.get("label", "主写作")),
+                    }.get(event.get("role"), task.get("label", "笔记写作")),
                     session_id=str(reviewer or event.get("session_id", "")),
                 )
             agent = agents[key]
@@ -1039,9 +1113,9 @@ class NotesPipeline:
             )
             meta = saved.get("meta", saved)
         return (
-            "## 目标课堂\n会话："
+            "## 目标课次\n会话："
             + sid
-            + "\n课堂元信息："
+            + "\n课次元信息："
             + json.dumps(meta, ensure_ascii=False)
             + "\n"
         )
@@ -1237,7 +1311,7 @@ class NotesPipeline:
             files,
             readonly=("source.md", "context.md", "visual_history.md", SOURCE_FILENAME),
         )
-        self._run_agent(sid, f"{sid} 片段 {index}", workspace, CHUNK)
+        self._run_agent(sid, f"{sid} 分段笔记 第 {index + 1} 段", workspace, CHUNK)
         self._validate_outputs(root)
         with self.condition:
             self._check_running(sid)
