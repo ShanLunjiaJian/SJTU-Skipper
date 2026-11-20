@@ -8,7 +8,6 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%231a73e8'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-size='19' fill='%23ffffff'%3E%E2%88%91%3C/text%3E%3C/svg%3E"
     >
-    <link rel="stylesheet" href="/static/vendor/bootstrap/bootstrap.min.css">
     <link rel="stylesheet" href="/static/carbon.css">
     <link rel="stylesheet" href="/static/styles.css">
     <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
@@ -25,16 +24,14 @@
             <button
               class="nav-link"
               type="button"
-              data-bs-toggle="drawer"
-              data-bs-target="#sidebar-left"
+              data-drawer-target="#sidebar-left"
             >
               课程
             </button>
             <button
               class="nav-link"
               type="button"
-              data-bs-toggle="drawer"
-              data-bs-target="#sidebar-right"
+              data-drawer-target="#sidebar-right"
             >
               详情
             </button>
@@ -90,7 +87,6 @@
               class="sidebar-close btn btn-text theme-secondary"
               type="button"
               data-side="left"
-              data-bs-dismiss="drawer"
               title="收起课程面板"
               aria-label="收起课程面板"
             >
@@ -132,7 +128,6 @@
               class="sidebar-close btn btn-text theme-secondary"
               type="button"
               data-side="right"
-              data-bs-dismiss="drawer"
               title="收起详情面板"
               aria-label="收起详情面板"
             >
@@ -180,7 +175,7 @@
           <button
             type="button"
             class="btn btn-text theme-secondary flex-shrink-0 me-3"
-            data-bs-dismiss="toast"
+            data-toast-close
             aria-label="关闭"
           >
             ×
@@ -188,7 +183,6 @@
         </div>
       </div>
     </div>
-    <div id="selection-anchor" class="position-fixed pe-none" aria-hidden="true"></div>
     <dialog id="palette" class="dialog dialog-instant" aria-label="命令">
       <div class="dialog-header"><h2 class="dialog-title">命令</h2></div>
       <div class="dialog-body">

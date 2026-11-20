@@ -1,11 +1,3 @@
-import {
-  Dialog,
-  Drawer,
-  Menu,
-  Popover,
-  Toast,
-} from "/static/vendor/bootstrap/bootstrap.bundle.min.js";
-
 (() => {
   "use strict";
 
@@ -191,13 +183,74 @@ import {
   };
 
   const shortId = (id) => (id ? String(id).slice(0, 18) : "-");
+  const menuBindings = new Map();
+  let toastTimer;
+
+  function bindMenu(button, menu) {
+    button._menu = menu;
+    const hide = () => {
+      menu.classList.remove("show");
+      button.setAttribute("aria-expanded", "false");
+    };
+    const toggle = () => {
+      const opening = !menu.classList.contains("show");
+      for (const binding of menuBindings.values()) binding.hide();
+      if (!opening) return;
+      menu.classList.add("show");
+      const rect = button.getBoundingClientRect();
+      menu.style.left = `${Math.max(4, Math.min(rect.left, innerWidth - menu.offsetWidth - 4))}px`;
+      menu.style.top = `${rect.bottom + menu.offsetHeight > innerHeight ? Math.max(4, rect.top - menu.offsetHeight) : rect.bottom}px`;
+      button.setAttribute("aria-expanded", "true");
+    };
+    const keydown = (event) => {
+      if (!["ArrowDown", "ArrowUp", "Home", "End", "Escape"].includes(event.key)) return;
+      event.preventDefault();
+      if (event.key === "Escape") {
+        hide();
+        button.focus();
+        return;
+      }
+      if (!menu.classList.contains("show")) toggle();
+      const items = $$('button:not(:disabled), [role="option"]:not([aria-disabled="true"])', menu);
+      const index = items.indexOf(document.activeElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+        : (index + (event.key === "ArrowUp" ? -1 : 1) + items.length) % items.length;
+      items[next]?.focus();
+    };
+    button.addEventListener("click", toggle);
+    button.addEventListener("keydown", keydown);
+    menu.addEventListener("keydown", keydown);
+    const binding = { hide, dispose: () => {
+      hide();
+      button.removeEventListener("click", toggle);
+      button.removeEventListener("keydown", keydown);
+      menu.removeEventListener("keydown", keydown);
+      menuBindings.delete(button);
+    } };
+    menuBindings.set(button, binding);
+    return binding;
+  }
+
+  document.addEventListener("pointerdown", (event) => {
+    for (const [button, binding] of menuBindings)
+      if (!button.contains(event.target) && !button._menu.contains(event.target)) binding.hide();
+  });
+  document.addEventListener("scroll", (event) => {
+    for (const [button, binding] of menuBindings)
+      if (!button._menu.contains(event.target)) binding.hide();
+  }, true);
+  window.addEventListener("resize", () => {
+    for (const binding of menuBindings.values()) binding.hide();
+  });
 
   function toast(message, kind = TOAST_KIND.DEFAULT) {
     if (!message) return;
     const node = $("#toast");
     $(".toast-body", node).textContent = message;
     node.className = `toast ${kind === TOAST_KIND.ERR ? "theme-danger" : "theme-secondary"}`;
-    Toast.getOrCreateInstance(node, { delay: 3200 }).show();
+    clearTimeout(toastTimer);
+    node.classList.add("show");
+    toastTimer = setTimeout(() => node.classList.remove("show"), 3200);
   }
 
   async function api(path, options = {}) {
@@ -1469,7 +1522,7 @@ import {
 
   function destroyPlayers(root) {
     if (!root) return;
-    for (const button of $$("[data-bs-toggle='menu']", root)) Menu.getInstance(button)?.dispose();
+    for (const button of $$("[data-menu-toggle]", root)) menuBindings.get(button)?.dispose();
     for (const video of $$("video", root)) {
       if (video._hls) {
         try {
@@ -1865,7 +1918,7 @@ import {
         class: "btn-outline theme-secondary",
         type: FIELD_INPUT.BUTTON,
         "aria-label": "查看会话",
-        "data-bs-toggle": "menu",
+        "data-menu-toggle": "",
         "aria-haspopup": "listbox",
         "aria-expanded": "false",
       });
@@ -1922,11 +1975,7 @@ import {
         agents: [],
         composer,
       };
-      const menuController = new Menu(select, {
-        menu,
-        container: document.body,
-        strategy: "fixed",
-      });
+      const menuController = bindMenu(select, menu);
       const close = () => menuController.hide();
       view.close = close;
       menu.addEventListener("click", (event) => {
@@ -2421,8 +2470,8 @@ import {
   }
 
   function closeMenus() {
-    for (const button of $$("[data-bs-toggle='menu']", $("#menubar")))
-      Menu.getInstance(button)?.hide();
+    for (const button of $$("[data-menu-toggle]", $("#menubar")))
+      menuBindings.get(button)?.hide();
   }
 
   function runCommand(cmd) {
@@ -2438,7 +2487,7 @@ import {
     if (!bar) return;
     const signature = JSON.stringify(commands());
     if (bar.dataset.commands === signature) return;
-    for (const button of $$("[data-bs-toggle='menu']", bar)) Menu.getInstance(button)?.dispose();
+    for (const button of $$("[data-menu-toggle]", bar)) menuBindings.get(button)?.dispose();
     bar.replaceChildren();
     bar.dataset.commands = signature;
     const groups = new Map();
@@ -2452,7 +2501,7 @@ import {
         class: "nav-link",
         type: FIELD_INPUT.BUTTON,
         text: name,
-        "data-bs-toggle": "menu",
+        "data-menu-toggle": "",
         "aria-expanded": "false",
       });
       const menu = el("div", { class: "menu" });
@@ -2467,7 +2516,7 @@ import {
         menu.appendChild(item);
       }
       bar.appendChild(el("li", { class: "nav-item position-relative" }, [button, menu]));
-      new Menu(button);
+      bindMenu(button, menu);
     }
   }
 
@@ -2523,7 +2572,7 @@ import {
   function openPalette() {
     const palette = $("#palette");
     if (!palette) return;
-    Dialog.getOrCreateInstance(palette).show(document.activeElement);
+    if (!palette.open) palette.showModal();
     const input = $("#palette-input");
     input.value = "";
     state.paletteIndex = 0;
@@ -2533,7 +2582,7 @@ import {
 
   function closePalette() {
     const palette = $("#palette");
-    if (palette) Dialog.getOrCreateInstance(palette).hide();
+    if (palette?.open) palette.close();
     state.paletteIndex = 0;
   }
 
@@ -2581,6 +2630,17 @@ import {
 
   function bindPaletteTrigger() {
     $("#palette-btn")?.addEventListener("click", openPalette);
+    for (const button of $$("[data-drawer-target]")) button.addEventListener("click", () => {
+      const sidebar = $(button.dataset.drawerTarget);
+      if (!sidebar.open) sidebar.showModal();
+    });
+    for (const dialog of $$("dialog")) dialog.addEventListener("click", (event) => {
+      if (event.target !== dialog) return;
+      const rect = dialog.getBoundingClientRect();
+      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)
+        dialog.close();
+    });
+    $("[data-toast-close]")?.addEventListener("click", () => $("#toast").classList.remove("show"));
     $("#palette")?.addEventListener("close", () => {
       state.paletteIndex = 0;
     });
@@ -2627,7 +2687,12 @@ import {
   function bindSidebarControls() {
     for (const btn of $$(".sidebar-close, .sidebar-restore")) {
       btn.addEventListener("click", () => {
-        if (!desktopLayout.matches) return;
+        if (!desktopLayout.matches) {
+          const sidebar = $(`#sidebar-${btn.dataset.side}`);
+          if (sidebar.open) sidebar.close();
+          else sidebar.showModal();
+          return;
+        }
         const side = btn.dataset.side;
         const collapsed = $("#app").classList.contains(`${side}-collapsed`);
         setSidebarCollapsed(side, !collapsed);
@@ -2678,15 +2743,14 @@ import {
     desktopLayout.addEventListener("change", () => {
       for (const side of Object.values(SIDEBAR_SIDE)) {
         const sidebar = $(`#sidebar-${side}`);
-        if (sidebar.open) Drawer.getInstance(sidebar)?.hide();
+        if (sidebar.open) sidebar.close();
       }
       applySidebarState();
     });
   }
 
   function hideSelectionMenu() {
-    const anchor = $("#selection-anchor");
-    if (anchor) Popover.getInstance(anchor)?.dispose();
+    $(".selection-popover")?.remove();
   }
 
   function docContext(node) {
@@ -2709,9 +2773,8 @@ import {
   }
 
   function showSelectionMenu() {
-    const anchor = $("#selection-anchor");
     const page = $("#page-content");
-    if (!anchor || !page) return;
+    if (!page) return;
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) return hideSelectionMenu();
     const text = String(sel).trim();
@@ -2747,23 +2810,15 @@ import {
       });
       content.appendChild(btn);
     }
-    const rect = sel.getRangeAt(0).getBoundingClientRect();
-    Object.assign(anchor.style, {
-      left: `${rect.left}px`,
-      top: `${rect.top}px`,
-      width: `${rect.width}px`,
-      height: `${rect.height}px`,
-    });
-    new Popover(anchor, {
-      trigger: "manual",
-      animation: false,
-      placement: "top",
-      html: true,
-      content,
-      customClass: "selection-popover",
-      template:
-        '<div class="popover" role="dialog" aria-label="选中文字操作"><div class="popover-arrow"></div><div class="popover-body p-0"></div></div>',
-    }).show();
+    const rect = range.getBoundingClientRect();
+    const popup = el("div", {
+      class: "popover selection-popover show",
+      role: "dialog",
+      "aria-label": "选中文字操作",
+    }, [content]);
+    document.body.appendChild(popup);
+    popup.style.left = `${Math.max(4, Math.min(rect.left, innerWidth - popup.offsetWidth - 4))}px`;
+    popup.style.top = `${rect.top >= popup.offsetHeight + 8 ? rect.top - popup.offsetHeight - 8 : rect.bottom + 8}px`;
   }
 
   function openAskEditor(item, ctx, selection, range) {

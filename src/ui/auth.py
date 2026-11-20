@@ -217,8 +217,8 @@ _LOGIN_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 - SJTU-Skipper</title>
-<link rel="stylesheet" href="/static/vendor/bootstrap/bootstrap.min.css">
 <link rel="stylesheet" href="/static/carbon.css">
+<link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
   <main class="container min-vh-100 d-flex align-items-center justify-content-center py-4">
@@ -331,7 +331,7 @@ def install(app: Any, data_dir: Path) -> AuthStore:
     public = {
         "/login",
         "/favicon.ico",
-        "/static/vendor/bootstrap/bootstrap.min.css",
+        "/static/styles.css",
         "/static/carbon.css",
     }
 

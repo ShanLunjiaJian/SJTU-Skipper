@@ -420,21 +420,20 @@ def test_live_qa_messages_keep_one_owning_run(tmp_path):
         runtime.stop()
 
 
-def test_course_context_uses_only_request_navigation(navigation):
-    from core.navigation import Navigation, navigation_scope
+def test_course_context_uses_note_target(tmp_path, navigation):
     from core.streams import StreamHub
 
     hub = StreamHub()
     hub.start_session("processing", meta={"course_name": "Background course"})
     plugin = AskPlugin()
-    plugin.ctx = SimpleNamespace(streams=hub)
-    assert plugin._course_name() == "未知课程"
+    plugin.ctx = SimpleNamespace(streams=hub, data_dir=tmp_path)
+    path = str(tmp_path / "sessions" / "unprocessed" / "notes" / "note.md")
+    assert plugin._course_name(path) == "未知课程"
     navigation.class_id = "selected"
     navigation.class_meta = {"course_name": "Selected course"}
-    assert plugin._course_name() == "Selected course"
-    with navigation_scope(Navigation(class_id="unprocessed")):
-        assert plugin._course_name() == "未知课程"
-    assert plugin._course_name() == "Selected course"
+    assert plugin._course_name(path) == "未知课程"
+    target = str(tmp_path / "sessions" / "processing" / "notes" / "note.md")
+    assert plugin._course_name(target) == "Background course"
 
 
 def test_selection_character_limit():
