@@ -217,7 +217,7 @@ _LOGIN_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 - SJTU-Skipper</title>
-<link rel="stylesheet" href="/static/carbon.css">
+<link rel="stylesheet" href="/static/theme.css">
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -332,7 +332,7 @@ def install(app: Any, data_dir: Path) -> AuthStore:
         "/login",
         "/favicon.ico",
         "/static/styles.css",
-        "/static/carbon.css",
+        "/static/theme.css",
     }
 
     @app.middleware("http")

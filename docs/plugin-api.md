@@ -147,17 +147,17 @@ for frame in ctx.llm.stream(IpcMethod.GENERATE, role="board_recognition", messag
 
 ## 6. UI
 
-### Carbon 风格主题
+### Google 风格主题
 
-应用和登录页加载独立的 `src/ui/static/carbon.css` 与 `styles.css`，不使用组件库．
+应用和登录页加载独立的 `src/ui/static/theme.css` 与 `styles.css`，不使用组件库．
 
-- 配色参考 [Carbon 色彩与分层](https://carbondesignsystem.com/guidelines/color/overview/) 和 [设计变量](https://carbondesignsystem.com/guidelines/color/tokens/)．浅色采用 White 分层，深色采用 Gray 100 分层，随系统明暗偏好切换．
+- 界面采用 Google 风格的蓝色主色、圆角按钮、浅色分层和细边框，随系统明暗偏好切换．
 - 主题通过应用自带的 CSS 变量配置配色、尺寸、圆角和焦点．
 - 控件与布局由应用维护，按钮按下节规范选择外观与颜色．
 
 ### 按钮规范
 
-按钮先区分业务操作与低成本的查看操作，再区分强调程度和风险．层级与危险色参考 [Carbon 按钮指南](https://www.carbondesignsystem.com/building-blocks/core/components/button/guidelines)．应用的按钮样式为 `btn-solid`、`btn-outline` 和 `btn-text`．
+按钮先区分业务操作与低成本的查看操作，再区分强调程度和风险．应用的按钮样式为 `btn-solid`、`btn-outline` 和 `btn-text`．
 
 | 用途           | 样式                        | 示例                                   |
 | -------------- | --------------------------- | -------------------------------------- |
