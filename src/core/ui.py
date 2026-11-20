@@ -297,6 +297,8 @@ class _Action:
 class _Command:
     id: str
     title: str
+    icon: str
+    description: str
     category: str
     order: float
     page_id: str | None
@@ -350,6 +352,8 @@ class UIManager:
         self.register_command(
             "ui.tasks",
             "任务队列",
+            icon="list-task",
+            description="查看任务进度和处理队列",
             category="视图",
             page_id="ui:tasks",
             keywords="tasks queue 任务 队列",
@@ -559,6 +563,8 @@ class UIManager:
         command_id: str,
         title: str,
         *,
+        icon: str = "",
+        description: str = "",
         category: str = "",
         order: float = 0,
         page_id: str | None = None,
@@ -574,6 +580,8 @@ class UIManager:
             self._commands[command_id] = _Command(
                 id=command_id,
                 title=title,
+                icon=icon,
+                description=description,
                 category=category,
                 order=float(order),
                 page_id=page_id,
@@ -606,6 +614,8 @@ class UIManager:
             {
                 "id": c.id,
                 "title": c.title,
+                "icon": c.icon,
+                "description": c.description,
                 "category": c.category,
                 "page": c.page_id,
                 "action": c.action,

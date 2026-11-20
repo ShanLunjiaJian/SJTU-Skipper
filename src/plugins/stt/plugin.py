@@ -138,6 +138,8 @@ class STTPlugin(Plugin):
         ctx.ui.register_command(
             "stt.debug",
             "语音转写（调试）",
+            icon="mic",
+            description="打开语音转写调试页面，查看转写结果",
             category="调试",
             order=20,
             page_id=PAGE_ID,

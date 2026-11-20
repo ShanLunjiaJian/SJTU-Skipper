@@ -1955,7 +1955,7 @@
       });
       const send = el("button", {
         type: FIELD_INPUT.BUTTON,
-        class: "btn-solid theme-primary",
+        class: "btn-solid theme-primary flex-shrink-0 text-nowrap",
         text: "发送",
       });
       const composer = el(
@@ -2492,6 +2492,54 @@
     return null;
   }
 
+  /* Bootstrap Icons: https://icons.getbootstrap.com/
+   * The MIT License (MIT)
+   *
+   * Copyright (c) 2019-2024 The Bootstrap Authors
+   *
+   * Permission is hereby granted, free of charge, to any person obtaining a copy
+   * of this software and associated documentation files (the "Software"), to deal
+   * in the Software without restriction, including without limitation the rights
+   * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   * copies of the Software, and to permit persons to whom the Software is
+   * furnished to do so, subject to the following conditions:
+   *
+   * The above copyright notice and this permission notice shall be included in
+   * all copies or substantial portions of the Software.
+   *
+   * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+   * THE SOFTWARE.
+   *
+   */
+  const COMMAND_ICONS = Object.freeze({
+    "list-task":
+      '<path fill-rule="evenodd" d="M2 2.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5V3a.5.5 0 0 0-.5-.5zM3 3H2v1h1z"/>\n  <path d="M5 3.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5M5.5 7a.5.5 0 0 0 0 1h9a.5.5 0 0 0 0-1zm0 4a.5.5 0 0 0 0 1h9a.5.5 0 0 0 0-1z"/>\n  <path fill-rule="evenodd" d="M1.5 7a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5H2a.5.5 0 0 1-.5-.5zM2 7h1v1H2zm0 3.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5zm1 .5H2v1h1z"/>',
+    gear: '<path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492M5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0"/>\n  <path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52zm-2.633.283c.246-.835 1.428-.835 1.674 0l.094.319a1.873 1.873 0 0 0 2.693 1.115l.291-.16c.764-.415 1.6.42 1.184 1.185l-.159.292a1.873 1.873 0 0 0 1.116 2.692l.318.094c.835.246.835 1.428 0 1.674l-.319.094a1.873 1.873 0 0 0-1.115 2.693l.16.291c.415.764-.42 1.6-1.185 1.184l-.291-.159a1.873 1.873 0 0 0-2.693 1.116l-.094.318c-.246.835-1.428.835-1.674 0l-.094-.319a1.873 1.873 0 0 0-2.692-1.115l-.292.16c-.764.415-1.6-.42-1.184-1.185l.159-.291A1.873 1.873 0 0 0 1.945 8.93l-.319-.094c-.835-.246-.835-1.428 0-1.674l.319-.094A1.873 1.873 0 0 0 3.06 4.377l-.16-.292c-.415-.764.42-1.6 1.185-1.184l.292.159a1.873 1.873 0 0 0 2.692-1.115z"/>',
+    "arrow-clockwise":
+      '<path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2z"/>\n  <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466"/>',
+    "play-circle":
+      '<path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14m0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16"/>\n  <path d="M6.271 5.055a.5.5 0 0 1 .52.038l3.5 2.5a.5.5 0 0 1 0 .814l-3.5 2.5A.5.5 0 0 1 6 10.5v-5a.5.5 0 0 1 .271-.445"/>',
+    mic: '<path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h3a.5.5 0 0 1 0 1h-7a.5.5 0 0 1 0-1h3v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5"/>\n  <path d="M10 8a2 2 0 1 1-4 0V3a2 2 0 1 1 4 0zM8 0a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V3a3 3 0 0 0-3-3"/>',
+    easel:
+      '<path d="M8 0a.5.5 0 0 1 .473.337L9.046 2H14a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-1.85l1.323 3.837a.5.5 0 1 1-.946.326L11.092 11H8.5v3a.5.5 0 0 1-1 0v-3H4.908l-1.435 4.163a.5.5 0 1 1-.946-.326L3.85 11H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h4.954L7.527.337A.5.5 0 0 1 8 0M2 3v7h12V3z"/>',
+  });
+
+  function commandIcon(name) {
+    const paths = COMMAND_ICONS[name];
+    if (!paths) return null;
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "command-icon");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.innerHTML = paths;
+    return svg;
+  }
+
   function renderMenubar() {
     const bar = $("#menubar");
     if (!bar) return;
@@ -2516,11 +2564,14 @@
       });
       const menu = el("div", { class: "menu" });
       for (const cmd of items) {
-        const item = el("button", {
-          class: "menu-item",
-          type: FIELD_INPUT.BUTTON,
-          text: cmd.title,
-        });
+        const item = el(
+          "button",
+          {
+            class: "menu-item command-menu-item",
+            type: FIELD_INPUT.BUTTON,
+          },
+          [commandIcon(cmd.icon), el("span", { text: cmd.title })],
+        );
         item.disabled = Boolean(cmd.disabled);
         item.addEventListener("click", () => runCommand(cmd));
         menu.appendChild(item);
@@ -2537,7 +2588,8 @@
     const items = commands();
     if (!q) return items;
     return items.filter((cmd) => {
-      const hay = `${cmd.title} ${cmd.category || ""} ${cmd.keywords || ""}`.toLowerCase();
+      const hay =
+        `${cmd.title} ${cmd.description || ""} ${cmd.category || ""} ${cmd.keywords || ""}`.toLowerCase();
       return q.split(/\s+/).every((part) => hay.includes(part));
     });
   }
@@ -2557,14 +2609,26 @@
       const row = el(
         "button",
         {
-          class: `palette-item list-group-item list-group-item-action d-flex flex-wrap align-items-center gap-2 ${index === state.paletteIndex ? "active" : ""}`,
+          class: `palette-item ${index === state.paletteIndex ? "active" : ""}`,
           type: FIELD_INPUT.BUTTON,
           role: "option",
           "aria-selected": String(index === state.paletteIndex),
+          disabled: Boolean(cmd.disabled),
+          "aria-describedby": cmd.description ? `palette-description-${index}` : undefined,
         },
         [
-          cmd.category ? el("span", { class: "badge theme-secondary", text: cmd.category }) : null,
-          el("span", { text: cmd.title }),
+          commandIcon(cmd.icon),
+          el("span", { class: "palette-copy" }, [
+            el("span", { class: "palette-title", text: cmd.title }),
+            cmd.description
+              ? el("span", {
+                  id: `palette-description-${index}`,
+                  class: "palette-description",
+                  text: cmd.description,
+                })
+              : null,
+          ]),
+          cmd.category ? el("span", { class: "palette-category", text: cmd.category }) : null,
         ],
       );
       row.addEventListener("click", () => runCommand(cmd));
@@ -2807,7 +2871,7 @@
     content.addEventListener("mousedown", (event) => event.preventDefault());
     for (const item of ctx.actions) {
       const btn = el("button", {
-        class: "btn-text theme-secondary text-start",
+        class: "menu-item",
         type: FIELD_INPUT.BUTTON,
         text: `${item.icon ? item.icon + " " : ""}${item.label || item.id}`,
       });
@@ -3266,12 +3330,23 @@
     const items = el("ul", { class: "nav flex-nowrap align-items-center text-nowrap" });
     bar.replaceChildren(items);
 
-    const item = (label, value) =>
+    const item = (label, value, page = null) =>
       el("li", { class: "nav-item flex-shrink-0" }, [
-        el("span", { class: "nav-link d-inline-flex align-items-center gap-2 fg-body" }, [
-          el("span", { text: label }),
-          el("b", { text: String(value) }),
-        ]),
+        el(
+          page ? "a" : "span",
+          {
+            class: "nav-link d-inline-flex align-items-center gap-2 fg-body",
+            href: page ? `/?page=${encodeURIComponent(page)}` : undefined,
+            "aria-label": page ? `打开${label}，共 ${value} 个任务` : undefined,
+            onclick: page
+              ? (event) => {
+                  event.preventDefault();
+                  openPage(page);
+                }
+              : undefined,
+          },
+          [el("span", { text: label }), el("b", { text: String(value) })],
+        ),
       ]);
 
     const connection = item(
@@ -3294,23 +3369,7 @@
       item("插件", (runtime.plugins_loaded || runtime.plugin_order || []).length || 0),
     );
     const tasks = state.ui.tasks || [];
-    items.appendChild(
-      el("li", { class: "nav-item flex-shrink-0" }, [
-        el(
-          "a",
-          {
-            href: "/?page=ui%3Atasks",
-            class: "nav-link d-inline-flex align-items-center gap-2",
-            "aria-label": `打开任务队列，共 ${tasks.length} 个任务`,
-            onclick: (event) => {
-              event.preventDefault();
-              openPage("ui:tasks");
-            },
-          },
-          [el("span", { text: "任务队列" }), el("b", { text: String(tasks.length) })],
-        ),
-      ]),
-    );
+    items.appendChild(item("任务队列", tasks.length, "ui:tasks"));
   }
 
   async function openPage(pageId) {

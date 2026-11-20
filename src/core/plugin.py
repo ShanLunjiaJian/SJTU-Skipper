@@ -150,6 +150,8 @@ class _ScopedUI(UIManager):
         command_id: str,
         title: str,
         *,
+        icon: str = "",
+        description: str = "",
         category: str = "",
         order: float = 0,
         page_id: str | None = None,
@@ -160,6 +162,8 @@ class _ScopedUI(UIManager):
         super().register_command(
             command_id,
             title,
+            icon=icon,
+            description=description,
             category=category,
             order=order,
             page_id=page_id,

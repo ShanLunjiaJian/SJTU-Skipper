@@ -187,9 +187,9 @@ page.open()
 ctx.ui.register_command(
     "input.manual",
     "手动播放",
-    subtitle="HLS / FLV / mp4 / 本地文件",
+    description="播放 HLS、FLV、MP4 或本地文件",
     category="调试",
-    icon="🔗",
+    icon="play-circle",
     page_id="input:manual",
 )
 ctx.ui.refresh("reason")

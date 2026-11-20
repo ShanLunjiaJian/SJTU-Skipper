@@ -172,22 +172,15 @@
       </div>
     </div>
     <dialog id="palette" class="dialog dialog-instant" aria-label="命令">
-      <div class="dialog-header"><h2 class="dialog-title">命令</h2></div>
-      <div class="dialog-body">
-        <input
-          id="palette-input"
-          class="form-control"
-          type="text"
-          aria-label="搜索命令"
-          placeholder="搜索命令"
-          autocomplete="off"
-        >
-        <div
-          id="palette-list"
-          class="palette-list list-group mt-3 overflow-auto"
-          role="listbox"
-        ></div>
-      </div>
+      <input
+        id="palette-input"
+        class="form-control"
+        type="text"
+        aria-label="搜索命令"
+        placeholder="搜索命令"
+        autocomplete="off"
+      >
+      <div id="palette-list" class="palette-list" role="listbox"></div>
     </dialog>
 
     <script src="/static/vendor/hls/hls.min.js"></script>

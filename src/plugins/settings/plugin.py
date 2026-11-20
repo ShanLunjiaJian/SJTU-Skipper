@@ -78,6 +78,8 @@ class SettingsPlugin(Plugin):
         ui.register_command(
             "settings.open",
             "设置",
+            icon="gear",
+            description="打开设置页面，管理账号和服务配置",
             category="视图",
             order=10,
             page_id=PAGE_ID,

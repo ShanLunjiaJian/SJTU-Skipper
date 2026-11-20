@@ -233,6 +233,8 @@ def test_commands_registry_and_state() -> None:
     ui.register_command(
         "settings.open",
         "设置",
+        icon="gear",
+        description="打开设置页面",
         category="视图",
         order=10,
         page_id="settings:main",
@@ -254,6 +256,10 @@ def test_commands_registry_and_state() -> None:
     ]
     assert [c["id"] for c in commands] == ["input.refresh", "settings.open"]
     assert commands[1]["page"] == "settings:main"
+    assert commands[1]["icon"] == "gear"
+    assert commands[1]["description"] == "打开设置页面"
+    assert commands[0]["icon"] == ""
+    assert commands[0]["description"] == ""
     assert commands[0]["action"] == "input.refresh_courses"
     assert "settings.open" in ui.snapshot()["commands"]
 

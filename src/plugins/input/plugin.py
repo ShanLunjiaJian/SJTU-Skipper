@@ -1132,6 +1132,8 @@ class InputPlugin(Plugin):
         ui.register_command(
             "input.refresh",
             "刷新课程列表",
+            icon="arrow-clockwise",
+            description="重新加载课程列表",
             category="课程",
             order=0,
             action="input.refresh_courses",
@@ -1140,6 +1142,8 @@ class InputPlugin(Plugin):
         ui.register_command(
             "input.manual",
             "手动播放 URL",
+            icon="play-circle",
+            description="打开手动播放页面，输入视频或直播地址",
             category="调试",
             order=10,
             page_id="input:manual",

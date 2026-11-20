@@ -9,7 +9,7 @@
   --border-subtle: light-dark(#e8eaed, #3c4043);
   --border-muted: var(--border);
   --link: light-dark(#1a73e8, #8ab4f8);
-  --link-hover: light-dark(#1967d2, #aecbfa);
+  --link-hover: light-dark(#8ab4f8, #aecbfa);
   --focus: var(--link);
   --hover: light-dark(#f1f3f4, #3c4043);
   --selected: light-dark(#e8f0fe, #394457);
@@ -129,7 +129,6 @@ kbd,
 }
 pre {
   overflow: auto;
-  font-size: 0.875em;
 }
 code {
   color: inherit;
@@ -632,7 +631,7 @@ select.form-control:hover:not(:disabled) {
 }
 .progress-bar {
   height: 100%;
-  background: var(--link);
+  background: linear-gradient(90deg, var(--link), var(--link-hover));
 }
 .menu {
   display: none;
@@ -660,6 +659,7 @@ select.form-control:hover:not(:disabled) {
   min-height: 32px;
   padding: 6px 16px;
   border: 0;
+  border-radius: 0;
   background: transparent;
   color: inherit;
   text-align: start;
@@ -793,6 +793,7 @@ select.form-control:hover:not(:disabled) {
   line-height: 20px;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
+  overflow: hidden;
 }
 .popover.show {
   display: block;

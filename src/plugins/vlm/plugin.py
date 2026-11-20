@@ -503,6 +503,8 @@ class VlmPlugin(Plugin):
         ui.register_command(
             "vlm.debug",
             "板书识别（调试）",
+            icon="easel",
+            description="打开板书识别调试页面，查看识别结果",
             category="调试",
             order=21,
             page_id="vlm:board",
