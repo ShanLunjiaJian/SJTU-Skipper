@@ -1,14 +1,21 @@
 import json
+from pathlib import Path
 
 import pytest
 
 from plugins.note_check_stc.checker import check_file
 
+DEFAULT_AVOID = json.loads(
+    (Path(__file__).parents[1] / "src/plugins/note_check_stc/avoid.json").read_text(
+        encoding="utf-8"
+    )
+)
+
 
 def check_text(tmp_path, text):
     path = tmp_path / "note.md"
     path.write_text(text, encoding="utf-8")
-    return check_file(path, name="notes/lecture.md")
+    return check_file(path, name="notes/lecture.md", avoid=DEFAULT_AVOID)
 
 
 def test_report_contract(tmp_path):
@@ -129,4 +136,6 @@ def test_directives_do_not_disable_checks(tmp_path):
 
 def test_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
-        check_file(tmp_path / "missing.md", name="notes/missing.md")
+        check_file(
+            tmp_path / "missing.md", name="notes/missing.md", avoid=DEFAULT_AVOID
+        )

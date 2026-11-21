@@ -1,8 +1,6 @@
 """Find STC review candidates without changing source text."""
 
-import json
 import re
-from functools import lru_cache
 from pathlib import Path
 
 _TYPE_RULE = {
@@ -49,11 +47,18 @@ _ANTI_ECHO = (
 )
 
 
-@lru_cache(maxsize=1)
-def _entries():
-    entries = json.loads(
-        Path(__file__).with_name("avoid.json").read_text(encoding="utf-8")
-    )
+def _entries(entries):
+    if not isinstance(entries, list) or any(
+        not isinstance(entry, dict)
+        or any(
+            not isinstance(entry.get(key), str) or not entry[key].strip()
+            for key in ("avoid", "type", "why", "use")
+        )
+        for entry in entries
+    ):
+        raise ValueError(
+            "词表必须是 JSON 数组，每项必须包含非空字符串 avoid、type、why 和 use．"
+        )
     compiled = []
     for entry in entries:
         patterns = []
@@ -126,9 +131,10 @@ def _mask_source(text):
     return "".join(chars), quote_issues
 
 
-def check_file(path: Path, *, name: str) -> dict:
+def check_file(path: Path, *, name: str, avoid: list) -> dict:
     """Return heuristic review candidates with one-based source positions."""
     text = path.read_text(encoding="utf-8")
+    entries = _entries(avoid)
     masked, quote_issues = _mask_source(text)
     lines = text.splitlines()
     issues = []
@@ -160,7 +166,7 @@ def check_file(path: Path, *, name: str) -> dict:
 
     offset = 0
     for row in masked.splitlines(keepends=True):
-        for entry, patterns, soft in _entries():
+        for entry, patterns, soft in entries:
             rule = _TYPE_RULE.get(entry["type"], "G3")
             for pattern in patterns:
                 for match in pattern.finditer(row):

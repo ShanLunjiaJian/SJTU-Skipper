@@ -6,7 +6,7 @@ from config import load_config
 from core.runtime import build_runtime
 from plugins.agent import AgentPlugin
 from plugins.note_check_stc import NoteCheckSTCPlugin
-from plugins.note_check_stc.plugin import ENABLED_KEY, TOOL_NAME
+from plugins.note_check_stc.plugin import AVOID_KEY, ENABLED_KEY, TOOL_NAME
 from plugins.notes import NotesPlugin
 from plugins.reader import ReaderPlugin
 from plugins.settings import SettingsPlugin
@@ -134,3 +134,63 @@ def test_tool_is_review_only(stc_runtime, tmp_path):
     assert sdk.sessions[chunk.id]["extensions"]["tools"] == []
     plain = agent.create_session("plain")
     assert sdk.sessions[plain.id]["extensions"]["prompts"] == []
+
+
+def test_custom_dictionary_updates_live_tool(stc_runtime, tmp_path):
+    runtime, agent, sdk = stc_runtime
+    session, workspace = review_session(agent, tmp_path)
+    settings = runtime.services.require("settings")
+    (tmp_path / "note.md").write_text("自定义词 显著。\n", encoding="utf-8")
+    entries = [
+        {
+            "avoid": "自定义词",
+            "type": "行话",
+            "why": "含义不明确",
+            "use": "写明具体对象",
+        }
+    ]
+    settings.set(AVOID_KEY, json.dumps(entries, ensure_ascii=False))
+    result = callback(
+        sdk,
+        session,
+        workspace,
+        "tool",
+        TOOL_NAME,
+        parameters={"path": "note_knowledge.md"},
+    )
+    assert not result["isError"]
+    issues = result["details"]["issues"]
+    assert {issue["match"] for issue in issues} == {"自定义词", "。"}
+    custom = next(issue for issue in issues if issue["match"] == "自定义词")
+    assert custom["reason"] == "含义不明确"
+    assert custom["suggestion"] == "写明具体对象"
+    from plugins.settings.store import SettingsStore
+
+    assert SettingsStore(tmp_path / "settings.json").get(AVOID_KEY) == entries
+    settings.set(AVOID_KEY, [])
+    result = callback(
+        sdk,
+        session,
+        workspace,
+        "tool",
+        TOOL_NAME,
+        parameters={"path": "note_knowledge.md"},
+    )
+    assert {issue["rule"] for issue in result["details"]["issues"]} == {"G17"}
+
+
+@pytest.mark.parametrize("entries", [{}, [{"avoid": "自定义词"}], [None]])
+def test_invalid_dictionary_reports_tool_error(stc_runtime, tmp_path, entries):
+    runtime, agent, sdk = stc_runtime
+    session, workspace = review_session(agent, tmp_path)
+    runtime.services.require("settings").set(AVOID_KEY, entries)
+    result = callback(
+        sdk,
+        session,
+        workspace,
+        "tool",
+        TOOL_NAME,
+        parameters={"path": "note_knowledge.md"},
+    )
+    assert result["isError"]
+    assert "avoid、type、why 和 use" in result["details"]["error"]

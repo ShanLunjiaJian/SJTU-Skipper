@@ -19,21 +19,26 @@ from .prompts import CHUNK, COMMON, REVIEW, WRITER
 
 TOOL_NAME = "note_check_stc"
 ENABLED_KEY = "note_check_stc.enabled"
+AVOID_KEY = "note_check_stc.avoid"
 
 
-def check_note(context):
+def check_note(context, *, settings):
     name = context["parameters"].get("path")
     workspace = context["workspace"]
     if not isinstance(name, str) or name not in workspace:
         report = {"error": "文件未获授权．path 必须是工作区逻辑文件名．"}
     else:
         try:
-            report = check_file(Path(workspace[name]), name=name)
+            report = check_file(
+                Path(workspace[name]), name=name, avoid=settings.get(AVOID_KEY)
+            )
         except (OSError, UnicodeError):
             report = {
                 "file": name,
                 "error": "无法读取 UTF-8 文件．检查文件是否存在及其编码．",
             }
+        except ValueError as exc:
+            report = {"file": name, "error": str(exc)}
     return {
         "content": [{"type": "text", "text": json.dumps(report, ensure_ascii=False)}],
         "details": report,
@@ -88,6 +93,21 @@ class NoteCheckSTCPlugin(Plugin):
             ),
             plugin_id=self.id,
         )
+        self.settings.register(
+            SettingsSpec(
+                key=AVOID_KEY,
+                label="STC avoid.json 词表",
+                type=SettingType.JSON,
+                default=json.loads(
+                    Path(__file__).with_name("avoid.json").read_text(encoding="utf-8")
+                ),
+                group="笔记",
+                section="审阅",
+                description="JSON 数组，每项包含 avoid、type、why、use．保存后下次检查生效．",
+                order=121,
+            ),
+            plugin_id=self.id,
+        )
         ctx.events.on("settings.changed", self._on_settings_changed)
         self._sync_enabled()
 
@@ -132,7 +152,7 @@ class NoteCheckSTCPlugin(Plugin):
                                     "required": ["path"],
                                     "additionalProperties": False,
                                 },
-                                handler=check_note,
+                                handler=partial(check_note, settings=self.settings),
                             ),
                         ),
                         completion_hooks=(
