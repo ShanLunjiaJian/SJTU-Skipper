@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from contextlib import AbstractContextManager
 
+from core.agent_extensions import AgentExtension, AgentExtensionRegistry
 from core.file_access import publication_lock
 from core.agent_types import (
     IpcMethod,
@@ -38,6 +39,99 @@ class AgentService:
         self._sessions: dict[str, AgentSession] = {}
         self._agents: dict[str, AgentProfile] = {}
         self._lock = threading.RLock()
+        self._extensions = AgentExtensionRegistry(self._runtime.list_roles)
+        self._callbacks_ready = False
+
+    def register_extension(self, owner: str, extension: AgentExtension) -> None:
+        self._extensions.register(owner, extension)
+
+    def unregister_extensions(self, owner: str) -> None:
+        self._extensions.unregister(owner)
+
+    def _prepare_extensions(self, session: AgentSession) -> None:
+        review = session.meta.get("review")
+        reviewer_role = review["role"] if review else AgentRole.DEFAULT
+        session.extensions, session.reviewer_extensions = self._extensions.snapshots(
+            session.role, reviewer_role
+        )
+        unknown = set(session.tools) - set(_FILE_TOOLS) - set(session.extensions.tools)
+        if unknown:
+            raise ValueError(f"Undeclared tools: {', '.join(sorted(unknown))}")
+        if len(set(session.tools)) != len(session.tools):
+            raise ValueError("Session tool names must be unique")
+        callbacks = session.extensions.needs_callbacks or (
+            bool(session.meta.get("review"))
+            and session.reviewer_extensions.needs_callbacks
+        )
+        if callbacks:
+            with self._lock:
+                if not self._callbacks_ready:
+                    install = getattr(self._runtime, "set_callback_handler", None)
+                    if not callable(install):
+                        raise RuntimeError(
+                            "Agent extensions require runtime callback support"
+                        )
+                    install(self._extension_callback)
+                    self._callbacks_ready = True
+
+    @staticmethod
+    def _extension_payload(session: AgentSession) -> dict[str, Any]:
+        payload = session.extensions.payload()
+        payload["reviewer"] = session.reviewer_extensions.payload()
+        return payload
+
+    def _extension_callback(self, request: dict[str, Any]) -> Any:
+        session_id = request["session_id"]
+        role = request["role"]
+        with self._lock:
+            session = self._sessions.get(session_id)
+            reviewer = False
+            if session is None and session_id.endswith("-review"):
+                session = self._sessions.get(session_id[:-7])
+                reviewer = True
+            if session is None:
+                raise KeyError(f"Extension callback session is not live: {session_id}")
+            snapshot = session.reviewer_extensions if reviewer else session.extensions
+            if reviewer and not session.meta.get("review"):
+                raise PermissionError("Session does not have a reviewer")
+            if role != snapshot.role:
+                raise PermissionError(f"Extension callback role does not match: {role}")
+        arguments = request["arguments"]
+        workspace = dict(arguments["workspace"])
+        if set(workspace) - set(session.workspace.names):
+            raise PermissionError(
+                "Extension callback contains unauthorized workspace files"
+            )
+        context = {"session_id": session_id, "role": role, "workspace": workspace}
+        name = request["name"]
+        if request["kind"] == "tool":
+            tool = snapshot.tools.get(name)
+            if tool is None:
+                raise KeyError(
+                    f"Extension tool is not declared for role {role}: {name}"
+                )
+            context["parameters"] = arguments["parameters"]
+            return tool.handler(context)
+        if request["kind"] == "completion_hook":
+            hook = snapshot.hooks.get(name)
+            if hook is None:
+                raise KeyError(
+                    f"Completion hook is not declared for role {role}: {name}"
+                )
+            context["text"] = arguments["text"]
+            context["tool_calls"] = arguments["tool_calls"]
+            result = hook.handler(context)
+            if result is not None and (
+                not isinstance(result, dict)
+                or set(result) != {"continue"}
+                or not isinstance(result["continue"], str)
+                or not result["continue"].strip()
+            ):
+                raise TypeError(
+                    "Completion hook must return None or {'continue': non-empty str}"
+                )
+            return result
+        raise ValueError(f"Unknown extension callback kind: {request['kind']}")
 
     def register_agent(self, profile: AgentProfile) -> None:
         if not profile.name:
@@ -50,11 +144,11 @@ class AgentService:
         name: str,
         *,
         agent: str | AgentProfile | None = None,
-        role: AgentRole | None = None,
+        role: str | None = None,
         system_prompt: str | None = None,
         files: Mapping[str, str | Path] | FileWorkspace | None = None,
         workspace: FileWorkspace | None = None,
-        tools: list[AgentToolName | AgentTool] | None = None,
+        tools: list[str | AgentTool] | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> AgentSessionInfo:
         if isinstance(agent, str):
@@ -76,12 +170,9 @@ class AgentService:
             else (profile.tools if profile else list(_FILE_TOOLS))
         )
         names = tuple(
-            item.name if isinstance(item, AgentTool) else AgentToolName(item)
+            str(item.name if isinstance(item, AgentTool) else item)
             for item in declarations
         )
-        unknown = set(names) - set(_FILE_TOOLS)
-        if unknown:
-            raise ValueError(f"Unsupported tools: {', '.join(sorted(unknown))}")
         prompt = (
             system_prompt
             if system_prompt is not None
@@ -90,15 +181,25 @@ class AgentService:
         session = AgentSession(
             name=name,
             agent=profile.name if profile else "",
-            role=AgentRole(role or (profile.role if profile else AgentRole.DEFAULT)),
+            role=(
+                role
+                if role is not None
+                else (profile.role if profile else AgentRole.DEFAULT)
+            ),
             system_prompt=prompt,
             workspace=ws,
             tools=names,
             meta=dict(meta or {}),
         )
-        self._create_runtime_session(session)
+        self._prepare_extensions(session)
         with self._lock:
             self._sessions[session.id] = session
+        try:
+            self._create_runtime_session(session)
+        except BaseException:
+            with self._lock:
+                self._sessions.pop(session.id, None)
+            raise
         return session.to_info()
 
     def reopen(
@@ -108,22 +209,20 @@ class AgentService:
         name: str,
         workspace: FileWorkspace,
         system_prompt: str,
-        role: AgentRole,
-        tools: list[AgentToolName],
+        role: str,
+        tools: list[str],
         meta: Mapping[str, Any],
     ) -> AgentSessionInfo:
-        unknown = set(tools) - set(_FILE_TOOLS)
-        if unknown:
-            raise ValueError(f"Unsupported tools: {', '.join(sorted(unknown))}")
         session = AgentSession(
             id=session_id,
             name=name,
             workspace=workspace.copy(),
             system_prompt=system_prompt,
-            role=AgentRole(role),
-            tools=tuple(AgentToolName(tool) for tool in tools),
+            role=role,
+            tools=tuple(str(tool) for tool in tools),
             meta=dict(meta),
         )
+        self._prepare_extensions(session)
         with self._lock:
             if session_id in self._sessions:
                 raise RuntimeError("Agent session is still live")
@@ -188,6 +287,7 @@ class AgentService:
             },
             readonly=list(session.workspace.readonly),
             tools=list(session.tools),
+            extensions=self._extension_payload(session),
             meta=session.meta,
         )
         session.model = str(result["model"])
@@ -294,7 +394,6 @@ class AgentService:
                 if name == AgentEventType.EXECUTION:
                     self._decode_execution(data)
                 elif name == AgentEventType.REVIEWER:
-                    data["role"] = AgentRole(data["role"])
                     if "finished" in data:
                         if not isinstance(data["finished"], bool):
                             raise ValueError("Reviewer finished flag must be a boolean")

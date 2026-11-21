@@ -14,6 +14,37 @@ class FakeLLM:
         self.script: list[ScriptItem] = list(script or [])
         self.calls: list[tuple[IpcMethod, dict[str, Any]]] = []
         self.closed = False
+        self._roles = {
+            role: (
+                "fixture",
+                {
+                    "id": role,
+                    "title": role,
+                    "input": ["image"] if role == "board_recognition" else ["text"],
+                },
+            )
+            for role in (
+                "default",
+                "compaction",
+                "ask_instant",
+                "ask_research",
+                "note_chunk",
+                "note_writer",
+                "note_review",
+                "board_recognition",
+            )
+        }
+
+    def list_roles(self):
+        return [dict(descriptor) for _, descriptor in self._roles.values()]
+
+    def register_role(self, owner, role, title, *, input=("text",)):
+        self._roles[role] = (owner, {"id": role, "title": title, "input": list(input)})
+
+    def unregister_roles(self, owner):
+        self._roles = {
+            role: entry for role, entry in self._roles.items() if entry[0] != owner
+        }
 
     def _next(self, params: dict[str, Any]) -> dict[str, Any]:
         item = self.script.pop(0) if self.script else "done"

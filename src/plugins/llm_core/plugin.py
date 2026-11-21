@@ -191,7 +191,12 @@ class LLMPlugin(Plugin):
         self, catalog: Mapping[str, Any], provider: str
     ) -> list[dict[str, Any]]:
         definitions = catalog.get("definitions", {}).get("models", {})
-        return [dict(model) for model in definitions.get("providers", {}).get(provider, {}).get("models", [])]
+        return [
+            dict(model)
+            for model in definitions.get("providers", {})
+            .get(provider, {})
+            .get("models", [])
+        ]
 
     @staticmethod
     def _model_payload(models: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -413,7 +418,7 @@ class LLMPlugin(Plugin):
                 "ok": False,
                 "message": (
                     f"`{provider}/{model_id}` 仍被角色 "
-                    f"{role_titles(roles)} 使用．"
+                    f"{role_titles(roles, catalog)} 使用．"
                     "请先在「角色」页切换．"
                 ),
                 "refresh": False,
@@ -473,7 +478,9 @@ class LLMPlugin(Plugin):
                 "refresh": False,
             }
         try:
-            self._call(IpcMethod.CONFIGURE, models=json.loads(models), roles=json.loads(roles))
+            self._call(
+                IpcMethod.CONFIGURE, models=json.loads(models), roles=json.loads(roles)
+            )
         except json.JSONDecodeError as exc:
             return {"ok": False, "message": f"JSON 格式无效：{exc}", "refresh": False}
         except Exception as exc:  # noqa: BLE001 - the runtime owns validation

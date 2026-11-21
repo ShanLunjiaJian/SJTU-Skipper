@@ -44,7 +44,7 @@ agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 
 媒体流的 `duration` 是累计时间，`len()` 返回整秒．文字流的 `len()` 返回条目数．媒体追加不覆盖已有时间区间，但允许时间空洞．`trim(before)` 释放已消费媒体，累计时间保持不变．流不保证保留完整媒体供历史回放．
 
-`StreamHub` 管理会话生命周期和媒体消费者登记．输入通过消费者接口取得读取限额与完成状态，不导入 STT/VLM 实现．`BacklogGate` 限制待处理媒体量．
+`StreamHub` 管理会话生命周期和媒体消费者登记．输入通过消费者接口取得读取限额与完成状态，不导入 STT/VLM 实现．`MediaBufferLimiter` 限制待处理媒体量．
 
 - `session.started`、`session.stopped` 报告会话生命周期．
 - `stream.appended` 报告追加．音频默认每 0.5 秒合并通知，视频默认每 1 秒合并通知，文字逐条通知．
@@ -69,7 +69,7 @@ agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 
 ### 语音识别
 
-`stt` 只保留一条流水线：worker、覆盖记录、音频门控、转写持久化、UI 和 `stt` 服务．提供方差异由适配器翻译成统一接口：批量适配器实现 `transcribe`，流式适配器额外实现 `stream`．`stt.provider` 选择提供方，缺省 `compatible`．缺少凭据或地址时 worker 停泊，不消费音频，状态页说明原因．
+`stt` 流水线包含 worker、覆盖记录、音频缓冲限制、转写持久化、UI 和 `stt` 服务．提供方差异由适配器翻译成统一接口：批量适配器实现 `transcribe`，流式适配器额外实现 `stream`．`stt.provider` 选择提供方，缺省 `compatible`．缺少凭据或地址时 worker 停泊，不消费音频，状态页说明原因．
 
 `compatible` 使用配置的兼容服务．自动转写通过 WebSocket `/v1/stream`，录播使用 `offline`，直播使用 `live`．手动范围转写使用 HTTP．声学切分、上下文和文本合并由服务端负责．
 
@@ -88,7 +88,7 @@ agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 
 ### 板书识别
 
-`vlm` 按采样窗口读取视频帧，通过 `picture_parser` 融合图像，再由 `board_recognition` 角色识别．请求按窗口顺序执行，`vlm.prepare_ahead` 控制图像预处理是否提前执行．已不需要的帧会释放．
+`vlm` 按采样窗口读取视频帧，通过 `picture_parser` 融合图像，再由 `board_recognition` 角色识别．请求按窗口顺序执行，`vlm.prepare_ahead` 控制图像预处理是否提前执行．等待下一窗口期间也释放不再需要的帧，使读取能在媒体缓冲限制内继续，保留末尾一个窗口供结束时处理．
 
 模型每个采样窗口读取采样时间和融合图，逐板面转录为 Markdown．提示词见 `src/plugins/vlm/prompts.py`．模型对照图像复核符号，不读取旧转录．程序用 `vlm.history_windows` 指定的历史窗口精确去重，再把新行写入 `visual`．融合图、板书文本和采样覆盖区间分别保存．
 
@@ -115,12 +115,13 @@ Python 与 Bun 使用带请求 ID 的 JSON Lines 通信．stdout 传 IPC 消息�
 设置页按概览、提供方、模型、角色和原始配置组织任务．提供方、模型与角色共用表格下方编辑器和选中行高亮逻辑．模型页按提供方使用标签切换，单个提供方隐藏标签栏．导航和未提交表单由客户端保留．
 
 提供方与模型表单使用 SDK 的字段约束，并保留缺省、显式值和协议扩展字段．图形化表单与原始 JSON 编辑器共用运行时校验．通过后原子保存配置，失败时保留上一次可用配置．会话保留创建时的配置．
+
 - `discover` 读取提供方已存凭据（`AuthStorage.keys`），请求 `${baseUrl}/models` 并归一化结果：OpenCode 的 `limit`、`modalities`、`capabilities` 与 OpenAI 兼容端的 `context_length`、`architecture` 都映射到 `contextWindow`、`maxTokens`、`input`、`reasoning`；缺失字段用默认值补齐．新提供方没有模型时由同一条路径取回，避免保存无模型的提供方．
-- 检查端点只报告差异：设置页缓存发现结果，列出本地尚无的模型，由用户逐个或全部添加；发现结果不覆盖已有模型的能力值，端点错误显示在该提供方下方而不是弹窗．
+- 设置页缓存端点发现结果，列出本地尚无的模型，供用户逐个或全部添加．已有模型的能力值保持不变．端点错误显示在该提供方下方．
 - `llm.models` 使用 OMP `providers` 结构．仅显式配置的模型可被调用．对象编辑提交完整定义，保留未修改字段．
-- `llm.roles` 必须显式配置全部固定角色．继承使用 `@default` 或其他固定角色引用，不接受多余或缺失角色．删除提供方时，指向该提供方的角色改为 `@default`；默认角色仍依赖该提供方时拒绝删除．
-- `board_recognition` 选择板书识别模型，`note_chunk` 选择分段笔记模型，`note_writer` 选择笔记写作模型，`note_review` 选择笔记审阅模型．
-- `ask_instant`、`ask_research` 选择问答模型，`compaction` 选择上下文压缩模型．
+- 核心注册 `default` 和 `compaction`，业务插件通过 `register_role` 注册角色、显示名称和模型输入要求．`llm.roles` 按注册表保存选择器：缺失条目补为 `@default`，未注册条目静默删除．继承使用 `@default` 或其他已注册角色引用．
+- `vlm` 注册 `board_recognition`；`notes` 注册 `note_chunk`、`note_writer` 和 `note_review`；`ask` 注册 `ask_instant` 和 `ask_research`．插件卸载时清理其角色．
+- 删除提供方时，指向该提供方的角色改为 `@default`；默认角色仍依赖该提供方时拒绝删除．
 
 提供方凭据保存在 `auth.json` 的 `llm` 字段，运行时载入临时 `AuthStorage`．设置页支持 API Key 和 OpenCode 设备登录．OAuth 刷新与登出即时保存．
 
@@ -146,7 +147,7 @@ Python 与 Bun 使用带请求 ID 的 JSON Lines 通信．stdout 传 IPC 消息�
 
 `UIManager` 管理侧边栏、工具箱、页面、声明式 block 和 action．前端渲染 block 并回传 action．后台任务通过刷新事件和通知更新页面．笔记执行视图显示写作者、审阅者、模型输出与工具执行记录．
 
-界面使用应用自带的 CSS 与原生 DOM 交互，不依赖组件库．侧栏和命令面板使用 HTML `dialog`，菜单与选区操作由前端管理．按钮排布、文内提问、队列和 Agent 草稿按同一份业务状态渲染．
+界面使用应用自带的 CSS 与原生 DOM 交互．侧栏和命令面板使用 HTML `dialog`，菜单与选区操作由前端管理．按钮排布、文内提问、队列和 Agent 草稿按同一份业务状态渲染．
 
 查看状态只由浏览器保存，业务状态只由后端保存．前端展示的业务数据是只读响应，不作为独立业务状态修改．
 

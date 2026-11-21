@@ -30,7 +30,7 @@ from plugins.notes.types import (
 from core.ui import BlockType
 from plugins.notes.pipeline import NotesPipeline
 from plugins.notes.prompts import NOTE_HEADERS, SOURCE_FILENAME
-from tests.support import FakeSettings
+from tests.support import FakeLLM, FakeSettings
 
 
 def test_visual_gap_survives_reload(tmp_path):
@@ -226,7 +226,7 @@ def test_execution_blocks_and_review_invalidation():
         emit(
             AgentEventType.REVIEWER,
             reviewer_id="coverage",
-            role=AgentRole.NOTE_REVIEW,
+            role="note_review",
             round=1,
             **payload,
         )
@@ -288,7 +288,7 @@ def test_review_replaces_only_final_output(correct):
                 {
                     "session_id": "writer",
                     "reviewer_id": "reviewer",
-                    "role": AgentRole.NOTE_REVIEW,
+                    "role": "note_review",
                     "round": round,
                     **payload,
                 },
@@ -411,7 +411,7 @@ class ScriptedNoteAgent:
             return AgentSessionInfo(
                 id=session_id,
                 name=name,
-                role=AgentRole(session.role),
+                role=session.role,
                 model="fake-model",
             )
 
@@ -423,7 +423,7 @@ class ScriptedNoteAgent:
         return AgentSessionInfo(
             id=session.id,
             name=session.name,
-            role=AgentRole(session.role),
+            role=session.role,
             model="fake-model",
         )
 
@@ -503,6 +503,8 @@ def note_pipeline(tmp_path, run, *, settings=None, releases=()):
     values.update(settings or {})
     config = FakeSettings(values)
     ctx = SimpleNamespace(
+        plugin_id="notes",
+        llm=FakeLLM(),
         data_dir=tmp_path,
         streams=hub,
         require=lambda name: config if name == "settings" else agent,
@@ -954,13 +956,20 @@ def saved_writer(pipeline, sid="lecture"):
         writer={
             "session_id": "writer",
             "name": "Saved writer",
-            "role": AgentRole.NOTE_WRITER,
+            "role": "note_writer",
             "system_prompt": "Saved system",
             "tools": [AgentToolName.READ, AgentToolName.WRITE],
             "directory": "final/frozen",
             "files": files,
             "readonly": [SOURCE_FILENAME, "index.md"],
-            "review": {"prompt": "Review", "system": "Reviewer", "maxRounds": 3},
+            "review": {
+                "role": "note_review",
+                "prompt": "Review",
+                "system": "Reviewer",
+                "maxRounds": 3,
+                "targets": list(NOTE_HEADERS),
+                "sources": [SOURCE_FILENAME],
+            },
         },
     )
     pipeline._save(state)
@@ -1255,23 +1264,86 @@ def test_initial_failure_cannot_continue(tmp_path, draft):
         assert len(env.agent.calls) == 1
 
 
-def test_continuation_requires_saved_transcript(tmp_path):
+@pytest.mark.parametrize("review_enabled", [False, True])
+def test_continuation_starts_fresh_after_restart(tmp_path, review_enabled):
+    import json
+
+    from core.note_document import build_block, parse_blocks
+
     with note_pipeline(tmp_path, lambda session, instruction: note_result()) as env:
+        with env.pipeline.condition:
+            state = saved_writer(env.pipeline)
+            if not review_enabled:
+                state["writer"]["review"] = None
+            env.pipeline._save(state)
+        original = dict(state["writer"])
+        notes = tmp_path / "sessions" / "lecture" / "notes"
+        qa = build_block("qa-saved", "2026-11-17", question="Question", answer="Answer")
+        path = notes / "note_knowledge.md"
+        path.write_text(path.read_text() + "\n" + qa)
+        source = env.pipeline._directory("lecture") / original["files"][SOURCE_FILENAME]
+        frozen = source.read_bytes()
+
+    def run(session, instruction):
+        assert instruction == "Revise the notes"
+        assert session.id != original["session_id"]
+        assert session.role == "note_writer"
+        assert session.system_prompt == original["system_prompt"]
+        assert session.tools == original["tools"]
+        assert session.meta == (
+            {"review": original["review"]} if review_enabled else {}
+        )
+        for name in NOTE_HEADERS:
+            assert "Latest body" in session.workspace.text(name)
+            assert "qa:begin" not in session.workspace.text(name)
+        assert session.workspace.path(SOURCE_FILENAME) == source
+        with pytest.raises(PermissionError):
+            session.workspace.write(SOURCE_FILENAME, "Changed source")
+        write_notes(session, "Revised after restart")
+        return note_result(review_passed=review_enabled)
+
+    with note_pipeline(tmp_path, run) as env:
         pipeline = env.pipeline
+        env.agent.can_resume = lambda session_id: (False, "transcript unavailable")
         with pipeline.condition:
-            saved_writer(pipeline)
-            env.agent.can_resume = lambda session_id: (False, "transcript unavailable")
-            result = pipeline.message(
+            assert pipeline.message(
                 {
                     "session_id": "lecture",
-                    "agent_session_id": "writer",
-                    "message": "Continue",
+                    "agent_session_id": original["session_id"],
+                    "message": "Revise the notes",
                 }
+            )["ok"]
+            assert pipeline.message(
+                {
+                    "session_id": "lecture",
+                    "agent_session_id": original["session_id"],
+                    "message": "Keep the examples",
+                }
+            )["ok"]
+            state = pipeline._state("lecture")
+            assert pipeline.condition.wait_for(
+                lambda: (
+                    state["phase"] in (NotePhase.PUBLISHED, NotePhase.FAILED)
+                    and not pipeline.active
+                ),
+                timeout=8,
             )
-            assert not result["ok"]
-            assert "会话记录不可用" in result["message"]
-            assert not pipeline.queue and not env.agent.calls
-            assert pipeline.status("lecture")["phase"] == NotePhase.PUBLISHED
+            assert state["phase"] == NotePhase.PUBLISHED, state["error"]
+        assert len(env.agent.calls) == 1
+        assert env.agent.follow_ups == [["Keep the examples"]]
+        writer_id = env.agent.calls[0][0].id
+        assert state["writer"]["session_id"] == writer_id
+        saved = json.loads((pipeline._directory("lecture") / "state.json").read_text())
+        assert saved["writer"]["session_id"] == writer_id
+        assert all(
+            "Revised after restart" in (notes / name).read_text()
+            for name in NOTE_HEADERS
+        )
+        blocks = parse_blocks(path.read_text())
+        assert [
+            (block.id, block.question, block.answer, block.status) for block in blocks
+        ] == [("qa-saved", "Question", "Answer", "pending")]
+        assert source.read_bytes() == frozen
 
 
 def test_stop_discards_queued_continuation(tmp_path):
@@ -1366,7 +1438,7 @@ def test_stale_review_does_not_show_passed(tmp_path):
                     {
                         "session_id": "writer",
                         "reviewer_id": "review-child",
-                        "role": AgentRole.NOTE_REVIEW,
+                        "role": "note_review",
                         "finished": True,
                         "round": 1,
                         "stale": True,

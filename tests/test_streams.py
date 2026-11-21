@@ -201,8 +201,8 @@ def test_same_id_restart_replaces_stream(with_content) -> None:
     assert lifecycle[0][1]["started_at"] == first.started_at
     assert lifecycle[0][1]["ended_at"] == first.ended_at
     assert first.ended_at is not None
-    assert not first.audio_gate.wait(0)
-    assert not first.video_gate.wait(0)
+    assert not first.audio_buffer_limiter.wait(0)
+    assert not first.video_buffer_limiter.wait(0)
     assert second is hub.current is hub.get_session("lecture")
     assert second is not first and second.audio.duration == 0
     assert [s.session_id for s in hub.list_sessions()].count("lecture") == 1
@@ -368,31 +368,31 @@ def test_audio_discard_notifies_waiting_consumer() -> None:
     assert audio.chunk_count == 0
 
 
-def test_gate_continuation_preserves_release_and_audio_timeout_stops(
+def test_buffer_continuation_preserves_release_and_audio_timeout_stops(
     monkeypatch,
 ) -> None:
-    from core.streams import BacklogGate
+    from core.streams import MediaBufferLimiter
 
     monkeypatch.setattr("core.streams.time.monotonic", lambda: 0.0)
-    gate = BacklogGate(MediaKind.AUDIO, stall_timeout=1.0)
-    gate.configure(10.0, released=120.0, fail_closed=True)
-    assert gate.wait(130.0)
+    limiter = MediaBufferLimiter(MediaKind.AUDIO, stall_timeout=1.0)
+    limiter.configure(10.0, released=120.0, fail_closed=True)
+    assert limiter.wait(130.0)
     monkeypatch.setattr("core.streams.time.monotonic", lambda: 2.0)
-    assert not gate.wait(130.2)
-    assert gate.limit == 10.0
-    assert gate.released == 120.0
+    assert not limiter.wait(130.2)
+    assert limiter.limit == 10.0
+    assert limiter.released == 120.0
 
 
-def test_video_gate_keeps_default_timeout_behavior(monkeypatch) -> None:
-    from core.streams import BacklogGate
+def test_video_buffer_keeps_default_timeout_behavior(monkeypatch) -> None:
+    from core.streams import MediaBufferLimiter
 
     monkeypatch.setattr("core.streams.time.monotonic", lambda: 0.0)
-    gate = BacklogGate(MediaKind.VIDEO, stall_timeout=1.0)
-    gate.configure(10.0, released=120.0)
+    limiter = MediaBufferLimiter(MediaKind.VIDEO, stall_timeout=1.0)
+    limiter.configure(10.0, released=120.0)
     monkeypatch.setattr("core.streams.time.monotonic", lambda: 2.0)
-    assert gate.wait(131.0)
-    assert gate.limit == 0.0
-    assert gate.released == 120.0
+    assert limiter.wait(131.0)
+    assert limiter.limit == 0.0
+    assert limiter.released == 120.0
 
 
 def test_text_progress_is_session_scoped() -> None:
@@ -455,12 +455,12 @@ def test_text_identifiers_are_extensible() -> None:
 def test_consumer_media_kinds() -> None:
     hub = StreamHub()
     hub.register_consumer(
-        "stt", MediaKind.AUDIO, cursor_fn=lambda: 12, gate_limit_fn=lambda: 30
+        "stt", MediaKind.AUDIO, cursor_fn=lambda: 12, buffer_limit_fn=lambda: 30
     )
     hub.register_consumer("vlm", MediaKind.VIDEO, cursor_fn=lambda: 5)
     assert hub.consumer_cursor(MediaKind.AUDIO) == 12
     assert hub.consumer_cursor(MediaKind.VIDEO) == 5
-    assert hub.consumer_gate_limit(MediaKind.AUDIO) == 30
+    assert hub.consumer_buffer_limit(MediaKind.AUDIO) == 30
     assert hub.consumers()[0]["kind"] is MediaKind.AUDIO
     hub.unregister_consumer("stt", MediaKind.AUDIO)
     assert hub.consumer_cursor(MediaKind.AUDIO) == 0
@@ -477,6 +477,6 @@ def test_consumer_kind_requires_enum() -> None:
     with pytest.raises(TypeError, match="MediaKind"):
         hub.consumer_cursor("audio")  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="MediaKind"):
-        hub.consumer_gate_limit("audio")  # type: ignore[arg-type]
+        hub.consumer_buffer_limit("audio")  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="MediaKind"):
         hub.register_consumer("stt", StreamKind.AUDIO)  # type: ignore[arg-type]

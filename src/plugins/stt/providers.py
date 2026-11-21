@@ -1,6 +1,6 @@
 """STT provider registry.
 
-The STT core owns one pipeline (worker, coverage, audio gate, transcript and
+The STT core owns one pipeline (worker, coverage, audio buffer limiter, transcript and
 UI).  Providers only translate an external protocol into the normalized batch
 or stream interface:
 

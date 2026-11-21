@@ -4,6 +4,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { ReviewGate, parseReviewReport } from "./review";
 
+const reviewScope = {
+  role: "note_review",
+  targets: ["note_knowledge.md", "note_gossip.md", "note_notice.md"],
+  sources: ["lecture_source.md"],
+};
+
 test("edits require the unified reviewer again", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "note-review-"));
   try {
@@ -23,8 +29,10 @@ test("edits require the unified reviewer again", async () => {
         prompt: "coverage and correctness",
         system: "Review",
         maxRounds: 3,
+        ...reviewScope,
       },
       async (role, prompt, files) => {
+        // biome-ignore lint/style/noNonNullAssertion: The review scope includes this file, which the test creates before review.
         seen.push(`${role}:${await Bun.file(files["note_knowledge.md"]!).text()}`);
         prompts.push(prompt);
         const incorrect = fail;
@@ -53,7 +61,7 @@ test("edits require the unified reviewer again", async () => {
     expect(await gate.satisfied()).toBe(false);
     const failed = await run();
     const content = failed.content.find((block) => block.type === "text");
-    if (!content || content.type !== "text") throw new Error("Missing review report");
+    if (content?.type !== "text") throw new Error("Missing review report");
     const failedReport = JSON.parse(content.text);
     expect(failedReport.passed).toBe(false);
     expect(failedReport.report.correct).toBe(false);
@@ -107,7 +115,7 @@ test("a message-interrupted wait preserves acceptance and delivers once", async 
     await reviewFiles(directory);
     const gate = new ReviewGate(
       directory,
-      { prompt: "Review", system: "Review", maxRounds: 2 },
+      { prompt: "Review", system: "Review", maxRounds: 2, ...reviewScope },
       async (_role, _prompt, _files, signal) => {
         ++calls;
         reviewerSignal = signal;
@@ -144,11 +152,12 @@ test("snapshot changes mark reviewer events stale", async () => {
     let stale = false;
     const gate = new ReviewGate(
       directory,
-      { prompt: "Review", system: "Review", maxRounds: 1 },
+      { prompt: "Review", system: "Review", maxRounds: 1, ...reviewScope },
       async (_role, _prompt, files, _signal, operation) => {
         expect(operation.round).toBe(1);
         expect(operation.isStale()).toBe(false);
         await Bun.write(path.join(directory, "note_notice.md"), "Changed");
+        // biome-ignore lint/style/noNonNullAssertion: The review scope includes this file, which reviewFiles creates before review.
         expect(await Bun.file(files["note_notice.md"]!).text()).toBe("Original");
         stale = operation.isStale();
         return correct;
@@ -170,9 +179,10 @@ test("review failures remain deliverable and cancellation waits", async () => {
     const stopped = Promise.withResolvers<void>();
     const gate = new ReviewGate(
       directory,
-      { prompt: "Review", system: "Review", maxRounds: 2 },
+      { prompt: "Review", system: "Review", maxRounds: 2, ...reviewScope },
       async (_role, _prompt, _files, signal) => {
         started.resolve();
+        // biome-ignore lint/style/noNonNullAssertion: ReviewGate supplies the cancellation signal to its reviewer.
         signal!.addEventListener("abort", () => stopped.resolve(), { once: true });
         await stopped.promise;
         throw new Error("Reviewer stopped");
@@ -184,8 +194,61 @@ test("review failures remain deliverable and cancellation waits", async () => {
     await pending;
     expect(gate.hasPending()).toBe(false);
     expect(await gate.satisfied()).toBe(false);
-    expect(() => parseReviewReport("not json")).toThrow("Invalid review report");
-    expect(() => parseReviewReport('{"correct":true}')).toThrow("Invalid review report");
+    expect(() => parseReviewReport("not json", reviewScope.targets)).toThrow(
+      "Invalid review report",
+    );
+    expect(() => parseReviewReport('{"correct":true}', reviewScope.targets)).toThrow(
+      "Invalid review report",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("added targets and source changes invalidate approval", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "review-targets-"));
+  try {
+    for (const name of ["source.md", "nested/appendix.md"])
+      await Bun.write(path.join(directory, name), "Original");
+    const gate = new ReviewGate(
+      directory,
+      {
+        prompt: "Review",
+        role: "custom_reviewer",
+        system: "Review",
+        maxRounds: 0,
+        targets: ["nested/appendix.md"],
+        sources: ["source.md"],
+      },
+      async (_role, _prompt, files) => {
+        expect(Object.keys(files).sort()).toEqual(["nested/appendix.md", "source.md"]);
+        return correct;
+      },
+    );
+    await gate.tool().execute("r", {}, undefined, undefined, {} as never);
+    expect(await gate.satisfied()).toBe(true);
+    await Bun.write(path.join(directory, "source.md"), "Changed source");
+    expect(await gate.satisfied()).toBe(false);
+    const finding = JSON.stringify({
+      correct: false,
+      explanation: "Wrong",
+      confidence: 1,
+      findings: [
+        {
+          title: "Fix",
+          body: "Condition missing",
+          priority: 2,
+          confidence: 1,
+          file_path: "nested/appendix.md",
+          line_start: 1,
+          line_end: 1,
+        },
+      ],
+    });
+    expect(parseReviewReport(finding, ["nested/appendix.md"]).findings[0].file_path).toBe(
+      "nested/appendix.md",
+    );
+    expect(() => parseReviewReport(finding, ["other.md"])).toThrow("Unknown review target");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

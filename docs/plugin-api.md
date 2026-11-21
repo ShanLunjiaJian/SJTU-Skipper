@@ -2,7 +2,7 @@
 
 插件通过 `PluginContext` 访问流、事件、服务和界面．
 
-## 1. 最小插件
+## 最小插件
 
 ```python
 from core.plugin import Plugin, PluginContext
@@ -40,7 +40,7 @@ class MyPlugin(Plugin):
         pass
 ```
 
-## 2. 流
+## 流
 
 ```python
 streams = ctx.streams.current
@@ -73,7 +73,7 @@ transcript.append("文字", start=1.0, end=2.0, source="stt")
 - 输入插件启动会话时调用 `ctx.streams.start_session(meta=...)`．
 - 音视频 `stream.appended` 按媒体时长合并通知，默认间隔分别为 0.5 秒和 1 秒．非空文字每次 append 都通知．
 
-## 3. 事件
+## 事件
 
 ```python
 ctx.events.on("my.event", handler, plugin_id=ctx.plugin_id, priority=0)
@@ -94,7 +94,7 @@ ctx.events.emit("my.event", value=1)
 - `stt.partial` / `stt.segment` / `stt.anomaly` / `stt.error`
 - `input.status` / `input.error`
 
-## 4. 服务互调
+## 服务互调
 
 ```python
 settings = ctx.require("settings")
@@ -119,7 +119,7 @@ ctx.register_service("my.service", my_object)
 - 服务调用使用公开服务对象，不导入插件实现．共享类型与枚举（`Side`、`BlockType`、`FormInputType`、`TaskState`、`StreamKind`、`MediaKind`、`SettingType`）从 `core` 导入．
 - `requires` 声明必需插件，控制加载顺序和服务访问权限．缺失必需插件时加载失败．`optional_requires` 声明可选插件；调用 `ctx.service(name)` 可取得服务或 `None`．
 
-## 5. LLM
+## LLM
 
 ```python
 from core.agent_types import IpcMethod
@@ -145,7 +145,7 @@ for frame in ctx.llm.stream(IpcMethod.GENERATE, role="board_recognition", messag
 - `IpcMethod.CATALOG` 返回结构化配置（提供方、模型能力、角色选择器、原始 YAML）．`PROVIDER_SET`、`PROVIDER_REMOVE`、`MODELS_SET`、`ROLE_SET` 提交结构化修改，校验通过才写盘并返回新的 catalog．`DISCOVER` 请求端点 `${baseUrl}/models`，返回归一化后的候选模型，不修改配置．
 - `stt` 通过提供方适配器使用独立协议：兼容 HTTP/WebSocket 服务，或 Google Cloud Speech-to-Text v2 REST．
 
-## 6. UI
+## UI
 
 ### Google 风格主题
 
@@ -303,7 +303,7 @@ Action 归属：
 
 发送 action 收到 `{agent_session_id, message, **send_values}`．笔记使用 `notes-pipeline.message`，`send_values` 包含处理会话的 `session_id`，由流水线判断是否恢复笔记写作．控件 ID、角色和 SDK 会话 ID 不得混用．
 
-### 6.1 reader：选中菜单与内联问答
+### reader：选中菜单与内联问答
 
 ```python
 reader = ctx.require("reader")
@@ -357,7 +357,7 @@ UI 注册表提供通用 action `ui.open_page`：
 ]}
 ```
 
-## 7. 设置
+## 设置
 
 ```python
 from core.settings_spec import SettingType, SettingsSpec
@@ -389,16 +389,17 @@ LLM 设置提供对象表单与原始 JSON 编辑区．配置保存在 `settings
 
 提供方凭据保存在 `auth.json` 的 `llm` 字段，运行时载入临时 `AuthStorage`．OpenCode 登录、刷新和登出即时保存凭据．无鉴权服务设置 `auth: none`．
 
-## 8. Agent
+## Agent
 
 ```python
 from core.agent_types import AgentProfile, AgentTool
 from core.workspace import FileWorkspace
 
 agent = ctx.require("agent")
+ctx.llm.register_role(ctx.plugin_id, "my.reader", "文稿问答")
 agent.register_agent(AgentProfile(
     name="my.reader",
-    role="ask_research",
+    role="my.reader",
     system_prompt="根据授权文件回答课堂问题．",
     tools=[AgentTool("read"), AgentTool("grep"), AgentTool("glob")],
 ))
@@ -441,7 +442,7 @@ agent.close(writer.id)
 
 `agent.session_workspace(session_id)` 返回会话文件映射的副本，不复制文稿内容．修改传入或返回的文件映射，不会改变会话授权的路径或只读标记．`meta` 只向运行时传递选项，例如 `review`．
 
-`on_event` 接收 `AgentEvent`，事件名见第 3 节．文稿变化触发 `agent.file`，应用在 publication lock 内写回授权文件并刷新预览．
+`on_event` 接收 `AgentEvent`，事件名见「事件」一节．文稿变化触发 `agent.file`，应用在 publication lock 内写回授权文件并刷新预览．
 
 `message(session_id, message)` 返回 `{accepted, reason?}`．消息只进入活动 run，立即中断目标回合并在同一任务中继续；`agent.run.ready` 表示开始接纳．关闭目标拒绝消息，不创建空会话．`cancel` 终止整个任务；`close` 取消执行并释放会话．SDK 保存模型历史，Python 的显示记录用于界面展示．
 
@@ -449,7 +450,144 @@ agent.close(writer.id)
 
 `can_resume(session_id)` 返回 `(bool, reason)`：会话仍活动或运行时已无可用 transcript 时为 `False`．恢复前用它判断，不要直接读取运行时目录．
 
-## 9. 文件与数据目录
+### 角色注册与设置
+
+核心内置 `default` 和 `compaction`．业务角色由插件注册，角色 ID 使用非空字符串．插件必须先注册角色，再创建会话或注册角色扩展．
+
+```python
+ctx.llm.register_role(ctx.plugin_id, "my.reader", "文稿问答")
+ctx.llm.register_role(ctx.plugin_id, "my.vision", "图像分析", input=("text", "image"))
+ctx.llm.list_roles()
+ctx.llm.unregister_roles(ctx.plugin_id)
+```
+
+`input` 声明角色要求的模型输入能力，默认为 `("text",)`．角色 ID 不得重复，不得覆盖内置角色．插件卸载时按所有者清理角色．
+
+设置页显示已注册角色及其模型选择器．已有选择器保持不变；缺失条目补为 `@default`，未注册条目静默删除．`compaction` 用于运行时上下文压缩，未单独配置时继承 `default`．
+
+### 角色扩展
+
+插件通过 `AgentExtension.roles` 选择扩展生效的角色，可追加提示词、工具和结束钩子．角色 ID 必须已注册．
+
+内置 `note_check_stc` 插件使用此接口向 `note_chunk`、`note_writer`、`note_review` 追加共用表达规则，并只向 `note_review` 注册 `note_check_stc` 工具和结束钩子．设置 `note_check_stc.enabled` 默认为 `true`，关闭或卸载后不影响普通笔记流程；已创建会话保留原快照．工具接受 `{"path": "note_knowledge.md"}`，只读解析授权文件，返回 `file`、`errors`、`warnings` 和含位置、规则、原文、原因与建议的 `issues`．结束钩子要求本轮至少成功检查一份受审笔记，文件读取失败和检查来源文件不计入；诊断不直接决定审阅通过与否．
+
+```python
+from core.agent_extensions import AgentExtension, AgentExtensionTool, AgentCompletionHook
+
+
+def lookup(context):
+    value = context["parameters"]["query"]
+    return {
+        "content": [{"type": "text", "text": value}],
+        "details": {"role": context["role"]},
+    }
+
+
+def check_output(context):
+    if not context["text"].strip():
+        return {"continue": "结束前必须提供回答．"}
+    return None
+
+
+agent.register_extension(ctx.plugin_id, AgentExtension(
+    id="course_context",
+    roles=("my.reader",),
+    prompt="使用已注册的课程上下文．",
+    tools=(AgentExtensionTool(
+        name="course_lookup",
+        description="按查询读取课程上下文．",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        handler=lookup,
+        label="课程查询",
+    ),),
+    completion_hooks=(AgentCompletionHook(id="output", handler=check_output),),
+))
+```
+
+`AgentExtension` 的字段如下：
+
+| 字段               | 类型                              | 默认值 |
+| ------------------ | --------------------------------- | ------ |
+| `id`               | `str`                             | 必填   |
+| `roles`            | `tuple[str, ...]`                 | 必填   |
+| `priority`         | `int`                             | `0`    |
+| `prompt`           | `str`                             | `""`   |
+| `tools`            | `tuple[AgentExtensionTool, ...]`  | `()`   |
+| `completion_hooks` | `tuple[AgentCompletionHook, ...]` | `()`   |
+
+`AgentExtensionTool` 必填字段为 `name`、`description`、`parameters` 和 `handler`．`parameters` 使用 JSON Schema 对象，`label` 默认为 `None`．`AgentCompletionHook` 必填字段为 `id` 和 `handler`，`priority` 默认为 `0`．
+
+通过 `create_session(..., role="my.reader")` 或 `reopen(..., role="my.reader")` 选择角色．创建会话时未指定角色则使用 Agent 配置中的角色，没有配置时使用 `default`．扩展仅在声明的角色中生效，注册时拒绝未知角色．
+
+工具名接受字符串，`AgentToolName` 仅列出内置工具．扩展声明的工具会加入匹配角色；会话 `tools` 中的自定义名称必须有对应扩展声明．
+
+注册约束如下：
+
+- `(owner, id)` 扩展键不得重复．
+- 角色重叠的扩展不得使用相同工具名．`read`、`grep`、`glob`、`edit`、`write` 和 `review_notes` 为保留名称．
+- 同一所有者在重叠角色中的钩子 ID 不得重复．所有者和钩子 ID 不得包含 `/`．
+- 不同角色可使用相同工具名或钩子 ID．
+
+扩展按 `(priority, owner, id)` 排序：整数升序，字符串按区分大小写的字典序排列．结束钩子使用自身的优先级和 ID，按同一规则串行执行．某个钩子拒绝结束后，后续钩子仍会执行；运行时按顺序合并原因，交回同一个 Agent 继续处理．钩子异常使本次运行失败．强制取消不执行结束钩子．
+
+仅带有 `meta.review_targets` 的审阅会话先执行内置 JSON 格式校验，再执行插件结束钩子．审阅钩子也会收到格式错误的报告，解析前必须检查文本或处理解析异常．其他角色不要求 JSON 审阅报告．
+
+同步处理函数接收一个字典：
+
+- 公共字段：`session_id: str`、`role: str` 和 `workspace: dict[str, str]`．
+- 工具字段：`parameters`，内容为模型提交的参数．
+- 钩子字段：`text: str` 和 `tool_calls: list[dict]`．
+- 每条工具调用包含 `name`、`arguments` 和 `result`．`tool_calls` 覆盖本次运行及钩子要求的继续执行，下次运行前清空．
+
+`workspace` 将授权逻辑文件名映射到运行时路径，可能指向临时文件或审阅快照．回调期间必须使用这些路径，不得保留到回调结束之后．处理函数运行在回调工作线程，而非 IPC 读取线程；不同会话的处理函数可能并发执行．
+
+钩子返回 `None` 表示允许结束，返回 `{"continue": "必须修正的内容"}` 表示拒绝结束．继续指令不得为空或仅含空白．工具返回 `{"content": [{"type": "text", "text": "结果"}], "details": {}}`，可添加 `isError: true` 标记工具失败．
+
+自定义处理函数是受信任的 Python 代码，不受文件工具沙箱限制．插件必须遵守工作区授权和任务的只读要求．
+
+服务在创建和重开会话时保存注册表快照．注册表变化不改变运行中会话的扩展与回调．`unregister_extensions(owner)` 和插件卸载会移除该所有者对后续会话的扩展．以插件 ID 作为 `owner`，才能在卸载时自动清理．
+
+### 审阅声明与传输字段
+
+审阅配置指定已注册的角色、目标和来源：
+
+```python
+ctx.llm.register_role(ctx.plugin_id, "my.reviewer", "文稿审阅")
+meta = {
+    "review": {
+        "role": "my.reviewer",
+        "prompt": "依据来源核对已保存的笔记．",
+        "system": "只读审阅授权文件．",
+        "maxRounds": 0,
+        "targets": ["notes.md"],
+        "sources": ["source.md"],
+    },
+}
+```
+
+目标和来源使用工作区逻辑文件名，每个文件都必须已获工作区授权．审阅快照、内容摘要和报告路径校验包含全部目标．目标或来源变化会使原审阅批准失效．笔记流水线以全部 `NOTE_HEADERS` 文件为目标，以 `SOURCE_FILENAME` 为来源；写作 Agent 通过 `review_notes` 请求审阅．
+
+创建和重开请求使用 `role` 选择角色，并包含以下 `extensions` 对象：
+
+```text
+{
+  prompts: string[],
+  tools: {name, description, parameters, label?}[],
+  completion_hooks: {owner: string, id: string, priority: integer}[],
+  reviewer: {prompts, tools, completion_hooks}
+}
+```
+
+扩展数组默认为空．Python 按 `meta.review.role` 生成 `reviewer` 的扩展．审阅回调的会话 ID 为父会话 ID 加 `-review`．
+
+运行时回调包含 `{session_id, role, kind, name, arguments}`．`kind` 为 `tool` 或 `completion_hook`．工具参数为 `{parameters, workspace}`，钩子参数为 `{text, workspace, tool_calls}`．工具回调名称为工具名，钩子回调名称为 `owner/id`．Python 按会话快照分派回调，拒绝未知会话、角色、工具和钩子．
+
+## 文件与数据目录
 
 ```python
 ctx.data_dir                         # data/agent
@@ -459,7 +597,7 @@ ctx.session_dir("other-session")     # 指定会话
 
 会话产物包括 `notes/` 下的文稿和 `vlm/` 下的融合图．
 
-## 10. 测试
+## 测试
 
 - 测试通过 `llm=` 注入脚本化服务，避免访问外网．
 - 事件异步分发，断言前调用 `runtime.bus.flush(2.0)`．

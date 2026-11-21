@@ -14,7 +14,6 @@ from typing import Any
 
 from core.agent_types import (
     AgentEventType,
-    AgentRole,
     AgentToolName,
     ExecutionRole,
     ExecutionStatus,
@@ -58,6 +57,12 @@ class NotesPipeline:
 
     def setup(self, ctx):
         self.ctx = ctx
+        for role, title in (
+            ("note_chunk", "分段笔记"),
+            ("note_writer", "笔记写作"),
+            ("note_review", "笔记审阅"),
+        ):
+            ctx.llm.register_role(ctx.plugin_id, role, title)
         self.settings = ctx.require("settings")
         self.agent = ctx.require("agent")
         for key, default, kind, label, section, description, order in (
@@ -220,11 +225,6 @@ class NotesPipeline:
             restored = path.exists()
             state["phase"] = NotePhase(state["phase"])
             state.setdefault("review_passed", False)
-            if state.get("writer"):
-                state["writer"]["role"] = AgentRole(state["writer"]["role"])
-                state["writer"]["tools"] = [
-                    AgentToolName(name) for name in state["writer"]["tools"]
-                ]
             for chunk in state["chunks"]:
                 chunk["state"] = ChunkState(chunk["state"])
                 if (
@@ -446,8 +446,6 @@ class NotesPipeline:
                 ):
                     return reject("笔记任务尚未结束，请稍后发送")
                 try:
-                    if not self.agent.can_resume(writer["session_id"])[0]:
-                        return reject("笔记写作会话记录不可用")
                     self._writer_inputs(sid, writer)
                 except (OSError, ValueError, RuntimeError) as exc:
                     return reject(f"笔记写作会话记录不可用：{exc}")
@@ -1029,7 +1027,7 @@ class NotesPipeline:
                     key,
                     ExecutionRole.REVIEWER if reviewer else ExecutionRole.WRITER,
                     {
-                        AgentRole.NOTE_REVIEW: "笔记审阅",
+                        "note_review": "笔记审阅",
                     }.get(event.get("role"), task.get("label", "笔记写作")),
                     session_id=str(reviewer or event.get("session_id", "")),
                 )
@@ -1127,7 +1125,7 @@ class NotesPipeline:
             info = self.agent.get_session(session_id)
             if info is None:
                 raise KeyError(f"Agent session {session_id!r} not found")
-            is_writer = info.role == AgentRole.NOTE_WRITER
+            is_writer = info.role == "note_writer"
             with self.condition:
                 self._check_running(sid)
                 history = self._state(sid).setdefault("last_agent_tasks", [])
@@ -1243,7 +1241,7 @@ class NotesPipeline:
             name,
             workspace=workspace,
             system_prompt=self.setting("notes.chunk_system_prompt", "") or SYSTEM,
-            role=AgentRole.NOTE_CHUNK,
+            role="note_chunk",
             tools=[
                 AgentToolName.READ,
                 AgentToolName.GREP,
@@ -1464,14 +1462,17 @@ class NotesPipeline:
         review_enabled = bool(self.setting("notes.review_enabled", True))
         review = {
             "prompt": REVIEW,
+            "role": "note_review",
             "system": self.setting("notes.reviewer_prompt", "") or REVIEW_SYSTEM,
             "maxRounds": int(self.setting("notes.review_max_rounds", 0)),
+            "targets": list(NOTE_HEADERS),
+            "sources": [SOURCE_FILENAME],
         }
         writer = self.agent.create_session(
             f"{sid} 笔记写作",
             workspace=workspace,
             system_prompt=self.setting("notes.system_prompt", "") or SYSTEM,
-            role=AgentRole.NOTE_WRITER,
+            role="note_writer",
             tools=[
                 AgentToolName.READ,
                 AgentToolName.GREP,
@@ -1488,7 +1489,7 @@ class NotesPipeline:
                 "directory": str(directory.relative_to(self._directory(sid))),
                 "name": writer.name,
                 "system_prompt": self.setting("notes.system_prompt", "") or SYSTEM,
-                "role": AgentRole.NOTE_WRITER,
+                "role": "note_writer",
                 "tools": [
                     AgentToolName.READ,
                     AgentToolName.GREP,
@@ -1526,9 +1527,17 @@ class NotesPipeline:
                             encoding="utf-8",
                         )
             workspace = FileWorkspace(files, readonly=saved["readonly"])
-            review = dict(saved["review"]) if saved["review"] else None
-            writer = self.agent.reopen(
-                saved["session_id"],
+            review = (
+                {
+                    **saved["review"],
+                    "role": "note_review",
+                    "targets": list(NOTE_HEADERS),
+                    "sources": [SOURCE_FILENAME],
+                }
+                if saved["review"]
+                else None
+            )
+            parameters = dict(
                 name=saved["name"],
                 workspace=workspace,
                 system_prompt=saved["system_prompt"],
@@ -1536,6 +1545,13 @@ class NotesPipeline:
                 tools=saved["tools"],
                 meta={"review": review} if review else {},
             )
+            if self.agent.can_resume(saved["session_id"])[0]:
+                writer = self.agent.reopen(saved["session_id"], **parameters)
+            else:
+                writer = self.agent.create_session(**parameters)
+                with self.condition:
+                    self._state(sid)["writer"]["session_id"] = writer.id
+                    self._save(self._state(sid))
             directory = self._directory(sid) / saved["directory"]
             review_enabled = review is not None
             instruction = messages[0]

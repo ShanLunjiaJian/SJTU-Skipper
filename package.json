@@ -3,7 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check:types": "tsc --project tsconfig.json"
+    "check": "bun run check:types && bun run check:lint",
+    "check:types": "tsc --project tsconfig.json",
+    "check:lint": "biome lint --error-on-warnings ."
   },
   "engines": {
     "bun": ">=1.4.4"

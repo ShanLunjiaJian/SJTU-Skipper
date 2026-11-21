@@ -970,8 +970,8 @@ class InputPlugin(Plugin):
             continue_session=continue_session,
             realtime=False,
             download=not url.startswith(("file://", "/")),
-            audio_gate_limit=self._gate_limit(MediaKind.AUDIO),
-            video_gate_limit=self._gate_limit(MediaKind.VIDEO),
+            audio_buffer_limit=self._buffer_limit(MediaKind.AUDIO),
+            video_buffer_limit=self._buffer_limit(MediaKind.VIDEO),
             final_part=not self._fill_queue,
             meta={
                 "fill_for": self._fill_target,
@@ -2345,8 +2345,8 @@ class InputPlugin(Plugin):
             # Recordings are always processed at full speed; live is 1:1.
             realtime=live,
             download=not live and not url.startswith(("file://", "/")),
-            audio_gate_limit=self._gate_limit(MediaKind.AUDIO),
-            video_gate_limit=self._gate_limit(MediaKind.VIDEO) if not live else 0.0,
+            audio_buffer_limit=self._buffer_limit(MediaKind.AUDIO),
+            video_buffer_limit=self._buffer_limit(MediaKind.VIDEO) if not live else 0.0,
             course={
                 "class_id": job.id,
                 "course_id": str(cls.get("course", "")),
@@ -2383,8 +2383,8 @@ class InputPlugin(Plugin):
                     continue_session=True,
                     realtime=False,
                     download=not next_url.startswith(("file://", "/")),
-                    audio_gate_limit=spec.audio_gate_limit,
-                    video_gate_limit=spec.video_gate_limit,
+                    audio_buffer_limit=spec.audio_buffer_limit,
+                    video_buffer_limit=spec.video_buffer_limit,
                     course={**spec.course, "video_id": next_id},
                     meta={
                         "recording_begin": part.get("begin", ""),
@@ -2696,16 +2696,16 @@ class InputPlugin(Plugin):
         service = self._ctx.service("stt")
         return bool(service is not None and service.enabled())
 
-    def _gate_limit(self, kind: MediaKind) -> float:
-        """Return the backlog limit published by registered media consumers."""
+    def _buffer_limit(self, kind: MediaKind) -> float:
+        """Return the buffer limit published by registered media consumers."""
 
         ctx = self._ctx
         hub = ctx.streams if ctx is not None else None
         if hub is None:
             return 0.0
         try:
-            return max(0.0, float(hub.consumer_gate_limit(kind) or 0.0))
-        except Exception:  # noqa: BLE001 - backpressure is best effort
+            return max(0.0, float(hub.consumer_buffer_limit(kind) or 0.0))
+        except Exception:  # noqa: BLE001 - consumer buffer limits are best effort
             return 0.0
 
     def _continue_fill(self, recording: dict[str, Any]) -> None:
@@ -2935,8 +2935,8 @@ class InputPlugin(Plugin):
             title=title,
             realtime=live,
             download=not live and url.startswith(("http://", "https://")),
-            audio_gate_limit=self._gate_limit(MediaKind.AUDIO),
-            video_gate_limit=self._gate_limit(MediaKind.VIDEO) if not live else 0.0,
+            audio_buffer_limit=self._buffer_limit(MediaKind.AUDIO),
+            video_buffer_limit=self._buffer_limit(MediaKind.VIDEO) if not live else 0.0,
             course={"class_id": class_id},
             meta={"url": url},
         )

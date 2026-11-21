@@ -6,7 +6,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from core.agent_types import AgentRole, AgentSessionInfo, AgentToolName
+from core.agent_extensions import ExtensionSnapshot
+from core.agent_types import AgentRole, AgentSessionInfo
 from core.workspace import FileWorkspace
 
 
@@ -14,11 +15,13 @@ from core.workspace import FileWorkspace
 class AgentSession:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     name: str = "default"
-    role: AgentRole = AgentRole.DEFAULT
+    role: str = AgentRole.DEFAULT
     agent: str = ""
     system_prompt: str = ""
     workspace: FileWorkspace = field(default_factory=FileWorkspace)
-    tools: tuple[AgentToolName, ...] = ()
+    tools: tuple[str, ...] = ()
+    extensions: ExtensionSnapshot | None = None
+    reviewer_extensions: ExtensionSnapshot | None = None
     model: str = ""
     step: int = 0
     created_at: float = field(default_factory=time.time)

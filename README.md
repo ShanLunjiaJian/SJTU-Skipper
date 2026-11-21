@@ -55,6 +55,8 @@ devShell 提供 Python、Bun、uv、ffmpeg 和动态库路径．非 Nix 系统�
 
 LLM 模型和角色配置保存在 `data/agent/settings.json` 的 `llm.models` 与 `llm.roles` 中．设置页提供图形化编辑与 JSON 编辑器．运行时生成 SDK 所需的临时文件，退出后清理；LLM 对话不跨服务重启恢复．
 
+完整笔记发布后，可在笔记写作日志中发送修改要求．对话记录可用时继续原对话；服务重启后记录缺失时创建新对话，载入已发布笔记和原有只读来源．修订沿用审阅与发布流程，保留笔记中的问答．
+
 设置页按「概览 / 提供方 / 模型 / 角色 / 原始配置」组织，每页只处理一件事：
 
 - 「概览」列出提供方与模型数量、缺少的凭据和角色分配．
@@ -102,7 +104,7 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 | `agent`    | SDK 多会话助手，原生 read/grep/glob/edit/write，流式事件与文件授权                                      |
 | `notes`    | 整理分段笔记、汇总与审阅，提供笔记页面及课后 direct/fill/skip 策略                                      |
 | `ask`      | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存                                     |
-| `reader`   | 通用 Markdown 阅读页（按课次与笔记种类打开），持有选中菜单与内联问答块                                   |
+| `reader`   | 通用 Markdown 阅读页（按课次与笔记种类打开），持有选中菜单与内联问答块                                  |
 
 分段核心区间由 `notes.chunk_seconds` 设置，`notes.overlap_seconds` 提供左侧原文上下文．重叠原文不重复计入正文．`notes.concurrency` 限制笔记 agent 并发数．分段预览标为未审阅；`note_review` 统一检查完整笔记的来源覆盖与正确性．
 
@@ -133,12 +135,12 @@ data/                             # 运行产物（gitignore）
 
 ```bash
 .venv/bin/python -m pytest -q
-bun run check:types
+bun run check
 ```
 
 确定性测试使用脚本化运行时与本地请求记录，覆盖配置、IPC、授权和应用行为．真实模型验收单独执行并保存请求与文稿记录．
 
-TypeScript 由项目 devShell 提供；`check:types` 使用根目录 `tsconfig.json`．
+TypeScript 和 Biome 由项目 devShell 提供．`check` 依次执行 `check:types` 和 `check:lint`，检查运行时及其测试文件．误报使用带原因的局部忽略注释．
 
 ## 说明
 

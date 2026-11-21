@@ -16,7 +16,6 @@ from plugins.notes.types import (
 from plugins.notes.view import OnStopAction
 from core.agent_types import (
     AgentEventType,
-    AgentRole,
     ExecutionBlockKind,
     ExecutionBlockStatus,
     RuntimeFrameType,
@@ -32,6 +31,7 @@ def pipeline_context(tmp_path, script):
     sdk = ScriptedRuntime(script)
     settings = FakeSettings({"notes.concurrency": 4, "notes.chunks_enabled": False})
     ctx = SimpleNamespace(
+        plugin_id="notes",
         data_dir=tmp_path,
         streams=StreamHub(),
         llm=sdk,
@@ -67,7 +67,7 @@ def test_stop_cancels_all_active_sdk_sessions(tmp_path):
     with pipeline_context(tmp_path, script) as (pipeline, agent, sdk):
         errors = queue.Queue()
         threads = []
-        for role in (AgentRole.NOTE_WRITER, AgentRole.NOTE_REVIEW):
+        for role in ("note_writer", "note_review"):
             session = agent.create_session(role, role=role, tools=[])
 
             def execute(session=session):
@@ -122,7 +122,7 @@ def test_writer_preview_is_published_before_terminal_result(tmp_path):
             path.write_text(NOTE_HEADERS.get(name, "Complete original source"))
         session = agent.create_session(
             "writer",
-            role=AgentRole.NOTE_WRITER,
+            role="note_writer",
             workspace=FileWorkspace(files, readonly=(SOURCE_FILENAME,)),
         )
         results = queue.Queue()
@@ -149,7 +149,7 @@ def test_writer_preview_is_published_before_terminal_result(tmp_path):
 
 def test_note_runs_send_only_session_and_instruction(tmp_path):
     with pipeline_context(tmp_path, None) as (pipeline, agent, sdk):
-        session = agent.create_session("writer", role=AgentRole.NOTE_WRITER, tools=[])
+        session = agent.create_session("writer", role="note_writer", tools=[])
         try:
             first = pipeline._agent_run("lecture", session.id, "First stage")
             second = pipeline._agent_run("lecture", session.id, "Continue")
@@ -223,7 +223,7 @@ def test_repeated_writer_runs_keep_one_activity_record(tmp_path):
         yield {"type": RuntimeFrameType.RESULT, "result": {"final_message": "done"}}
 
     with pipeline_context(tmp_path, script) as (pipeline, agent, sdk):
-        session = agent.create_session("writer", role=AgentRole.NOTE_WRITER, tools=[])
+        session = agent.create_session("writer", role="note_writer", tools=[])
         try:
             pipeline._agent_run("lecture", session.id, "First")
             pipeline._agent_run("lecture", session.id, "Second")
@@ -238,7 +238,7 @@ def test_repeated_writer_runs_keep_one_activity_record(tmp_path):
 
 def test_completed_chunk_message_is_rejected(tmp_path):
     with pipeline_context(tmp_path, None) as (pipeline, agent, sdk):
-        session = agent.create_session("chunk", role=AgentRole.NOTE_CHUNK, tools=[])
+        session = agent.create_session("chunk", role="note_chunk", tools=[])
         pipeline._agent_run("lecture", session.id, "Summarize")
         agent.close(session.id)
         result = pipeline.message(
@@ -264,7 +264,7 @@ def test_live_message_releases_condition_before_ipc(tmp_path):
         yield {"type": RuntimeFrameType.RESULT, "result": {"error": "cancelled"}}
 
     with pipeline_context(tmp_path, script) as (pipeline, agent, sdk):
-        session = agent.create_session("writer", role=AgentRole.NOTE_WRITER, tools=[])
+        session = agent.create_session("writer", role="note_writer", tools=[])
         original = sdk.call
 
         def call(method, **params):

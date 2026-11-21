@@ -17,7 +17,6 @@ from typing import Any, Mapping
 from core.agent_types import (
     AgentEventType,
     AgentProfile,
-    AgentRole,
     AgentTool,
     AgentToolName,
     ExecutionRole,
@@ -67,6 +66,8 @@ class AskPlugin(Plugin):
 
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
+        ctx.llm.register_role(self.id, "ask_instant", "快速问答")
+        ctx.llm.register_role(self.id, "ask_research", "研究问答")
         self._settings = ctx.require("settings")
         self._agent = ctx.require("agent")
         self._reader = ctx.require("reader")
@@ -298,9 +299,7 @@ class AskPlugin(Plugin):
     def _profile(self, intensity: AskIntensity) -> AgentProfile:
         return AgentProfile(
             name=f"ask.{intensity}",
-            role=AgentRole.ASK_INSTANT
-            if intensity == AskIntensity.INSTANT
-            else AgentRole.ASK_RESEARCH,
+            role="ask_instant" if intensity == AskIntensity.INSTANT else "ask_research",
             system_prompt=self._instant_prompt
             if intensity == AskIntensity.INSTANT
             else self._research_prompt,

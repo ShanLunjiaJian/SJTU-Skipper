@@ -838,6 +838,24 @@ class PluginManager:
     def _cleanup_plugin(self, pid: str) -> None:
         self._bus.remove_plugin(pid)
         self._meta.remove_plugin(pid)
+        agent = self._services.get("agent")
+        drop_extensions = getattr(agent, "unregister_extensions", None)
+        if callable(drop_extensions):
+            try:
+                drop_extensions(pid)
+            except Exception:
+                logging.getLogger("lecture_agent.plugins").exception(
+                    "agent extension cleanup failed for plugin %s", pid
+                )
+        llm = self._services.get("llm")
+        drop_roles = getattr(llm, "unregister_roles", None)
+        if callable(drop_roles):
+            try:
+                drop_roles(pid)
+            except Exception:
+                logging.getLogger("lecture_agent.plugins").exception(
+                    "role cleanup failed for plugin %s", pid
+                )
         self._services.remove_plugin(pid)
         if self._ui is not None:
             self._ui.remove_plugin(pid)
