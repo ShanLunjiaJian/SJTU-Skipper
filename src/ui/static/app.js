@@ -90,6 +90,19 @@
     ERR: "err",
   });
 
+  const THEME_STORAGE_KEY = "sjtu-skipper.theme";
+  const THEME_MODE = Object.freeze({
+    SYSTEM: "system",
+    LIGHT: "light",
+    DARK: "dark",
+  });
+  const THEME_ORDER = Object.freeze([THEME_MODE.SYSTEM, THEME_MODE.LIGHT, THEME_MODE.DARK]);
+  const THEME_LABEL = Object.freeze({
+    [THEME_MODE.SYSTEM]: "跟随系统",
+    [THEME_MODE.LIGHT]: "浅色",
+    [THEME_MODE.DARK]: "深色",
+  });
+
   const SETTING_TYPE = Object.freeze({
     STRING: "string",
     TEXT: "text",
@@ -3138,6 +3151,52 @@
     return state.ui?.commands || [];
   }
 
+  function themeMode() {
+    try {
+      const saved = localStorage.getItem(THEME_STORAGE_KEY);
+      if (THEME_ORDER.includes(saved)) return saved;
+    } catch (_) {}
+    return THEME_MODE.SYSTEM;
+  }
+
+  function applyTheme(mode) {
+    const root = document.documentElement;
+    if (mode === THEME_MODE.SYSTEM) {
+      root.style.removeProperty("color-scheme");
+      delete root.dataset.theme;
+    } else {
+      root.style.colorScheme = mode;
+      root.dataset.theme = mode;
+    }
+    try {
+      if (mode === THEME_MODE.SYSTEM) localStorage.removeItem(THEME_STORAGE_KEY);
+      else localStorage.setItem(THEME_STORAGE_KEY, mode);
+    } catch (_) {}
+  }
+
+  function cycleTheme() {
+    const current = themeMode();
+    const mode = THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length];
+    applyTheme(mode);
+    toast(`外观：${THEME_LABEL[mode]}`);
+  }
+
+  function themeCommand() {
+    return {
+      id: "ui.theme",
+      title: `切换外观（当前：${THEME_LABEL[themeMode()]}）`,
+      description: "在跟随系统、浅色、深色之间切换",
+      category: "界面",
+      icon: "circle-half",
+      keywords: "theme dark light 深色 浅色 暗色 主题 外观",
+      client: "theme.cycle",
+    };
+  }
+
+  function paletteCommands() {
+    return [...commands(), themeCommand()];
+  }
+
   function closeMenus() {
     for (const button of $$("[data-menu-toggle]", $("#menubar"))) menuBindings.get(button)?.hide();
   }
@@ -3145,6 +3204,7 @@
   function runCommand(cmd) {
     closeMenus();
     closePalette();
+    if (cmd.client === "theme.cycle") return cycleTheme();
     if (cmd.page) return openPage(cmd.page);
     if (cmd.action) return postAction(cmd.action, {});
     return null;
@@ -3185,6 +3245,7 @@
     mic: '<path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h3a.5.5 0 0 1 0 1h-7a.5.5 0 0 1 0-1h3v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5"/>\n  <path d="M10 8a2 2 0 1 1-4 0V3a2 2 0 1 1 4 0zM8 0a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V3a3 3 0 0 0-3-3"/>',
     easel:
       '<path d="M8 0a.5.5 0 0 1 .473.337L9.046 2H14a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-1.85l1.323 3.837a.5.5 0 1 1-.946.326L11.092 11H8.5v3a.5.5 0 0 1-1 0v-3H4.908l-1.435 4.163a.5.5 0 1 1-.946-.326L3.85 11H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h4.954L7.527.337A.5.5 0 0 1 8 0M2 3v7h12V3z"/>',
+    "circle-half": '<path d="M8 15A7 7 0 1 0 8 1zm0 1A8 8 0 1 1 8 0a8 8 0 0 1 0 16"/>',
   });
 
   function commandIcon(name) {
@@ -3243,7 +3304,7 @@
     const q = String(query || "")
       .trim()
       .toLowerCase();
-    const items = commands();
+    const items = paletteCommands();
     if (!q) return items;
     return items.filter((cmd) => {
       const hay =
@@ -4211,6 +4272,7 @@
   }
 
   async function boot() {
+    applyTheme(themeMode());
     applySidebarState();
     bindSidebarControls();
     bindSidebarResize();
