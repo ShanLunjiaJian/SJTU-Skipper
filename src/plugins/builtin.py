@@ -20,6 +20,7 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
     from .input.plugin import InputPlugin
     from .llm_core.plugin import LLMPlugin
     from .notes import NotesPlugin
+    from .note_check_stc import NoteCheckSTCPlugin
     from .reader.plugin import ReaderPlugin
     from .settings.plugin import SettingsPlugin
     from .stt import STTPlugin
@@ -40,4 +41,5 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
         plugins.append(VLMPlugin())
     if config.enable_notes:
         plugins.append(NotesPlugin())
+        plugins.append(NoteCheckSTCPlugin())
     return plugins

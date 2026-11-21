@@ -44,6 +44,7 @@ include = ["agent_runtime*", "core*", "plugins*", "ui*", "integrations*"]
 [tool.setuptools.package-data]
 ui = ["static/*", "static/vendor/**/*"]
 agent_runtime = ["*.ts", "prompts/*.md"]
+"plugins.note_check_stc" = ["avoid.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

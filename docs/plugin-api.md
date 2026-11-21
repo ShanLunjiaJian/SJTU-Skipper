@@ -469,6 +469,8 @@ ctx.llm.unregister_roles(ctx.plugin_id)
 
 插件通过 `AgentExtension.roles` 选择扩展生效的角色，可追加提示词、工具和结束钩子．角色 ID 必须已注册．
 
+内置 `note_check_stc` 插件使用此接口向 `note_chunk`、`note_writer`、`note_review` 追加共用表达规则，并只向 `note_review` 注册 `note_check_stc` 工具和结束钩子．设置 `note_check_stc.enabled` 默认为 `true`，关闭或卸载后不影响普通笔记流程；已创建会话保留原快照．工具接受 `{"path": "note_knowledge.md"}`，只读解析授权文件，返回 `file`、`errors`、`warnings` 和含位置、规则、原文、原因与建议的 `issues`．结束钩子要求本轮至少成功检查一份受审笔记，文件读取失败和检查来源文件不计入；诊断不直接决定审阅通过与否．
+
 ```python
 from core.agent_extensions import AgentExtension, AgentExtensionTool, AgentCompletionHook
 
