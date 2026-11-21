@@ -136,6 +136,7 @@ test("last provider deletion persists an unconfigured state", async () => {
     expect(removed.providers).toEqual([]);
     expect(removed.roles).toEqual({});
     expect(removed.selectors).toEqual(before.selectors);
+    // biome-ignore lint/style/noNonNullAssertion: Provider deletion persists settings before dispatch returns.
     const settings = fixture.snapshots.at(-1)!.settings!;
     expect(settings.models.providers).toEqual({});
     await fixture.runtime.close();
@@ -291,6 +292,8 @@ test("bootstrap preserves accounts without emitting secrets", async () => {
   const fixture = await persistenceFixture(credentials);
   try {
     const catalog = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
+    // biome-ignore lint/complexity/useLiteralKeys: Bracket access permits this white-box check of private runtime state.
+    // biome-ignore lint/style/noNonNullAssertion: The catalog request initializes authentication.
     const auth = fixture.runtime["auth"]!;
     expect(auth.credentials.all()).toEqual(credentials);
     expect(catalog).toHaveProperty("selectors.default", "local/proof:off");
@@ -448,12 +451,13 @@ test("OAuth refresh persists rotated tokens and sibling accounts", async () => {
   });
   try {
     await fixture.runtime.dispatch(IpcMethod.PING, {}, fixture.emit);
+    // biome-ignore lint/complexity/useLiteralKeys: Bracket access permits this white-box check of private runtime state.
+    // biome-ignore lint/style/noNonNullAssertion: The ping request initializes authentication.
     const auth = fixture.runtime["auth"]!;
     const row = auth.credentials
       .list(provider)
-      .find(
-        (entry) => entry.credential.type === "oauth" && entry.credential.accountId === "first",
-      )!;
+      .find((entry) => entry.credential.type === "oauth" && entry.credential.accountId === "first");
+    if (!row) throw new Error("Missing first OAuth account");
     await auth.oauth.refresh(row.id);
     expect(fixture.snapshots.at(-1)?.credentials?.[provider]).toEqual([
       expect.objectContaining({
@@ -508,6 +512,8 @@ test("OAuth refresh persists after runtime close", async () => {
   let access: Promise<unknown> | undefined;
   try {
     await fixture.runtime.dispatch(IpcMethod.PING, {}, fixture.emit);
+    // biome-ignore lint/complexity/useLiteralKeys: Bracket access permits this white-box check of private runtime state.
+    // biome-ignore lint/style/noNonNullAssertion: The ping request initializes authentication.
     const auth = fixture.runtime["auth"]!;
     access = auth.oauth.refresh(auth.credentials.list(provider)[0].id);
     await entered.promise;
@@ -729,16 +735,16 @@ test("configured instructions remain ordered user messages", async () => {
       () => {},
     );
     expect(requests).toHaveLength(2);
-    expect(userTexts(requests[0]!).map(taskWithoutReminder)).toEqual([
+    expect(userTexts(requests[0]).map(taskWithoutReminder)).toEqual([
       "CONFIGURABLE_ROLE_INSTRUCTIONS\n\n/literal task",
     ]);
-    expect(userTexts(requests[1]!).map(taskWithoutReminder)).toEqual([
+    expect(userTexts(requests[1]).map(taskWithoutReminder)).toEqual([
       "CONFIGURABLE_ROLE_INSTRUCTIONS\n\n/literal task",
       "first follow-up",
       "second follow-up",
     ]);
     expect(
-      requests[0]!.messages
+      requests[0].messages
         .filter((message) => message.role === "system")
         .some((message) =>
           JSON.stringify(message.content).includes("CONFIGURABLE_ROLE_INSTRUCTIONS"),
@@ -791,7 +797,7 @@ test("writer cannot complete before a passing review", async () => {
       "note_notice.md",
     ]) {
       files[name] = path.join(fixture.root, name);
-      await Bun.write(files[name]!, "Notes");
+      await Bun.write(files[name], "Notes");
     }
     await fixture.runtime.dispatch(
       IpcMethod.CREATE_SESSION,
@@ -846,7 +852,7 @@ test.each([false, undefined])("writer cannot finish without approval (%s)", asyn
       "note_notice.md",
     ]) {
       files[name] = path.join(fixture.root, name);
-      await Bun.write(files[name]!, "Notes");
+      await Bun.write(files[name], "Notes");
     }
     await fixture.runtime.dispatch(
       IpcMethod.CREATE_SESSION,
@@ -923,7 +929,7 @@ test("an accepted review survives a harmless user message", async () => {
       "note_notice.md",
     ]) {
       files[name] = path.join(fixture.root, name);
-      await Bun.write(files[name]!, "Notes");
+      await Bun.write(files[name], "Notes");
     }
     await fixture.runtime.dispatch(
       IpcMethod.CREATE_SESSION,
@@ -1000,7 +1006,7 @@ test("message admitted during the final review check is delivered", async () => 
       "note_notice.md",
     ]) {
       files[name] = path.join(fixture.root, name);
-      await Bun.write(files[name]!, "Notes");
+      await Bun.write(files[name], "Notes");
     }
     await fixture.runtime.dispatch(
       IpcMethod.CREATE_SESSION,
@@ -1011,6 +1017,8 @@ test("message admitted during the final review check is delivered", async () => 
       },
       () => {},
     );
+    // biome-ignore lint/complexity/useLiteralKeys: Bracket access permits this white-box check of private runtime state.
+    // biome-ignore lint/style/noNonNullAssertion: Session creation above installs the configured review gate.
     const gate = fixture.runtime["sessions"].get("late")!.review!;
     const satisfied = gate.satisfied.bind(gate);
     let injected = false;
@@ -1310,6 +1318,8 @@ test("messages interrupt a stream within one run", async () => {
   try {
     const { runtime } = fixture;
     await runtime.dispatch(IpcMethod.CREATE_SESSION, { id: "live" }, () => {});
+    // biome-ignore lint/complexity/useLiteralKeys: Bracket access permits this white-box check of private runtime state.
+    // biome-ignore lint/style/noNonNullAssertion: Session creation above installs the live conversation.
     const conversation = runtime["sessions"].get("live")!;
     const join = spyOn(conversation.session, "joinActiveTurn");
     const abort = spyOn(conversation.session, "abort");
@@ -1344,6 +1354,7 @@ test("messages interrupt a stream within one run", async () => {
     expect(await second).toEqual({ accepted: true });
     expect(await run).toHaveProperty("final_message", "Finished");
     await disconnected.promise;
+    // biome-ignore lint/style/noNonNullAssertion: The completed run and delivered messages require a model request.
     expect(userTexts(requests.at(-1)!).map(taskWithoutReminder)).toEqual([
       "Start",
       nativeSteeringText("/literal\nfirst"),
@@ -1531,7 +1542,7 @@ test("writer messages preserve acceptance for unchanged files", async () => {
       "note_notice.md",
     ]) {
       files[name] = path.join(fixture.root, name);
-      await Bun.write(files[name]!, "Notes");
+      await Bun.write(files[name], "Notes");
     }
     const events: { name: RuntimeEvent; data: Record<string, unknown> }[] = [];
     await fixture.runtime.dispatch(
@@ -1574,7 +1585,7 @@ test("writer messages preserve acceptance for unchanged files", async () => {
       ({ name, data }) => name === RuntimeEvent.REVIEWER && data.finished === true,
     );
     expect(finished.map(({ data }) => data.stale)).toEqual([false]);
-    const sourceIds = finished[0]!.data.block_ids as string[];
+    const sourceIds = finished[0].data.block_ids as string[];
     expect(sourceIds.length).toBeGreaterThan(0);
     for (const id of sourceIds) {
       expect(
@@ -1600,6 +1611,8 @@ test("writer messages preserve acceptance for unchanged files", async () => {
     const unique = new Set(deliveryPrompts.map((message) => JSON.stringify(message.content)));
     expect(unique.size).toBe(1);
     expect(deliveryPrompts.length).toBeGreaterThan(0);
+    // biome-ignore lint/complexity/useLiteralKeys: Bracket access permits this white-box check of private runtime state.
+    // biome-ignore lint/style/noNonNullAssertion: The completed writer run requires the created writer session.
     const native = fixture.runtime["sessions"].get("writer")!.session.messages;
     const deliveries = native.filter(
       (message) =>
@@ -1645,10 +1658,13 @@ test("a new prompt waits for an interrupted write to finish", async () => {
       { id: "write", tools: [WorkspaceTool.WRITE], files: { "note.md": source } },
       () => {},
     );
+    // biome-ignore lint/complexity/useLiteralKeys: Bracket access permits this white-box check of private runtime state.
+    // biome-ignore lint/style/noNonNullAssertion: Session creation above installs the write conversation.
     const conversation = fixture.runtime["sessions"].get("write")!;
     const tool = conversation.session.agent.state.tools.find(
       (candidate) => candidate.name === "write",
-    )!;
+    );
+    if (!tool) throw new Error("Missing write tool");
     const execute = tool.execute.bind(tool);
     tool.execute = async (...args) => {
       const result = await execute(...args);
@@ -1687,6 +1703,8 @@ test("completion accepts and runs a boundary message or rejects it", async () =>
   const fixture = await localRuntime(() => sse(modelText(`Answer ${++calls}`)));
   try {
     await fixture.runtime.dispatch(IpcMethod.CREATE_SESSION, { id: "boundary" }, () => {});
+    // biome-ignore lint/complexity/useLiteralKeys: Bracket access permits this white-box check of private runtime state.
+    // biome-ignore lint/style/noNonNullAssertion: Session creation above installs the boundary conversation.
     const conversation = fixture.runtime["sessions"].get("boundary")!;
     const workspace = conversation.workspace;
     const join = spyOn(conversation.session, "joinActiveTurn");
@@ -1715,13 +1733,13 @@ test("completion accepts and runs a boundary message or rejects it", async () =>
     ).toHaveProperty("final_message", "Answer 2");
     expect(calls).toBe(2);
     expect(join).toHaveBeenCalledWith("At completion", undefined, { queue: "steering" });
-    expect(await join.mock.results[0]!.value).toBe(false);
+    expect(await join.mock.results[0].value).toBe(false);
     const users = conversation.session.messages.filter((message) => message.role === "user");
     expect(users).toMatchObject([
       { role: "user", content: [{ type: "text", text: "Start" }], attribution: "user" },
       { role: "user", content: [{ type: "text", text: "At completion" }], attribution: "user" },
     ]);
-    expect(users[1]!).not.toHaveProperty("steering");
+    expect(users[1]).not.toHaveProperty("steering");
     expect(
       await fixture.runtime.dispatch(
         IpcMethod.MESSAGE,
@@ -1778,7 +1796,7 @@ test("reviewer retains history and refreshes notes across rounds", async () => {
       "note_notice.md",
     ]) {
       files[name] = path.join(fixture.root, name);
-      await Bun.write(files[name]!, name === "note_knowledge.md" ? original : "Notes");
+      await Bun.write(files[name], name === "note_knowledge.md" ? original : "Notes");
     }
     const events: Record<string, unknown>[] = [];
     await fixture.runtime.dispatch(
@@ -1811,7 +1829,7 @@ test("reviewer retains history and refreshes notes across rounds", async () => {
     });
     expect(writers).toBe(4);
     expect(reviewerRequests).toHaveLength(4);
-    const secondRound = reviewerRequests[2]!;
+    const secondRound = reviewerRequests[2];
     const priorReports = secondRound.messages.filter(
       (message) =>
         message.role === "assistant" &&
@@ -1821,9 +1839,9 @@ test("reviewer retains history and refreshes notes across rounds", async () => {
     expect(userTexts(secondRound).at(-1)).toContain(`Writer message:\n${feedback}`);
     const readResult = (request: ModelRequest) =>
       JSON.stringify(request.messages.filter((message) => message.role === "tool").at(-1)?.content);
-    expect(readResult(reviewerRequests[1]!)).toContain(original);
-    expect(readResult(reviewerRequests[3]!)).toContain(corrected);
-    expect(readResult(reviewerRequests[3]!)).not.toContain(original);
+    expect(readResult(reviewerRequests[1])).toContain(original);
+    expect(readResult(reviewerRequests[3])).toContain(corrected);
+    expect(readResult(reviewerRequests[3])).not.toContain(original);
     const ready = events.filter((event) => event.event === RuntimeEvent.RUN_READY);
     expect(ready.map((event) => event.reviewer_id)).toEqual([
       "continuity-review",
@@ -1890,7 +1908,7 @@ test("reviewer messages change only the reviewer turn", async () => {
       "note_notice.md",
     ]) {
       files[name] = path.join(fixture.root, name);
-      await Bun.write(files[name]!, "Notes");
+      await Bun.write(files[name], "Notes");
     }
     const events: Record<string, unknown>[] = [];
     await fixture.runtime.dispatch(
@@ -1973,7 +1991,7 @@ test("explicit stop cancels parent and reviewer without delivery", async () => {
       "note_notice.md",
     ]) {
       files[name] = path.join(fixture.root, name);
-      await Bun.write(files[name]!, "Notes");
+      await Bun.write(files[name], "Notes");
     }
     await fixture.runtime.dispatch(
       IpcMethod.CREATE_SESSION,
@@ -2071,7 +2089,7 @@ test("reviewer corrects malformed reports in the same round", async () => {
       "note_notice.md",
     ]) {
       files[name] = path.join(fixture.root, name);
-      await Bun.write(files[name]!, "Notes");
+      await Bun.write(files[name], "Notes");
     }
     const events: Record<string, unknown>[] = [];
     await fixture.runtime.dispatch(
@@ -2242,8 +2260,8 @@ async function catalogFixture() {
 test("catalog reports structured providers, models and selectors", async () => {
   const fixture = await catalogFixture();
   try {
-    const catalog = (await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, () => {})) as any;
-    expect(catalog.providers.map((provider: any) => provider.id)).toEqual(["local", "second"]);
+    const catalog = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, () => {});
+    expect(catalog.providers.map((provider) => provider.id)).toEqual(["local", "second"]);
     expect(catalog.providers[0].models).toEqual([
       {
         id: "proof",
@@ -2268,7 +2286,7 @@ test("catalog reports structured providers, models and selectors", async () => {
 test("models_set replaces complete model definitions", async () => {
   const fixture = await catalogFixture();
   try {
-    const catalog = (await fixture.runtime.dispatch(
+    const catalog = await fixture.runtime.dispatch(
       IpcMethod.MODELS_SET,
       {
         provider: "local",
@@ -2283,7 +2301,7 @@ test("models_set replaces complete model definitions", async () => {
         ],
       },
       () => {},
-    )) as any;
+    );
     expect(catalog.providers[0].models).toEqual([
       {
         id: "proof",
@@ -2305,11 +2323,11 @@ test("models_set replaces complete model definitions", async () => {
 test("discover reads the endpoint model list", async () => {
   const fixture = await catalogFixture();
   try {
-    const result = (await fixture.runtime.dispatch(
+    const result = await fixture.runtime.dispatch(
       IpcMethod.DISCOVER,
       { provider: "local" },
       () => {},
-    )) as any;
+    );
     expect(result.base_url).toBe(`${fixture.base}/v1`);
     expect(result.models).toEqual([
       {
@@ -2335,7 +2353,7 @@ test("discover reads the endpoint model list", async () => {
 test("provider_set creates a provider from the endpoint and provider_remove remaps roles", async () => {
   const fixture = await catalogFixture();
   try {
-    const added = (await fixture.runtime.dispatch(
+    const added = await fixture.runtime.dispatch(
       IpcMethod.PROVIDER_SET,
       {
         id: "third",
@@ -2344,9 +2362,10 @@ test("provider_set creates a provider from the endpoint and provider_remove rema
         auth: "none",
       },
       () => {},
-    )) as any;
-    const third = added.providers.find((provider: any) => provider.id === "third");
-    expect(third.models.map((model: any) => model.id)).toEqual(["plain", "proof"]);
+    );
+    const third = added.providers.find((provider) => provider.id === "third");
+    if (!third) throw new Error("Missing third provider");
+    expect(third.models.map((model) => model.id)).toEqual(["plain", "proof"]);
     expect(third.baseUrl).toBe(`${fixture.base}/v1`);
 
     await expect(
@@ -2357,12 +2376,12 @@ test("provider_set creates a provider from the endpoint and provider_remove rema
       ),
     ).rejects.toThrow("端点没有返回任何模型");
 
-    const removed = (await fixture.runtime.dispatch(
+    const removed = await fixture.runtime.dispatch(
       IpcMethod.PROVIDER_REMOVE,
       { provider: "second" },
       () => {},
-    )) as any;
-    expect(removed.providers.map((provider: any) => provider.id)).toEqual(["local", "third"]);
+    );
+    expect(removed.providers.map((provider) => provider.id)).toEqual(["local", "third"]);
     expect(removed.selectors.note_writer).toBe("@default");
   } finally {
     await fixture.close();
@@ -2372,11 +2391,11 @@ test("provider_set creates a provider from the endpoint and provider_remove rema
 test("role_set rewrites one selector and keeps the rest", async () => {
   const fixture = await catalogFixture();
   try {
-    const catalog = (await fixture.runtime.dispatch(
+    const catalog = await fixture.runtime.dispatch(
       IpcMethod.ROLE_SET,
       { role: "note_writer", selector: "local/proof:high" },
       () => {},
-    )) as any;
+    );
     expect(catalog.selectors.note_writer).toBe("local/proof:high");
     expect(catalog.selectors.default).toBe("local/proof:off");
     await expect(
@@ -2387,8 +2406,7 @@ test("role_set rewrites one selector and keeps the rest", async () => {
       ),
     ).rejects.toThrow();
     expect(
-      ((await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, () => {})) as any).selectors
-        .note_writer,
+      (await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, () => {})).selectors.note_writer,
     ).toBe("local/proof:high");
   } finally {
     await fixture.close();
@@ -2615,7 +2633,8 @@ test("registered roles prune stale settings and preserve custom assignments", as
       { role: "plugin.custom", selector: "local/proof:high" },
       fixture.emit,
     );
-    const preserved = await fixture.runtime.dispatch(IpcMethod.ROLES_SYNC, { roles }, fixture.emit);
+    await fixture.runtime.dispatch(IpcMethod.ROLES_SYNC, { roles }, fixture.emit);
+    // biome-ignore lint/style/noNonNullAssertion: Role synchronization persists settings before dispatch returns.
     const selected = fixture.snapshots.at(-1)!.settings!.roles;
     expect(selected["plugin.custom"]).toBe("local/proof:high");
     const result = await fixture.runtime.dispatch(

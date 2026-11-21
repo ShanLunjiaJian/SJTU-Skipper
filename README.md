@@ -133,12 +133,12 @@ data/                             # 运行产物（gitignore）
 
 ```bash
 .venv/bin/python -m pytest -q
-bun run check:types
+bun run check
 ```
 
 确定性测试使用脚本化运行时与本地请求记录，覆盖配置、IPC、授权和应用行为．真实模型验收单独执行并保存请求与文稿记录．
 
-TypeScript 由项目 devShell 提供；`check:types` 使用根目录 `tsconfig.json`，检查运行时及其测试文件．
+TypeScript 和 Biome 由项目 devShell 提供．`check` 依次执行 `check:types` 和 `check:lint`，检查运行时及其测试文件．误报使用带原因的局部忽略注释．
 
 ## 说明
 

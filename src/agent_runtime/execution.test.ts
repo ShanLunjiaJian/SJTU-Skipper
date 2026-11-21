@@ -122,8 +122,11 @@ test("run block IDs remain distinct and interrupted blocks finish", () => {
   };
   const first = start();
   turn();
-  const firstId = updates.find((update) => update.block?.kind === ExecutionBlockKind.TEXT)!.block!
-    .id;
+  const firstBlock = updates.find(
+    (update) => update.block?.kind === ExecutionBlockKind.TEXT,
+  )?.block;
+  if (!firstBlock) throw new Error("Missing first text block");
+  const firstId = firstBlock.id;
   expect(updates.at(-2)?.block?.status).toBe(ExecutionBlockStatus.CANCELLED);
   first();
   const second = start();
@@ -131,7 +134,10 @@ test("run block IDs remain distinct and interrupted blocks finish", () => {
   const textIds = new Set(
     updates
       .filter((update) => update.block?.kind === ExecutionBlockKind.TEXT)
-      .map((update) => update.block!.id),
+      .map((update) => {
+        if (!update.block) throw new Error("Missing text block");
+        return update.block.id;
+      }),
   );
   expect(textIds.size).toBe(2);
   expect(textIds.has(firstId)).toBe(true);

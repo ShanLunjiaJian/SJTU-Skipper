@@ -163,6 +163,7 @@ export class ReviewGate {
     const operation = this.operation;
     if (operation?.state !== ReviewOperationState.COMPLETED_UNDELIVERED) return;
     operation.state = ReviewOperationState.COMPLETED_DELIVERED;
+    // biome-ignore lint/style/noNonNullAssertion: Both completion paths assign delivery before the completed state.
     return { ...operation.delivery!, stale: operation.delivery!.stale || this.isStale(operation) };
   }
   async cancel(): Promise<void> {

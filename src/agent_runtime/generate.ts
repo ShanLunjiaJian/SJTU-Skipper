@@ -8,6 +8,7 @@ import type {
   ImageContent,
   TextContent,
   SimpleStreamOptions,
+  AssistantMessage,
 } from "@oh-my-pi/pi-ai";
 import { ReasoningMode, RuntimeEvent, type Emit, generateInputSchema, validate } from "./schemas";
 
@@ -92,7 +93,7 @@ export async function generate(
       Array.isArray(message.content) && message.content.some((part) => part.type === "image"),
   );
   let attempts = 0;
-  let result;
+  let result: AssistantMessage;
   if (board) {
     const maxAttempts = input.loop_max_attempts ?? 3;
     for (;;) {

@@ -10,7 +10,10 @@ import {
 import { getModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema-bundle";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { parseSessionContent } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import {
+  parseSessionContent,
+  type SessionLoadResult,
+} from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import type { Model, Api } from "@oh-my-pi/pi-ai";
 import { Workspace } from "./workspace";
 import { resolveEditMode } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
@@ -46,7 +49,7 @@ import {
   extensionsSchema,
   type SessionExtensions,
 } from "./schemas";
-import { normalizeModels } from "./discovery";
+import { normalizeModels, type DiscoveredModel } from "./discovery";
 
 enum MessageRejectionReason {
   EMPTY = "Message is empty",
@@ -59,6 +62,10 @@ const BUILTIN_ROLES: RoleDefinition[] = [
 ];
 const DEFAULT_API = "openai-completions";
 const DISCOVERY_TIMEOUT_MS = 30_000;
+interface DiscoveryResult {
+  base_url: string;
+  models: DiscoveredModel[];
+}
 interface Configuration {
   models: string;
   roles: string;
@@ -247,10 +254,12 @@ export class Runtime {
         await this.auth.credentials.set(provider, credential);
       }
       if (this.persistence) {
+        const persistence = this.persistence;
+        const auth = this.auth;
         // Keep this listener for the pool lifetime: close can finish after an OAuth exchange.
         this.auth.credentials.onGeneration(() => {
           try {
-            this.persistence!.save({ credentials: this.auth!.credentials.all() });
+            persistence.save({ credentials: auth.credentials.all() });
           } catch (error) {
             // The SDK isolates listener errors. Fail IPC requests instead of losing a saved token.
             this.persistenceError ??= new Error("Credential persistence failed", { cause: error });
@@ -297,12 +306,9 @@ export class Runtime {
     model: string,
     usage: { input: number; output: number; cacheRead: number; totalTokens: number },
   ) {
-    const total = (this.usage[`${provider}/${model}`] ??= {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      totalTokens: 0,
-    });
+    const key = `${provider}/${model}`;
+    this.usage[key] ??= { input: 0, output: 0, cacheRead: 0, totalTokens: 0 };
+    const total = this.usage[key];
     total.input += usage.input;
     total.output += usage.output;
     total.cacheRead += usage.cacheRead;
@@ -311,6 +317,7 @@ export class Runtime {
 
   private async requestModel(model: Model<Api>, sessionId: string): Promise<Model<Api>> {
     if (!model.baseUrl.startsWith("https://opencode.ai/inference/go/")) return model;
+    // biome-ignore lint/style/noNonNullAssertion: Initialization opens auth before model requests.
     const credential = await this.auth!.oauth.access(model.provider, sessionId);
     if (!credential?.orgId) throw new Error("OpenCode organization is missing; sign in again");
     return {
@@ -363,12 +370,13 @@ export class Runtime {
     for (const role of this.roleDefinitions.keys()) visitRole(role, new Set());
     const candidate = path.join(this.root, `models-${crypto.randomUUID()}.yml`);
     const registryInput = structuredClone(parsed);
-    for (const provider of Object.values(registryInput.providers!)) {
+    for (const provider of Object.values(registryInput.providers)) {
       // The SDK requires an inline key for apiKey mode. Project storage resolves it per request.
       if ((provider.auth ?? "apiKey") === "apiKey" && !provider.apiKey) provider.auth = "oauth";
     }
     await writeFile(candidate, Bun.YAML.stringify(registryInput), { mode: 0o600 });
     const settings = Settings.isolated({ modelRoles: selectors });
+    // biome-ignore lint/style/noNonNullAssertion: Initialization opens auth before configuration.
     const registry = new ModelRegistry(this.auth!, candidate, {
       settings,
       cacheDbPath: path.join(this.root, "models.db"),
@@ -376,7 +384,7 @@ export class Runtime {
     if (registry.getError())
       throw new Error("Invalid models.yml: provider or model configuration failed validation");
     const allowed = Object.entries(parsed.providers).flatMap(([provider, value]) =>
-      value.models!.map((m) => {
+      value.models.map((m) => {
         const model = registry.find(provider, m.id);
         if (!model) throw new Error(`Invalid model: ${provider}/${m.id}`);
         return model;
@@ -408,11 +416,12 @@ export class Runtime {
     for (const input of definition.input) {
       if (!result.model.input.includes(input)) throw new Error(`${role} requires ${input} input`);
     }
-    return result;
+    return { ...result, model: result.model };
   }
 
   private async load() {
     await this.initialize();
+    // biome-ignore lint/style/noNonNullAssertion: Initialization stores config before it resolves.
     return this.config!;
   }
 
@@ -467,6 +476,7 @@ export class Runtime {
       auth: provider.auth ?? "apiKey",
       baseUrl: String(provider.baseUrl ?? ""),
       configured:
+        // biome-ignore lint/style/noNonNullAssertion: definitions waits for initialization to open auth.
         provider.auth === "none" || !!provider.apiKey || this.auth!.credentials.list(id).length > 0,
       source: provider.apiKey ? ProviderSource.CONFIG : ProviderSource.PROJECT,
       models: provider.models,
@@ -484,8 +494,8 @@ export class Runtime {
               return [
                 role,
                 {
-                  provider: resolved.model!.provider,
-                  model: resolved.model!.id,
+                  provider: resolved.model.provider,
+                  model: resolved.model.id,
                   thinkingLevel: resolved.thinkingLevel,
                 },
               ];
@@ -518,6 +528,7 @@ export class Runtime {
   private async fetchModels(provider: string, baseUrl: string) {
     if (!baseUrl) throw new Error("Provider has no base URL to discover models from");
     const headers: Record<string, string> = { accept: "application/json" };
+    // biome-ignore lint/style/noNonNullAssertion: Discovery follows configuration initialization.
     const key = await this.auth!.keys.get(provider);
     if (key) headers.authorization = `Bearer ${key}`;
     const response = await fetch(`${baseUrl}/models`, {
@@ -538,7 +549,7 @@ export class Runtime {
     const pointer = path.join(this.root, `session-${id}.path`);
     const saved = (await Bun.file(pointer).exists()) ? (await Bun.file(pointer).text()).trim() : "";
     if (!saved) throw new Error(`Saved session transcript is unavailable: ${id}`);
-    let loaded;
+    let loaded: SessionLoadResult;
     try {
       loaded = parseSessionContent(await readFile(saved, "utf8"));
     } catch {
@@ -593,6 +604,7 @@ export class Runtime {
     const providers = Object.entries(definitions.providers).map(([id, p]) => ({
       id,
       auth: p.auth ?? "apiKey",
+      // biome-ignore lint/style/noNonNullAssertion: load waits for initialization to open auth.
       configured: p.auth === "none" || !!p.apiKey || this.auth!.credentials.list(id).length > 0,
       source: p.apiKey ? ProviderSource.CONFIG : ProviderSource.PROJECT,
     }));
@@ -602,7 +614,7 @@ export class Runtime {
             const r = this.resolve(config, role);
             return [
               role,
-              { provider: r.model!.provider, model: r.model!.id, thinkingLevel: r.thinkingLevel },
+              { provider: r.model.provider, model: r.model.id, thinkingLevel: r.thinkingLevel },
             ];
           }),
         )
@@ -631,6 +643,11 @@ export class Runtime {
     params: Record<string, unknown>,
     emit: Emit,
   ): ReturnType<Runtime["info"]>;
+  async dispatch(
+    method: IpcMethod.DISCOVER,
+    params: Record<string, unknown>,
+    emit: Emit,
+  ): Promise<DiscoveryResult>;
   async dispatch(method: IpcMethod, params: Record<string, unknown>, emit: Emit): Promise<unknown>;
   async dispatch(method: IpcMethod, params: Record<string, unknown>, emit: Emit): Promise<unknown> {
     if (this.persistenceError) throw this.persistenceError;
@@ -663,8 +680,8 @@ export class Runtime {
         const role = validate(agentRoleSchema, params.role ?? AgentRole.DEFAULT, "agent role");
         const resolved = this.resolve(config, role);
         const response = await generate(
-          await this.requestModel(resolved.model!, id),
-          config.registry.resolver(resolved.model!, id),
+          await this.requestModel(resolved.model, id),
+          config.registry.resolver(resolved.model, id),
           { ...params, ...(resolved.thinkingLevel ? { reasoning: resolved.thinkingLevel } : {}) },
           emit,
           controller.signal,
@@ -759,10 +776,12 @@ export class Runtime {
         method === IpcMethod.CREDENTIALS
           ? { type: "api_key" as const, key: String(params.key) }
           : validate(credentialSchema, params.credential, "credential");
+      // biome-ignore lint/style/noNonNullAssertion: Dispatch waits for auth initialization.
       await this.auth!.credentials.set(String(params.provider), credential);
       return { ok: true };
     }
     if (method === IpcMethod.LOGOUT) {
+      // biome-ignore lint/style/noNonNullAssertion: Dispatch waits for auth initialization.
       await this.auth!.credentials.remove(String(params.provider));
       return { ok: true };
     }
@@ -922,8 +941,8 @@ export class Runtime {
           api.on("session_before_compact", async (event) => ({
             compaction: await compactContext(
               event.preparation,
-              await this.requestModel(compact.model!, id),
-              config.registry.resolver(compact.model!, id),
+              await this.requestModel(compact.model, id),
+              config.registry.resolver(compact.model, id),
               event.customInstructions,
               event.signal,
               {
@@ -993,8 +1012,8 @@ export class Runtime {
           authStorage: this.auth,
           modelRegistry: config.registry,
           model: {
-            ...(await this.requestModel(resolved.model!, id)),
-            compactionModel: `${compact.model!.provider}/${compact.model!.id}`,
+            ...(await this.requestModel(resolved.model, id)),
+            compactionModel: `${compact.model.provider}/${compact.model.id}`,
           },
           thinkingLevel: resolved.thinkingLevel,
           sessionManager: manager,
@@ -1040,7 +1059,7 @@ export class Runtime {
           tool.execute = async (callId, args, signal, onUpdate, context) => {
             const mode = resolveEditMode({
               settings,
-              getActiveModelString: () => resolved.model!.id,
+              getActiveModelString: () => resolved.model.id,
             });
             await workspace.check(
               tool.name as WorkspaceTool,
@@ -1059,6 +1078,7 @@ export class Runtime {
                   for (const change of await workspace.changes())
                     events(RuntimeEvent.FILE, { session_id: id, ...change });
                 } catch (error) {
+                  // biome-ignore lint/correctness/noUnsafeFinally: Propagate change errors only when execute succeeded, preserving its original failure.
                   if (!failed) throw error;
                 }
               }
@@ -1083,8 +1103,9 @@ export class Runtime {
       }
     }
     const id = String(params.session_id);
-    if (method === IpcMethod.CANCEL && this.generations.has(id)) {
-      this.generations.get(id)!.abort();
+    const generation = this.generations.get(id);
+    if (method === IpcMethod.CANCEL && generation) {
+      generation.abort();
       return { ok: true };
     }
     const conversation = this.sessions.get(id);
@@ -1194,7 +1215,7 @@ export class Runtime {
                 });
               } else {
                 const [prompt, ...followUps] = prompts;
-                await conversation.session.prompt(prompt!, {
+                await conversation.session.prompt(prompt, {
                   expandPromptTemplates: false,
                   runCommands: false,
                   userInitiated: true,

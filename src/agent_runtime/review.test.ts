@@ -32,6 +32,7 @@ test("edits require the unified reviewer again", async () => {
         ...reviewScope,
       },
       async (role, prompt, files) => {
+        // biome-ignore lint/style/noNonNullAssertion: The review scope includes this file, which the test creates before review.
         seen.push(`${role}:${await Bun.file(files["note_knowledge.md"]!).text()}`);
         prompts.push(prompt);
         const incorrect = fail;
@@ -60,7 +61,7 @@ test("edits require the unified reviewer again", async () => {
     expect(await gate.satisfied()).toBe(false);
     const failed = await run();
     const content = failed.content.find((block) => block.type === "text");
-    if (!content || content.type !== "text") throw new Error("Missing review report");
+    if (content?.type !== "text") throw new Error("Missing review report");
     const failedReport = JSON.parse(content.text);
     expect(failedReport.passed).toBe(false);
     expect(failedReport.report.correct).toBe(false);
@@ -156,6 +157,7 @@ test("snapshot changes mark reviewer events stale", async () => {
         expect(operation.round).toBe(1);
         expect(operation.isStale()).toBe(false);
         await Bun.write(path.join(directory, "note_notice.md"), "Changed");
+        // biome-ignore lint/style/noNonNullAssertion: The review scope includes this file, which reviewFiles creates before review.
         expect(await Bun.file(files["note_notice.md"]!).text()).toBe("Original");
         stale = operation.isStale();
         return correct;
@@ -180,6 +182,7 @@ test("review failures remain deliverable and cancellation waits", async () => {
       { prompt: "Review", system: "Review", maxRounds: 2, ...reviewScope },
       async (_role, _prompt, _files, signal) => {
         started.resolve();
+        // biome-ignore lint/style/noNonNullAssertion: ReviewGate supplies the cancellation signal to its reviewer.
         signal!.addEventListener("abort", () => stopped.resolve(), { once: true });
         await stopped.promise;
         throw new Error("Reviewer stopped");

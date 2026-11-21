@@ -54,8 +54,8 @@ test("discovery reads OpenRouter-style context length and skips non-chat rows", 
     ],
   });
   expect(models.map((model) => model.id)).toEqual(["vision"]);
-  expect(models[0]!.contextWindow).toBe(200_000);
-  expect(models[0]!.input).toEqual(["text", "image"]);
+  expect(models[0]?.contextWindow).toBe(200_000);
+  expect(models[0]?.input).toEqual(["text", "image"]);
 });
 
 test("discovery tolerates malformed bodies", () => {
