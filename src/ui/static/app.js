@@ -248,7 +248,7 @@
     "scroll",
     (event) => {
       for (const [button, binding] of menuBindings)
-        if (!button._menu.contains(event.target)) binding.hide();
+        if (event.target.contains(button)) binding.hide();
     },
     true,
   );
