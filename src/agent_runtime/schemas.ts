@@ -268,8 +268,6 @@ const extensionFields = {
     parameters: { "[string]": "unknown" },
     "label?": "string",
   }).array(),
-  "review_targets?": "string[]",
-  "review_criteria?": "string[]",
   "completion_hooks?": type({
     owner: nonemptyString,
     id: nonemptyString,

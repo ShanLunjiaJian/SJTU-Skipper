@@ -47,8 +47,6 @@ class AgentExtension:
     priority: int = 0
     prompt: str = ""
     tools: tuple[AgentExtensionTool, ...] = ()
-    review_targets: tuple[str, ...] = ()
-    review_criteria: tuple[str, ...] = ()
     completion_hooks: tuple[AgentCompletionHook, ...] = ()
 
 
@@ -68,18 +66,6 @@ class ExtensionSnapshot:
         return {
             "prompts": [item.prompt for _, item in self.contributions if item.prompt],
             "tools": [tool.descriptor() for tool in self.tools.values()],
-            "review_targets": list(
-                dict.fromkeys(
-                    target
-                    for _, item in self.contributions
-                    for target in item.review_targets
-                )
-            ),
-            "review_criteria": [
-                criterion
-                for _, item in self.contributions
-                for criterion in item.review_criteria
-            ],
             "completion_hooks": [
                 {"owner": owner, "id": hook.id, "priority": hook.priority}
                 for owner, hook in self.hook_order
@@ -138,8 +124,6 @@ class AgentExtensionRegistry:
             extension,
             roles=roles,
             tools=tuple(tools.values()),
-            review_targets=tuple(extension.review_targets),
-            review_criteria=tuple(extension.review_criteria),
             completion_hooks=tuple(hooks.values()),
         )
         key = (owner, extension.id)

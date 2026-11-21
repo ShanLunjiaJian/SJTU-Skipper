@@ -856,8 +856,6 @@ def test_hook_order_and_reviewer_snapshot(tmp_path):
                 roles=("note_review",),
                 prompt="First prompt.",
                 completion_hooks=(hook("early", -1),),
-                review_targets=("extra.md",),
-                review_criteria=("Check the extra file.",),
                 tools=(_custom_tool(),),
             ),
         )
@@ -884,8 +882,6 @@ def test_hook_order_and_reviewer_snapshot(tmp_path):
             "Second prompt.",
             "Last prompt.",
         ]
-        assert reviewer["review_targets"] == ["extra.md"]
-        assert reviewer["review_criteria"] == ["Check the extra file."]
         names = [
             f"{item['owner']}/{item['id']}" for item in reviewer["completion_hooks"]
         ]

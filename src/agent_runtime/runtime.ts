@@ -836,23 +836,7 @@ export class Runtime {
           ),
         });
         const declaredReview = (params.meta as { review?: ReviewOptions } | undefined)?.review;
-        const reviewOptions = declaredReview
-          ? {
-              ...declaredReview,
-              targets: [
-                ...new Set([
-                  ...declaredReview.targets,
-                  ...(extensions.review_targets ?? []),
-                  ...(extensions.reviewer?.review_targets ?? []),
-                ]),
-              ],
-              prompt: [
-                declaredReview.prompt,
-                ...(extensions.review_criteria ?? []),
-                ...(extensions.reviewer?.review_criteria ?? []),
-              ].join("\n\n"),
-            }
-          : undefined;
+        const reviewOptions = declaredReview ? { ...declaredReview } : undefined;
         if (reviewOptions) {
           if (!reviewOptions.targets.length) throw new Error("Review requires a target");
           for (const name of [...reviewOptions.targets, ...reviewOptions.sources]) {

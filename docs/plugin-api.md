@@ -503,7 +503,6 @@ agent.register_extension(ctx.plugin_id, AgentExtension(
         handler=lookup,
         label="课程查询",
     ),),
-    review_criteria=("核对每处课程引用．",),
     completion_hooks=(AgentCompletionHook(id="output", handler=check_output),),
 ))
 ```
@@ -517,8 +516,6 @@ agent.register_extension(ctx.plugin_id, AgentExtension(
 | `priority`         | `int`                             | `0`    |
 | `prompt`           | `str`                             | `""`   |
 | `tools`            | `tuple[AgentExtensionTool, ...]`  | `()`   |
-| `review_targets`   | `tuple[str, ...]`                 | `()`   |
-| `review_criteria`  | `tuple[str, ...]`                 | `()`   |
 | `completion_hooks` | `tuple[AgentCompletionHook, ...]` | `()`   |
 
 `AgentExtensionTool` 必填字段为 `name`、`description`、`parameters` 和 `handler`．`parameters` 使用 JSON Schema 对象，`label` 默认为 `None`．`AgentCompletionHook` 必填字段为 `id` 和 `handler`，`priority` 默认为 `0`．
@@ -571,7 +568,7 @@ meta = {
 }
 ```
 
-目标和来源使用工作区逻辑文件名．扩展目标会合并到 `meta.review.targets`，每个目标都必须已获工作区授权．审阅快照、内容摘要和报告路径校验包含全部目标．目标或来源变化会使原审阅批准失效．审阅要求追加到审阅提示词，不改变报告结构．笔记流水线以全部 `NOTE_HEADERS` 文件为目标，以 `SOURCE_FILENAME` 为来源；写作 Agent 仍通过 `review_notes` 请求审阅．
+目标和来源使用工作区逻辑文件名，每个文件都必须已获工作区授权．审阅快照、内容摘要和报告路径校验包含全部目标．目标或来源变化会使原审阅批准失效．笔记流水线以全部 `NOTE_HEADERS` 文件为目标，以 `SOURCE_FILENAME` 为来源；写作 Agent 通过 `review_notes` 请求审阅．
 
 创建和重开请求使用 `role` 选择角色，并包含以下 `extensions` 对象：
 
@@ -579,10 +576,8 @@ meta = {
 {
   prompts: string[],
   tools: {name, description, parameters, label?}[],
-  review_targets: string[],
-  review_criteria: string[],
   completion_hooks: {owner: string, id: string, priority: integer}[],
-  reviewer: {prompts, tools, review_targets, review_criteria, completion_hooks}
+  reviewer: {prompts, tools, completion_hooks}
 }
 ```
 

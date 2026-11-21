@@ -2413,7 +2413,7 @@ test("role_set rewrites one selector and keeps the rest", async () => {
   }
 });
 
-test("review extensions enforce tools, ordered hooks, and added targets", async () => {
+test("review extensions enforce tools and ordered hooks", async () => {
   let writers = 0;
   let reviewers = 0;
   const hooks: string[] = [];
@@ -2442,7 +2442,7 @@ test("review extensions enforce tools, ordered hooks, and added targets", async 
           ++writers === 1 ? modelTool("review_notes", {}, "extension-review") : modelText("Done"),
         );
       }
-      expect(userTexts(body).join("\n")).toContain("Review extension criterion");
+      expect(JSON.stringify(body.messages)).toContain("Review extension criterion");
       ++reviewers;
       if (reviewers === 1) return sse(modelText(report));
       if (reviewers === 2) {
@@ -2482,12 +2482,17 @@ test("review extensions enforce tools, ordered hooks, and added targets", async 
         id: "extension-parent",
         files,
         meta: {
-          review: { system: "EXTENSION_REVIEW", prompt: "Review", maxRounds: 1, ...reviewScope },
+          review: {
+            system: "EXTENSION_REVIEW",
+            prompt: "Review",
+            maxRounds: 1,
+            ...reviewScope,
+            targets: [...reviewScope.targets, "appendix.md"],
+          },
         },
         extensions: {
           reviewer: {
             prompts: ["Review extension criterion"],
-            review_targets: ["appendix.md"],
             tools: [
               {
                 name: "audit_document",
