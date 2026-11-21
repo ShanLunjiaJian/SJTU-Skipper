@@ -446,8 +446,6 @@ class NotesPipeline:
                 ):
                     return reject("笔记任务尚未结束，请稍后发送")
                 try:
-                    if not self.agent.can_resume(writer["session_id"])[0]:
-                        return reject("笔记写作会话记录不可用")
                     self._writer_inputs(sid, writer)
                 except (OSError, ValueError, RuntimeError) as exc:
                     return reject(f"笔记写作会话记录不可用：{exc}")
@@ -1539,8 +1537,7 @@ class NotesPipeline:
                 if saved["review"]
                 else None
             )
-            writer = self.agent.reopen(
-                saved["session_id"],
+            parameters = dict(
                 name=saved["name"],
                 workspace=workspace,
                 system_prompt=saved["system_prompt"],
@@ -1548,6 +1545,13 @@ class NotesPipeline:
                 tools=saved["tools"],
                 meta={"review": review} if review else {},
             )
+            if self.agent.can_resume(saved["session_id"])[0]:
+                writer = self.agent.reopen(saved["session_id"], **parameters)
+            else:
+                writer = self.agent.create_session(**parameters)
+                with self.condition:
+                    self._state(sid)["writer"]["session_id"] = writer.id
+                    self._save(self._state(sid))
             directory = self._directory(sid) / saved["directory"]
             review_enabled = review is not None
             instruction = messages[0]
