@@ -7,7 +7,7 @@ import logging
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from config import AppConfig
 from .agent_types import IpcMethod
@@ -35,6 +35,19 @@ class LLMProxy:
             )
         return service
 
+    def register_role(
+        self, owner: str, role: str, title: str, *, input: tuple[str, ...] = ("text",)
+    ) -> None:
+        self._service().register_role(owner, role, title, input=input)
+
+    def unregister_roles(self, owner: str) -> None:
+        service = self._services.get("llm")
+        if service is not None:
+            service.unregister_roles(owner)
+
+    def list_roles(self) -> list[dict[str, Any]]:
+        return self._service().list_roles()
+
     def call(self, method: IpcMethod, **params: Any) -> dict[str, Any]:
         return self._service().call(method, **params)
 
@@ -46,6 +59,11 @@ class LLMProxy:
 
     def session_transcript(self, session_id: str) -> Path | None:
         return self._service().session_transcript(session_id)
+
+    def set_callback_handler(
+        self, handler: Callable[[dict[str, Any]], Any] | None
+    ) -> None:
+        self._service().set_callback_handler(handler)
 
     def close(self) -> None:
         service = self._services.get("llm")

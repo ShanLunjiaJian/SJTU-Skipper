@@ -10,7 +10,6 @@ import pytest
 from config import load_config
 from core.agent_types import IpcMethod
 from core.ui import FormInputType
-from plugins.llm_core.settings_view import ROLE_TITLES
 from plugins.llm_core.plugin import CredentialType, ProviderAuth, ProviderSource
 from core.runtime import build_runtime
 from core.settings_spec import SECRET_MASK, SettingType, SettingsSpec
@@ -19,6 +18,14 @@ from plugins.settings import (
     SettingsService,
     SettingsStore,
 )
+
+REGISTERED_ROLES = [
+    {"id": "default", "title": "默认", "input": ["text"]},
+    {"id": "compaction", "title": "上下文压缩", "input": ["text"]},
+    {"id": "ask_instant", "title": "快速问答", "input": ["text"]},
+    {"id": "note_writer", "title": "笔记写作", "input": ["text"]},
+    {"id": "board_recognition", "title": "板书识别", "input": ["text", "image"]},
+]
 
 GROUPED = [
     SettingsSpec(
@@ -476,6 +483,7 @@ class ConfigurationRuntime:
         self.calls: list[tuple[IpcMethod, dict]] = []
         self.fail_configure = False
         self.closed = False
+        self.role_definitions = deepcopy(REGISTERED_ROLES)
         self.providers = {
             "lecture": {
                 "baseUrl": "http://lecture.test/v1",
@@ -509,7 +517,7 @@ class ConfigurationRuntime:
             },
         }
         self.selectors = {
-            **{role: "@default" for role in ROLE_TITLES},
+            **{role["id"]: "@default" for role in REGISTERED_ROLES},
             "default": "lecture/example:high",
             "note_writer": "lecture/example:medium",
             "board_recognition": "lecture/example:off",
@@ -534,7 +542,13 @@ class ConfigurationRuntime:
         self.configuration = {}
 
     def _resolved(self, role: str) -> dict:
-        selector = self.selectors.get(role, self.selectors["default"])
+        selector = self.selectors[role]
+        seen = set()
+        while selector.startswith("@"):
+            if selector in seen:
+                raise ValueError("Invalid role alias")
+            seen.add(selector)
+            selector = self.selectors[selector[1:]]
         target, _, level = selector.partition(":")
         provider, _, model = target.partition("/")
         return {"provider": provider, "model": model, "thinkingLevel": level or None}
@@ -556,6 +570,7 @@ class ConfigurationRuntime:
         return {
             **self.configuration,
             "providers": providers,
+            "role_definitions": deepcopy(self.role_definitions),
             "selectors": dict(self.selectors),
             "roles": {role: self._resolved(role) for role in self.selectors},
             "usage": {},
@@ -565,14 +580,26 @@ class ConfigurationRuntime:
             },
             "definition_schema": {
                 "type": "object",
-                "properties": {"providers": {"additionalProperties": {
-                    "type": "object", "properties": {
-                        "models": {"type": "array", "items": {
-                            "type": "object", "properties": {"id": {"type": "string"}},
-                        }},
-                        "modelOverrides": {"type": "object", "additionalProperties": {"type": "object"}},
-                    },
-                }}},
+                "properties": {
+                    "providers": {
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                                "models": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {"id": {"type": "string"}},
+                                    },
+                                },
+                                "modelOverrides": {
+                                    "type": "object",
+                                    "additionalProperties": {"type": "object"},
+                                },
+                            },
+                        }
+                    }
+                },
             },
         }
 
@@ -585,7 +612,9 @@ class ConfigurationRuntime:
                 self.providers = deepcopy(params["models"]["providers"])
                 self.selectors = dict(params["roles"])
             else:
-                self.configuration.update(models=params["models"], roles=params["roles"])
+                self.configuration.update(
+                    models=params["models"], roles=params["roles"]
+                )
         elif method == IpcMethod.CATALOG:
             return self._catalog()
         elif method == IpcMethod.INFO:
@@ -617,8 +646,22 @@ class ConfigurationRuntime:
             provider = self.providers[params["provider"]]
             provider["models"] = [dict(m) for m in params["models"]]
         elif method == IpcMethod.ROLE_SET:
-            if params["role"] == "board_recognition" and params["selector"] == "opencode/flash:off":
-                raise ValueError("board_recognition requires image input")
+            definition = next(
+                role for role in self.role_definitions if role["id"] == params["role"]
+            )
+            target = params["selector"].partition(":")[0]
+            if not target.startswith("@"):
+                provider, _, model_id = target.partition("/")
+                model = next(
+                    model
+                    for model in self.providers[provider]["models"]
+                    if model["id"] == model_id
+                )
+                missing = set(definition["input"]) - set(model["input"])
+                if missing:
+                    raise ValueError(
+                        f"{params['role']} requires {', '.join(sorted(missing))} input"
+                    )
             self.selectors[params["role"]] = params["selector"]
         elif method in (IpcMethod.CREDENTIALS, IpcMethod.IMPORT_CREDENTIALS):
             self.providers[params["provider"]]["configured"] = True
@@ -652,7 +695,8 @@ def llm_tabs(runtime) -> dict[str, list[dict]]:
 
 def model_blocks(runtime, provider="lecture"):
     return next(
-        tab["blocks"] for tab in llm_tabs(runtime)["模型"][0]["tabs"]
+        tab["blocks"]
+        for tab in llm_tabs(runtime)["模型"][0]["tabs"]
         if tab["title"] == provider
     )
 
@@ -684,10 +728,12 @@ def test_raw_json_saves_objects(tmp_path, monkeypatch):
         models["providers"]["lecture"]["models"][0]["maxTokens"] = 7000
         result = runtime.ui.dispatch_action(
             "llm.configure",
-            {"values": {
-                "models_json": json.dumps(models),
-                "roles_json": json.dumps(definition["roles"]),
-            }},
+            {
+                "values": {
+                    "models_json": json.dumps(models),
+                    "roles_json": json.dumps(definition["roles"]),
+                }
+            },
         )
         assert result.ok, result.message
         assert backend.providers["lecture"]["models"][0]["maxTokens"] == 7000
@@ -844,10 +890,15 @@ def test_model_delete_is_blocked_while_roles_use_it(tmp_path, monkeypatch):
         runtime.stop()
 
 
-def test_role_edit_uses_fixed_role_row(tmp_path, monkeypatch):
+def test_role_edit_uses_registered_role_row(tmp_path, monkeypatch):
     runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
     try:
         table = _table(llm_tabs(runtime)["角色"])
+        assert [row["role"] for row in table["rows"]] == [
+            role["id"] for role in REGISTERED_ROLES
+        ]
+        assert "row_actions" not in table
+        assert all("actions" not in row for row in table["rows"])
         row = next(row for row in table["rows"] if row["role"] == "note_writer")
         editor = row["details"][0]
         values = {field["name"]: field["value"] for field in editor["fields"]}
@@ -995,7 +1046,9 @@ def test_device_login_imports_oauth_into_runtime(tmp_path, monkeypatch):
                 },
             },
         ) in backend.calls
-        rows = next(block for block in llm_tabs(runtime)["提供方"] if block["type"] == "table")["rows"]
+        rows = next(
+            block for block in llm_tabs(runtime)["提供方"] if block["type"] == "table"
+        )["rows"]
         oauth = next(row for row in rows if row["id"] == "opencode")
         assert [action["action"] for action in oauth["actions"]] == ["llm.logout"]
         again = runtime.ui.dispatch_action(
@@ -1012,9 +1065,13 @@ def test_device_login_imports_oauth_into_runtime(tmp_path, monkeypatch):
         )
         assert result.ok
         assert backend.calls[-1] == (IpcMethod.LOGOUT, {"provider": "opencode"})
-        rows = next(block for block in llm_tabs(runtime)["提供方"] if block["type"] == "table")["rows"]
+        rows = next(
+            block for block in llm_tabs(runtime)["提供方"] if block["type"] == "table"
+        )["rows"]
         oauth = next(row for row in rows if row["id"] == "opencode")
-        assert [action["action"] for action in oauth["actions"]] == ["llm.opencode_login"]
+        assert [action["action"] for action in oauth["actions"]] == [
+            "llm.opencode_login"
+        ]
     finally:
         runtime.stop()
 
@@ -1118,3 +1175,53 @@ def test_unload_removes_all_notes_settings(tmp_path):
     service.unregister(plugin_id="notes")
     assert service.get_spec("notes.review_enabled") is None
     assert service.get_spec("notes.on_stop") is None
+
+
+def test_settings_render_custom_role_descriptors(tmp_path, monkeypatch):
+    runtime, _plugin, backend = make_llm_settings_runtime(tmp_path, monkeypatch)
+    try:
+        backend.role_definitions = [
+            {"id": "default", "title": "默认", "input": ["text"]},
+            {"id": "compaction", "title": "上下文压缩", "input": ["text"]},
+            {
+                "id": "custom_vision",
+                "title": "Custom vision",
+                "input": ["text", "image"],
+            },
+        ]
+        backend.selectors = {
+            "default": "lecture/example:high",
+            "compaction": "@default",
+            "custom_vision": "opencode/flash:off",
+        }
+        tabs = llm_tabs(runtime)
+        table = _table(tabs["角色"])
+        assert [row["role"] for row in table["rows"]] == [
+            "default",
+            "compaction",
+            "custom_vision",
+        ]
+        row = table["rows"][-1]
+        assert row["title"] == "Custom vision"
+        assert row["status"] == "缺少 image 输入"
+        assert row["details"][0]["title"] == "编辑角色 Custom vision"
+        assert "Custom vision角色" in json.dumps(tabs["概览"], ensure_ascii=False)
+        rejected = runtime.ui.dispatch_action(
+            "llm.role.save",
+            {
+                "values": {
+                    "role": "custom_vision",
+                    "model": "opencode/flash",
+                    "level": "off",
+                }
+            },
+        )
+        assert not rejected.ok
+        assert "image" in rejected.message
+        blocked = runtime.ui.dispatch_action(
+            "llm.model.remove", {"values": {"provider": "opencode", "model": "flash"}}
+        )
+        assert not blocked.ok
+        assert "Custom vision（custom_vision）" in blocked.message
+    finally:
+        runtime.stop()

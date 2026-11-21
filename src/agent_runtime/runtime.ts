@@ -3,7 +3,10 @@ import path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { createAgentSession, Settings, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { normalizeModelPatternList, resolveModelRoleValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import {
+  normalizeModelPatternList,
+  resolveModelRoleValue,
+} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { getModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema-bundle";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -15,7 +18,13 @@ import { registerOpenCode } from "./opencode";
 import { generate } from "./generate";
 import { compact as compactContext } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import { ReviewGate, parseReviewReport, type ReviewOptions } from "./review";
+import { ReviewGate, type ReviewOptions } from "./review";
+import {
+  extensionTools,
+  completionHooks,
+  type RuntimeCallback,
+  type ToolCallRecord,
+} from "./extensions";
 import { observeExecution } from "./execution";
 import { providerView } from "./provider-view";
 import {
@@ -25,7 +34,6 @@ import {
   RuntimeEvent,
   ProviderSource,
   WorkspaceTool,
-  workspaceToolSchema,
   agentRoleSchema,
   type Emit,
   type ModelsConfiguration,
@@ -33,6 +41,10 @@ import {
   modelsConfigurationSchema,
   rolesConfigurationSchema,
   credentialSchema,
+  roleDefinitionsSchema,
+  type RoleDefinition,
+  extensionsSchema,
+  type SessionExtensions,
 } from "./schemas";
 import { normalizeModels } from "./discovery";
 
@@ -41,7 +53,10 @@ enum MessageRejectionReason {
   INACTIVE = "Session has no active run",
 }
 
-const ROLE_NAMES = Object.values(AgentRole);
+const BUILTIN_ROLES: RoleDefinition[] = [
+  { id: AgentRole.DEFAULT, title: "默认", input: ["text"] },
+  { id: AgentRole.COMPACTION, title: "上下文压缩", input: ["text"] },
+];
 const DEFAULT_API = "openai-completions";
 const DISCOVERY_TIMEOUT_MS = 30_000;
 interface Configuration {
@@ -56,12 +71,14 @@ interface Conversation {
   closing?: Promise<void>;
   session: AgentSession;
   steps: number;
-  role: AgentRole;
+  role: string;
   workspace: Workspace;
   emit: Emit;
   review?: ReviewGate;
   reviewerId?: string;
   taskPrompt?: string;
+  extensions: SessionExtensions;
+  reviewTargets?: string[];
 }
 interface RunControl {
   acceptingMessages: boolean;
@@ -72,6 +89,7 @@ interface RunControl {
   termination?: Promise<void>;
   abortError?: unknown;
   cancelled: boolean;
+  controller: AbortController;
   notification: PromiseWithResolvers<void>;
   done: PromiseWithResolvers<void>;
 }
@@ -84,6 +102,7 @@ export class Runtime {
   private sessions = new Map<string, Conversation>();
   private generations = new Map<string, AbortController>();
   private opening = new Set<string>();
+  private roleDefinitions = new Map<string, RoleDefinition>();
   private usage: Record<
     string,
     { input: number; output: number; cacheRead: number; totalTokens: number }
@@ -91,7 +110,29 @@ export class Runtime {
   constructor(
     private root: string,
     private persistence?: RuntimePersistence,
-  ) {}
+    private callback?: RuntimeCallback,
+    registeredRoles: RoleDefinition[] = BUILTIN_ROLES,
+  ) {
+    this.setRoles(registeredRoles);
+  }
+  private setRoles(definitions: RoleDefinition[]) {
+    const roles = new Map<string, RoleDefinition>();
+    for (const definition of roleDefinitionsSchema.assert(definitions)) {
+      if (roles.has(definition.id)) throw new Error(`Duplicate role: ${definition.id}`);
+      roles.set(definition.id, definition);
+    }
+    for (const definition of BUILTIN_ROLES) roles.set(definition.id, definition);
+    this.roleDefinitions = roles;
+  }
+  private finalText(conversation: Conversation): string {
+    const last = conversation.session.messages.findLast((message) => message.role === "assistant");
+    return last?.role === "assistant"
+      ? last.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n")
+      : "";
+  }
   private async message(params: Record<string, unknown>) {
     const conversation = this.sessions.get(String(params.session_id));
     const control = conversation?.run;
@@ -167,6 +208,7 @@ export class Runtime {
     control.acceptingMessages = false;
     control.cancelled = true;
     control.inbox.length = 0;
+    control.controller.abort();
     control.notification.resolve();
     // Withdraw input already claimed by the loop before abort can restore it.
     conversation.session.clearQueue({ forInterrupt: true });
@@ -233,23 +275,19 @@ export class Runtime {
           },
         },
       };
-      const roles =
-        this.persistence?.roles ??
-        Object.fromEntries(
-          ROLE_NAMES.map((role) => [
-            role,
-            role === AgentRole.DEFAULT
-              ? "deepseek/deepseek-flash:high"
-              : role === AgentRole.BOARD_RECOGNITION
-                ? "deepseek/deepseek-flash:off"
-                : "@default",
-          ]),
-        );
+      const roles = this.persistence?.roles ?? { default: "deepseek/deepseek-flash:high" };
       const config = await this.configuration(
         Bun.YAML.stringify(models),
         Bun.YAML.stringify(roles),
       );
-      await this.storeConfiguration(config, !this.persistence?.models || !this.persistence?.roles);
+      const savedRoles = this.persistence?.roles;
+      const changedRoles =
+        !savedRoles ||
+        Object.keys(savedRoles).length !== this.roleDefinitions.size ||
+        [...this.roleDefinitions.keys()].some(
+          (role) => savedRoles[role] !== config.selectors[role],
+        );
+      await this.storeConfiguration(config, !this.persistence?.models || changedRoles);
     })();
     await this.initialization;
   }
@@ -290,7 +328,12 @@ export class Runtime {
 
   private async configuration(models: string, roles: string): Promise<Configuration> {
     const parsed = validate(modelsConfigurationSchema, Bun.YAML.parse(models), "models.yml");
-    const selectors = validate(rolesConfigurationSchema, Bun.YAML.parse(roles), "roles.yml");
+    const supplied = validate(rolesConfigurationSchema, Bun.YAML.parse(roles), "roles.yml");
+    const selectors: Record<string, string> = {};
+    for (const role of this.roleDefinitions.keys()) {
+      const value = Object.hasOwn(supplied, role) ? supplied[role] : "@default";
+      selectors[role] = validate(agentRoleSchema, value, `role ${role}`);
+    }
     for (const [provider, value] of Object.entries(parsed.providers)) {
       if (!value.models?.length) throw new Error(`Provider ${provider} requires models`);
       if (
@@ -304,15 +347,20 @@ export class Runtime {
       const next = new Set(seen).add(role);
       for (const pattern of normalizeModelPatternList(selectors[role] ?? selectors.default)) {
         const alias = pattern.replace(/:(off|minimal|low|medium|high|xhigh|max|auto)$/, "");
-        const target = alias === "*" ? AgentRole.DEFAULT
-          : alias.startsWith("@") ? alias.slice(1)
-          : alias.startsWith("pi/") ? alias.slice(3) : undefined;
+        const target =
+          alias === "*"
+            ? AgentRole.DEFAULT
+            : alias.startsWith("@")
+              ? alias.slice(1)
+              : alias.startsWith("pi/")
+                ? alias.slice(3)
+                : undefined;
         if (target === undefined) continue;
-        if (!ROLE_NAMES.includes(target as AgentRole)) throw new Error(`Invalid role alias: ${role}`);
+        if (!this.roleDefinitions.has(target)) throw new Error(`Invalid role alias: ${role}`);
         visitRole(target, next);
       }
     };
-    for (const role of ROLE_NAMES) visitRole(role, new Set());
+    for (const role of this.roleDefinitions.keys()) visitRole(role, new Set());
     const candidate = path.join(this.root, `models-${crypto.randomUUID()}.yml`);
     const registryInput = structuredClone(parsed);
     for (const provider of Object.values(registryInput.providers!)) {
@@ -342,20 +390,24 @@ export class Runtime {
       selectors,
     };
     if (allowed.length) {
-      for (const role of ROLE_NAMES) this.resolve(config, role);
+      for (const role of this.roleDefinitions.keys()) this.resolve(config, role);
     }
     return config;
   }
 
-  private resolve(config: Configuration, role: AgentRole) {
-    if (!config.allowed.length) throw new Error("No providers configured. Add a provider in LLM settings.");
+  private resolve(config: Configuration, role: string) {
+    const definition = this.roleDefinitions.get(role);
+    if (!definition) throw new Error(`Unknown role: ${role}`);
+    if (!config.allowed.length)
+      throw new Error("No providers configured. Add a provider in LLM settings.");
     const result = resolveModelRoleValue(config.selectors[role] ?? "@default", config.allowed, {
       roleLookup: { getModelRole: (name: string) => config.selectors[name] },
     });
     if (!result.model || result.warning)
       throw new Error(result.warning ?? `Cannot resolve role: ${role}`);
-    if (role === AgentRole.BOARD_RECOGNITION && !result.model.input.includes("image"))
-      throw new Error("board_recognition requires image input");
+    for (const input of definition.input) {
+      if (!result.model.input.includes(input)) throw new Error(`${role} requires ${input} input`);
+    }
     return result;
   }
 
@@ -402,7 +454,7 @@ export class Runtime {
     return {
       config,
       models: validate(modelsConfigurationSchema, Bun.YAML.parse(config.models), "models.yml"),
-      roles: validate(rolesConfigurationSchema, Bun.YAML.parse(config.roles), "roles.yml"),
+      roles: config.selectors,
     };
   }
 
@@ -421,22 +473,25 @@ export class Runtime {
     }));
     return {
       providers,
+      role_definitions: [...this.roleDefinitions.values()],
       definitions: { models, roles },
       definition_schema: getModelsConfigSchema().in.toJsonSchema(),
       selectors: config.selectors,
-      roles: config.allowed.length ? Object.fromEntries(
-        ROLE_NAMES.map((role) => {
-          const resolved = this.resolve(config, role);
-          return [
-            role,
-            {
-              provider: resolved.model!.provider,
-              model: resolved.model!.id,
-              thinkingLevel: resolved.thinkingLevel,
-            },
-          ];
-        }),
-      ) : {},
+      roles: config.allowed.length
+        ? Object.fromEntries(
+            [...this.roleDefinitions.keys()].map((role) => {
+              const resolved = this.resolve(config, role);
+              return [
+                role,
+                {
+                  provider: resolved.model!.provider,
+                  model: resolved.model!.id,
+                  thinkingLevel: resolved.thinkingLevel,
+                },
+              ];
+            }),
+          )
+        : {},
       usage: this.usage,
     };
   }
@@ -528,6 +583,55 @@ export class Runtime {
     }
   }
 
+  private async info() {
+    const config = await this.load();
+    const definitions = validate(
+      modelsConfigurationSchema,
+      Bun.YAML.parse(config.models),
+      "models.yml",
+    );
+    const providers = Object.entries(definitions.providers).map(([id, p]) => ({
+      id,
+      auth: p.auth ?? "apiKey",
+      configured: p.auth === "none" || !!p.apiKey || this.auth!.credentials.list(id).length > 0,
+      source: p.apiKey ? ProviderSource.CONFIG : ProviderSource.PROJECT,
+    }));
+    const roles = config.allowed.length
+      ? Object.fromEntries(
+          [...this.roleDefinitions.keys()].map((role) => {
+            const r = this.resolve(config, role);
+            return [
+              role,
+              { provider: r.model!.provider, model: r.model!.id, thinkingLevel: r.thinkingLevel },
+            ];
+          }),
+        )
+      : {};
+    return {
+      providers,
+      role_definitions: [...this.roleDefinitions.values()],
+      roles,
+      usage: this.usage,
+    };
+  }
+
+  async dispatch(
+    method:
+      | IpcMethod.CATALOG
+      | IpcMethod.ROLES_SYNC
+      | IpcMethod.MODELS_SET
+      | IpcMethod.PROVIDER_SET
+      | IpcMethod.PROVIDER_REMOVE
+      | IpcMethod.ROLE_SET,
+    params: Record<string, unknown>,
+    emit: Emit,
+  ): ReturnType<Runtime["catalog"]>;
+  async dispatch(
+    method: IpcMethod.INFO | IpcMethod.CONFIGURE,
+    params: Record<string, unknown>,
+    emit: Emit,
+  ): ReturnType<Runtime["info"]>;
+  async dispatch(method: IpcMethod, params: Record<string, unknown>, emit: Emit): Promise<unknown>;
   async dispatch(method: IpcMethod, params: Record<string, unknown>, emit: Emit): Promise<unknown> {
     if (this.persistenceError) throw this.persistenceError;
     const result = await this.dispatchRequest(method, params, emit);
@@ -556,11 +660,7 @@ export class Runtime {
       try {
         const config = await this.load();
         controller.signal.throwIfAborted();
-        const role = validate(
-          agentRoleSchema,
-          params.role ?? AgentRole.BOARD_RECOGNITION,
-          "agent role",
-        );
+        const role = validate(agentRoleSchema, params.role ?? AgentRole.DEFAULT, "agent role");
         const resolved = this.resolve(config, role);
         const response = await generate(
           await this.requestModel(resolved.model!, id),
@@ -574,6 +674,23 @@ export class Runtime {
       } finally {
         this.generations.delete(id);
       }
+    }
+    if (method === IpcMethod.ROLES_SYNC) {
+      const previous = this.roleDefinitions;
+      this.setRoles(roleDefinitionsSchema.assert(params.roles));
+      try {
+        const config = await this.load();
+        await this.storeConfiguration(
+          await this.configuration(
+            config.models,
+            Bun.YAML.stringify(params.selectors ?? config.selectors),
+          ),
+        );
+      } catch (error) {
+        this.roleDefinitions = previous;
+        throw error;
+      }
+      return this.catalog();
     }
     if (method === IpcMethod.CONFIGURE) {
       const config = await this.configuration(
@@ -633,6 +750,7 @@ export class Runtime {
     }
     if (method === IpcMethod.ROLE_SET) {
       const role = validate(agentRoleSchema, params.role, "agent role");
+      if (!this.roleDefinitions.has(role)) throw new Error(`Unknown role: ${role}`);
       const { models, roles } = await this.definitions();
       return this.applyEdited(models, { ...roles, [role]: String(params.selector) });
     }
@@ -648,34 +766,7 @@ export class Runtime {
       await this.auth!.credentials.remove(String(params.provider));
       return { ok: true };
     }
-    if (method === IpcMethod.INFO) {
-      const config = await this.load();
-      const definitions = validate(
-        modelsConfigurationSchema,
-        Bun.YAML.parse(config.models),
-        "models.yml",
-      );
-      const providers = Object.entries(definitions.providers).map(([id, p]) => ({
-        id,
-        auth: p.auth ?? "apiKey",
-        configured: p.auth === "none" || !!p.apiKey || this.auth!.credentials.list(id).length > 0,
-        source: p.apiKey ? ProviderSource.CONFIG : ProviderSource.PROJECT,
-      }));
-      const roles = config.allowed.length ? Object.fromEntries(
-        ROLE_NAMES.map((role) => {
-          const r = this.resolve(config, role);
-          return [
-            role,
-            { provider: r.model!.provider, model: r.model!.id, thinkingLevel: r.thinkingLevel },
-          ];
-        }),
-      ) : {};
-      return {
-        providers,
-        roles,
-        usage: this.usage,
-      };
-    }
+    if (method === IpcMethod.INFO) return this.info();
     if (method === IpcMethod.CREATE_SESSION || method === IpcMethod.REOPEN_SESSION) {
       const config = await this.load();
       const id = String(params.id);
@@ -696,6 +787,10 @@ export class Runtime {
           method === IpcMethod.REOPEN_SESSION ? await this.savedTranscriptPath(id) : undefined;
         const role = validate(agentRoleSchema, params.role ?? AgentRole.DEFAULT, "agent role");
         const resolved = this.resolve(config, role);
+        const extensions = extensionsSchema.assert(params.extensions ?? {});
+        const taskPrompt = [String(params.prompt ?? ""), ...(extensions.prompts ?? [])]
+          .filter(Boolean)
+          .join("\n\n");
         const compact = this.resolve(config, AgentRole.COMPACTION);
         const cwd = path.join(this.root, "workspaces", id);
         await mkdir(cwd, { recursive: true });
@@ -721,7 +816,32 @@ export class Runtime {
             ]),
           ),
         });
-        const reviewOptions = (params.meta as { review?: ReviewOptions } | undefined)?.review;
+        const declaredReview = (params.meta as { review?: ReviewOptions } | undefined)?.review;
+        const reviewOptions = declaredReview
+          ? {
+              ...declaredReview,
+              targets: [
+                ...new Set([
+                  ...declaredReview.targets,
+                  ...(extensions.review_targets ?? []),
+                  ...(extensions.reviewer?.review_targets ?? []),
+                ]),
+              ],
+              prompt: [
+                declaredReview.prompt,
+                ...(extensions.review_criteria ?? []),
+                ...(extensions.reviewer?.review_criteria ?? []),
+              ].join("\n\n"),
+            }
+          : undefined;
+        if (reviewOptions) {
+          if (!reviewOptions.targets.length) throw new Error("Review requires a target");
+          for (const name of [...reviewOptions.targets, ...reviewOptions.sources]) {
+            if (!workspace.files.has(path.resolve(cwd, name)))
+              throw new Error(`Unknown review file: ${name}`);
+          }
+          reviewOptions.prompt += `\n\nReview targets: ${JSON.stringify(reviewOptions.targets)}. Findings must use these exact file_path values.`;
+        }
         const gate = reviewOptions
           ? new ReviewGate(cwd, reviewOptions, async (role, prompt, files, signal, operation) => {
               const child = `${id}-review`;
@@ -761,6 +881,8 @@ export class Runtime {
                       files,
                       readonly: Object.keys(files),
                       tools: [WorkspaceTool.READ, WorkspaceTool.GREP, WorkspaceTool.GLOB],
+                      extensions: extensions.reviewer ?? {},
+                      meta: { review_targets: reviewOptions.targets },
                     },
                     childEvents,
                   );
@@ -770,29 +892,15 @@ export class Runtime {
                   signal.throwIfAborted();
                 }
                 signal?.throwIfAborted();
-                let instruction = prompt;
-                for (;;) {
-                  signal?.throwIfAborted();
-                  const result = (await this.dispatch(
-                    IpcMethod.RUN,
-                    { session_id: child, instruction },
-                    childEvents,
-                  )) as {
-                    error?: string;
-                    final_message: string;
-                    final_message_block_ids: string[];
-                  };
-                  if (result.error) throw new Error(result.error);
-                  signal?.throwIfAborted();
-                  try {
-                    parseReviewReport(result.final_message);
-                  } catch (error) {
-                    instruction = `${error instanceof Error ? error.message : String(error)}\nReturn a corrected JSON report that satisfies the review schema.`;
-                    continue;
-                  }
-                  output = result;
-                  return result.final_message;
-                }
+                const result = (await this.dispatch(
+                  IpcMethod.RUN,
+                  { session_id: child, instruction: prompt },
+                  childEvents,
+                )) as { error?: string; final_message: string; final_message_block_ids: string[] };
+                if (result.error) throw new Error(result.error);
+                signal?.throwIfAborted();
+                output = result;
+                return result.final_message;
               } finally {
                 signal?.removeEventListener("abort", abort);
                 reviewerEvent({
@@ -825,6 +933,54 @@ export class Runtime {
             ),
           }));
         };
+        const customTools = extensionTools(
+          extensions.tools ?? [],
+          async (name, parameters, signal) => {
+            if (!this.callback) throw new Error("Runtime callback handler is unavailable");
+            return this.callback(
+              {
+                session_id: id,
+                role,
+                kind: "tool",
+                name,
+                arguments: {
+                  parameters,
+                  workspace: Object.fromEntries(
+                    [...workspace.files.keys()].map((file) => [path.relative(cwd, file), file]),
+                  ),
+                },
+              },
+              signal,
+            );
+          },
+        );
+        for (const tool of extensions.tools ?? []) {
+          if (Object.values(WorkspaceTool).includes(tool.name as WorkspaceTool))
+            throw new Error(`Reserved tool name: ${tool.name}`);
+        }
+        if (gate) customTools.push(gate.tool());
+        const toolNames = [
+          ...new Set([
+            ...((params.tools ?? []) as string[]),
+            ...customTools.map((tool) => tool.name),
+          ]),
+        ];
+        const available = new Set([
+          ...Object.values(WorkspaceTool).filter((name) => name !== WorkspaceTool.REVIEW_NOTES),
+          ...customTools.map((tool) => tool.name),
+        ]);
+        const unique = new Set<string>();
+        for (const tool of customTools) {
+          if (
+            unique.has(tool.name) ||
+            (Object.values(WorkspaceTool).includes(tool.name as WorkspaceTool) &&
+              tool.name !== WorkspaceTool.REVIEW_NOTES)
+          )
+            throw new Error(`Duplicate tool: ${tool.name}`);
+          unique.add(tool.name);
+        }
+        for (const name of toolNames)
+          if (!available.has(name)) throw new Error(`Unknown tool: ${name}`);
         const manager = saved
           ? await this.openSavedSession(id, saved)
           : SessionManager.create(cwd, sessionDir);
@@ -842,13 +998,12 @@ export class Runtime {
           },
           thinkingLevel: resolved.thinkingLevel,
           sessionManager: manager,
-          toolNames: [
-            ...((params.tools ?? []) as string[]),
-            ...(gate ? [WorkspaceTool.REVIEW_NOTES] : []),
-          ],
+          toolNames,
           restrictToolNames: true,
           allowRestrictedCustomTools: true,
-          customTools: gate ? [Object.assign(gate.tool(), { __isToolDefinition: true })] : [],
+          customTools: customTools.map((tool) =>
+            Object.assign(tool, { __isToolDefinition: true as const }),
+          ),
           preloadedPreparedExtensions: [
             {
               path: "<classroom-compaction>",
@@ -879,7 +1034,7 @@ export class Runtime {
         const sessionFile = manager.getSessionFile();
         if (sessionFile) await writeFile(pointer, sessionFile, { mode: 0o600 });
         for (const tool of result.session.agent.state.tools) {
-          if (tool.name === WorkspaceTool.REVIEW_NOTES) continue;
+          if (unique.has(tool.name)) continue;
           const execute = tool.execute.bind(tool);
           Object.defineProperty(tool, "openArgStream", { value: undefined, configurable: true });
           tool.execute = async (callId, args, signal, onUpdate, context) => {
@@ -888,7 +1043,7 @@ export class Runtime {
               getActiveModelString: () => resolved.model!.id,
             });
             await workspace.check(
-              validate(workspaceToolSchema, tool.name, "workspace tool"),
+              tool.name as WorkspaceTool,
               args,
               mode === "none" ? "replace" : mode,
             );
@@ -918,7 +1073,9 @@ export class Runtime {
           emit,
           review: gate,
           reviewerId: gate ? `${id}-review` : undefined,
-          taskPrompt: saved ? undefined : String(params.prompt ?? ""),
+          taskPrompt: saved ? (extensions.prompts ?? []).join("\n\n") : taskPrompt,
+          extensions,
+          reviewTargets: (params.meta as { review_targets?: string[] } | undefined)?.review_targets,
         });
         return { id, model: result.session.model?.id ?? "" };
       } finally {
@@ -961,6 +1118,7 @@ export class Runtime {
         inbox: [],
         generation: 0,
         cancelled: false,
+        controller: new AbortController(),
         notification: Promise.withResolvers<void>(),
         done: Promise.withResolvers<void>(),
       };
@@ -968,6 +1126,8 @@ export class Runtime {
       conversation.emit = emit;
       let steps = 0;
       const stopExecution = observeExecution(conversation.session, emit, id);
+      const toolCalls: ToolCallRecord[] = [];
+      const pendingTools = new Map<string, { name: string; arguments: unknown }>();
       const unsubscribe = conversation.session.subscribe((event) => {
         const base = { session_id: id, step: steps };
         if (event.type === "turn_start") {
@@ -984,6 +1144,8 @@ export class Runtime {
           this.recordUsage(event.message.provider, event.message.model, event.message.usage);
         }
         if (event.type === "tool_execution_start")
+          pendingTools.set(event.toolCallId, { name: event.toolName, arguments: event.args });
+        if (event.type === "tool_execution_start")
           emit(RuntimeEvent.TOOL_CALL, {
             ...base,
             name: event.toolName,
@@ -991,6 +1153,11 @@ export class Runtime {
             tool_call_id: event.toolCallId,
           });
         if (event.type === "tool_execution_end") {
+          const call = pendingTools.get(event.toolCallId);
+          if (call) {
+            toolCalls.push({ ...call, result: event.result });
+            pendingTools.delete(event.toolCallId);
+          }
           emit(RuntimeEvent.TOOL_RESULT, {
             ...base,
             name: event.toolName,
@@ -1095,6 +1262,42 @@ export class Runtime {
               "The saved notes do not have a passing review. Call review_notes, address its findings, and obtain approval for the saved notes before completing.",
             ];
             continue;
+          }
+          if (conversation.reviewTargets || conversation.extensions.completion_hooks?.length) {
+            const reasons = await completionHooks(
+              this.finalText(conversation),
+              conversation.reviewTargets,
+              conversation.extensions.completion_hooks ?? [],
+              async (name) => {
+                if (!this.callback) throw new Error("Runtime callback handler is unavailable");
+                return this.callback(
+                  {
+                    session_id: id,
+                    role: conversation.role,
+                    kind: "completion_hook",
+                    name,
+                    arguments: {
+                      text: this.finalText(conversation),
+                      tool_calls: toolCalls,
+                      workspace: Object.fromEntries(
+                        [...conversation.workspace.files.keys()].map((file) => [
+                          path.relative(conversation.workspace.cwd, file),
+                          file,
+                        ]),
+                      ),
+                    },
+                  },
+                  control.controller.signal,
+                );
+              },
+            );
+            if (control.cancelled) throw new Error("Agent run cancelled");
+            if (generation !== control.generation || control.inbox.length || control.barrier)
+              continue;
+            if (reasons.length) {
+              prompts = [reasons.join("\n\n")];
+              continue;
+            }
           }
           control.acceptingMessages = false;
           break;

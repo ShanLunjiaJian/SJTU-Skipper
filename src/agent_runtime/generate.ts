@@ -9,14 +9,7 @@ import type {
   TextContent,
   SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import {
-  AgentRole,
-  ReasoningMode,
-  RuntimeEvent,
-  type Emit,
-  generateInputSchema,
-  validate,
-} from "./schemas";
+import { ReasoningMode, RuntimeEvent, type Emit, generateInputSchema, validate } from "./schemas";
 
 enum AttemptOutcome {
   THINKING_LOOP = "thinking_loop",
@@ -94,7 +87,10 @@ export async function generate(
         : input.reasoning,
     forceReasoningOff: input.reasoning === ReasoningMode.OFF,
   };
-  const board = (input.role ?? AgentRole.BOARD_RECOGNITION) === AgentRole.BOARD_RECOGNITION;
+  const board = messages.some(
+    (message) =>
+      Array.isArray(message.content) && message.content.some((part) => part.type === "image"),
+  );
   let attempts = 0;
   let result;
   if (board) {

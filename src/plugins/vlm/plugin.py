@@ -29,7 +29,7 @@ from PIL import Image
 
 from core.coverage import CoverageStore, skip_coverage
 from core.events import Event
-from core.agent_types import AgentRole, FinishReason, GenerationErrorCode, IpcMethod
+from core.agent_types import FinishReason, GenerationErrorCode, IpcMethod
 from core.plugin import Plugin, PluginContext
 from core.settings_spec import SettingType, SettingsSpec
 from core.streams import StreamKind, TextSource, VideoFrame
@@ -149,6 +149,9 @@ class VlmPlugin(Plugin):
     def setup(self, ctx: PluginContext) -> None:
         self._ctx = ctx
         self._llm = ctx.require("llm")
+        self._llm.register_role(
+            self.id, "board_recognition", "板书识别", input=("text", "image")
+        )
         self._lock = threading.RLock()
         self._persist_lock = threading.Lock()
         self._worker: threading.Thread | None = None
@@ -623,7 +626,7 @@ class VlmPlugin(Plugin):
         try:
             response = self._llm.call(
                 IpcMethod.GENERATE,
-                role=AgentRole.BOARD_RECOGNITION,
+                role="board_recognition",
                 messages=messages,
                 temperature=0.1,
                 loop_max_attempts=max_attempts,
@@ -1006,7 +1009,7 @@ class VlmPlugin(Plugin):
             start=start,
             end=end,
             chars=len(text),
-            role=AgentRole.BOARD_RECOGNITION,
+            role="board_recognition",
         )
 
         with self._lock:

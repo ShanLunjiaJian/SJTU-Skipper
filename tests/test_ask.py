@@ -9,7 +9,6 @@ from config import load_config
 from core.agent_types import (
     AgentEvent,
     AgentEventType,
-    AgentRole,
     ExecutionBlockKind,
     ExecutionBlockStatus,
     ExecutionRole,
@@ -146,7 +145,7 @@ def test_instant_ask_answers_and_persists_fold(tmp_path: Path) -> None:
         declaration = next(
             params for method, params in llm.calls if method == IpcMethod.CREATE_SESSION
         )
-        assert declaration["role"] == AgentRole.ASK_INSTANT
+        assert declaration["role"] == "ask_instant"
         assert declaration["tools"] == []
         prompt = llm.runs[0]["instruction"]
         assert "第一段：这是定义。" in prompt
@@ -186,7 +185,7 @@ def test_research_ask_reads_complete_snapshot(tmp_path: Path) -> None:
                 for name, path in declaration["files"].items()
             }
         )
-        assert declaration["role"] == AgentRole.ASK_RESEARCH
+        assert declaration["role"] == "ask_research"
         assert declaration["tools"] == ["read", "grep", "glob"]
         assert set(declaration["readonly"]) == set(declaration["files"])
         yield {

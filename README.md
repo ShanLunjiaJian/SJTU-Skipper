@@ -102,7 +102,7 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 | `agent`    | SDK 多会话助手，原生 read/grep/glob/edit/write，流式事件与文件授权                                      |
 | `notes`    | 整理分段笔记、汇总与审阅，提供笔记页面及课后 direct/fill/skip 策略                                      |
 | `ask`      | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存                                     |
-| `reader`   | 通用 Markdown 阅读页（按课次与笔记种类打开），持有选中菜单与内联问答块                                   |
+| `reader`   | 通用 Markdown 阅读页（按课次与笔记种类打开），持有选中菜单与内联问答块                                  |
 
 分段核心区间由 `notes.chunk_seconds` 设置，`notes.overlap_seconds` 提供左侧原文上下文．重叠原文不重复计入正文．`notes.concurrency` 限制笔记 agent 并发数．分段预览标为未审阅；`note_review` 统一检查完整笔记的来源覆盖与正确性．
 
@@ -138,7 +138,7 @@ bun run check:types
 
 确定性测试使用脚本化运行时与本地请求记录，覆盖配置、IPC、授权和应用行为．真实模型验收单独执行并保存请求与文稿记录．
 
-TypeScript 由项目 devShell 提供；`check:types` 使用根目录 `tsconfig.json`．
+TypeScript 由项目 devShell 提供；`check:types` 使用根目录 `tsconfig.json`，检查运行时及其测试文件．
 
 ## 说明
 

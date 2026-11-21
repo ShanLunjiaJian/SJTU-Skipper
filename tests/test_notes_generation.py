@@ -30,7 +30,7 @@ from plugins.notes.types import (
 from core.ui import BlockType
 from plugins.notes.pipeline import NotesPipeline
 from plugins.notes.prompts import NOTE_HEADERS, SOURCE_FILENAME
-from tests.support import FakeSettings
+from tests.support import FakeLLM, FakeSettings
 
 
 def test_visual_gap_survives_reload(tmp_path):
@@ -226,7 +226,7 @@ def test_execution_blocks_and_review_invalidation():
         emit(
             AgentEventType.REVIEWER,
             reviewer_id="coverage",
-            role=AgentRole.NOTE_REVIEW,
+            role="note_review",
             round=1,
             **payload,
         )
@@ -288,7 +288,7 @@ def test_review_replaces_only_final_output(correct):
                 {
                     "session_id": "writer",
                     "reviewer_id": "reviewer",
-                    "role": AgentRole.NOTE_REVIEW,
+                    "role": "note_review",
                     "round": round,
                     **payload,
                 },
@@ -411,7 +411,7 @@ class ScriptedNoteAgent:
             return AgentSessionInfo(
                 id=session_id,
                 name=name,
-                role=AgentRole(session.role),
+                role=session.role,
                 model="fake-model",
             )
 
@@ -423,7 +423,7 @@ class ScriptedNoteAgent:
         return AgentSessionInfo(
             id=session.id,
             name=session.name,
-            role=AgentRole(session.role),
+            role=session.role,
             model="fake-model",
         )
 
@@ -503,6 +503,8 @@ def note_pipeline(tmp_path, run, *, settings=None, releases=()):
     values.update(settings or {})
     config = FakeSettings(values)
     ctx = SimpleNamespace(
+        plugin_id="notes",
+        llm=FakeLLM(),
         data_dir=tmp_path,
         streams=hub,
         require=lambda name: config if name == "settings" else agent,
@@ -954,13 +956,20 @@ def saved_writer(pipeline, sid="lecture"):
         writer={
             "session_id": "writer",
             "name": "Saved writer",
-            "role": AgentRole.NOTE_WRITER,
+            "role": "note_writer",
             "system_prompt": "Saved system",
             "tools": [AgentToolName.READ, AgentToolName.WRITE],
             "directory": "final/frozen",
             "files": files,
             "readonly": [SOURCE_FILENAME, "index.md"],
-            "review": {"prompt": "Review", "system": "Reviewer", "maxRounds": 3},
+            "review": {
+                "role": "note_review",
+                "prompt": "Review",
+                "system": "Reviewer",
+                "maxRounds": 3,
+                "targets": list(NOTE_HEADERS),
+                "sources": [SOURCE_FILENAME],
+            },
         },
     )
     pipeline._save(state)
@@ -1366,7 +1375,7 @@ def test_stale_review_does_not_show_passed(tmp_path):
                     {
                         "session_id": "writer",
                         "reviewer_id": "review-child",
-                        "role": AgentRole.NOTE_REVIEW,
+                        "role": "note_review",
                         "finished": True,
                         "round": 1,
                         "stale": True,

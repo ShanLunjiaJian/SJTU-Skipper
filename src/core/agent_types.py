@@ -9,12 +9,6 @@ from typing import Any
 
 class AgentRole(StrEnum):
     DEFAULT = "default"
-    ASK_INSTANT = "ask_instant"
-    ASK_RESEARCH = "ask_research"
-    NOTE_CHUNK = "note_chunk"
-    NOTE_WRITER = "note_writer"
-    NOTE_REVIEW = "note_review"
-    BOARD_RECOGNITION = "board_recognition"
     COMPACTION = "compaction"
 
 
@@ -73,6 +67,7 @@ class IpcMethod(StrEnum):
     PROVIDER_SET = "provider_set"
     PROVIDER_REMOVE = "provider_remove"
     ROLE_SET = "role_set"
+    ROLES_SYNC = "roles_sync"
     GENERATE = "generate"
     CREATE_SESSION = "create_session"
     REOPEN_SESSION = "reopen_session"
@@ -114,16 +109,16 @@ class AgentToolName(StrEnum):
 
 @dataclass(slots=True)
 class AgentTool:
-    name: AgentToolName
+    name: str
 
 
 @dataclass(slots=True)
 class AgentProfile:
     name: str
-    role: AgentRole = AgentRole.DEFAULT
+    role: str = AgentRole.DEFAULT
     system_prompt: str = ""
     description: str = ""
-    tools: list[AgentTool] = field(default_factory=list)
+    tools: list[str | AgentTool] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -144,7 +139,7 @@ class AgentSessionInfo:
 
     id: str
     name: str = ""
-    role: AgentRole = AgentRole.DEFAULT
+    role: str = AgentRole.DEFAULT
     model: str = ""
     step: int = 0
     created_at: float = 0.0

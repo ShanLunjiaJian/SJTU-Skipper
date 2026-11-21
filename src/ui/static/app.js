@@ -467,10 +467,12 @@
   }
 
   function renderDisclosure(block, existing = null) {
-    const details = existing || el("details", { class: "disclosure" }, [
-      el("summary"),
-      el("div", { class: "disclosure-body" }),
-    ]);
+    const details =
+      existing ||
+      el("details", { class: "disclosure" }, [
+        el("summary"),
+        el("div", { class: "disclosure-body" }),
+      ]);
     if (!existing) details.open = Boolean(block.open);
     details.firstElementChild.textContent = block.title || "";
     updateBlocks(details.lastElementChild, block.blocks || []);
@@ -479,13 +481,15 @@
   }
 
   function renderTable(block, existing = null) {
-    const wrap = existing || el("div", { class: "table-block" }, [
-      el("div", { class: "table-responsive" }, [
-        el("table", { class: "table table-hover align-middle" }, [el("thead"), el("tbody")]),
-      ]),
-      el("p", { class: "fg-2 p-3", text: "暂无数据" }),
-      el("div", { class: "table-editor" }),
-    ]);
+    const wrap =
+      existing ||
+      el("div", { class: "table-block" }, [
+        el("div", { class: "table-responsive" }, [
+          el("table", { class: "table table-hover align-middle" }, [el("thead"), el("tbody")]),
+        ]),
+        el("p", { class: "fg-2 p-3", text: "暂无数据" }),
+        el("div", { class: "table-editor" }),
+      ]);
     const table = wrap.firstElementChild.firstElementChild;
     const [thead, tbody] = table.children;
     const columns = Array.isArray(block.columns) ? block.columns : [];
@@ -496,7 +500,8 @@
     const editorHost = wrap.children[2];
     editorHost.hidden = !sharedEditor;
     const selectedKey = rows.some((row) => row.id === wrap._selectedRow)
-      ? wrap._selectedRow : rows[0]?.id;
+      ? wrap._selectedRow
+      : rows[0]?.id;
     wrap._selectedRow = selectedKey;
     const selectRow = (id) => {
       wrap._selectedRow = id;
@@ -507,14 +512,18 @@
       }
       for (const panel of editorHost.children) panel.hidden = panel.dataset.row !== id;
     };
-    const previous = new Map(Array.from(tbody.children)
-      .filter((row) => row._rowKey !== undefined).map((row) => [row._rowKey, row]));
+    const previous = new Map(
+      Array.from(tbody.children)
+        .filter((row) => row._rowKey !== undefined)
+        .map((row) => [row._rowKey, row]),
+    );
     const wanted = new Set();
     const colLabel = (c) => (typeof c === "string" ? c : (c.label ?? c.key ?? ""));
     const colKey = (c, i) => (typeof c === "string" ? c : (c.key ?? i));
     const headRow = el("tr");
     for (const c of columns) headRow.appendChild(el("th", { scope: "col", text: colLabel(c) }));
-    if (rowActions.length || sharedEditor) headRow.appendChild(el("th", { scope: "col", text: "操作" }));
+    if (rowActions.length || sharedEditor)
+      headRow.appendChild(el("th", { scope: "col", text: "操作" }));
     thead.replaceChildren(headRow);
     const ordered = [];
     rows.forEach((row, index) => {
@@ -536,13 +545,16 @@
         const td = el("td", { class: "text-nowrap" });
         if (sharedEditor) {
           const button = el("button", {
-            type: "button", class: "btn-text theme-secondary btn-sm",
+            type: "button",
+            class: "btn-text theme-secondary btn-sm",
             "aria-label": `编辑 ${rowObj.title || rowObj.model || rowObj.role || key}`,
             title: `编辑 ${rowObj.title || rowObj.model || rowObj.role || key}`,
-            "aria-pressed": String(key === selectedKey), "data-edit-row": "",
+            "aria-pressed": String(key === selectedKey),
+            "data-edit-row": "",
           });
           // Bootstrap Icons: pencil-square.
-          button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M15.502 1.94a.5.5 0 0 1 0 .706L14.459 3.69l-2-2L13.502.646a.5.5 0 0 1 .707 0l1.293 1.293zm-1.75 2.456-2-2L4.939 9.21a.5.5 0 0 0-.121.196l-.805 2.414a.25.25 0 0 0 .316.316l2.414-.805a.5.5 0 0 0 .196-.12l6.813-6.814z"/><path fill-rule="evenodd" d="M1 13.5A1.5 1.5 0 0 0 2.5 15h11a1.5 1.5 0 0 0 1.5-1.5v-6a.5.5 0 0 0-1 0v6a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5H9a.5.5 0 0 0 0-1H2.5A1.5 1.5 0 0 0 1 2.5z"/></svg>';
+          button.innerHTML =
+            '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M15.502 1.94a.5.5 0 0 1 0 .706L14.459 3.69l-2-2L13.502.646a.5.5 0 0 1 .707 0l1.293 1.293zm-1.75 2.456-2-2L4.939 9.21a.5.5 0 0 0-.121.196l-.805 2.414a.25.25 0 0 0 .316.316l2.414-.805a.5.5 0 0 0 .196-.12l6.813-6.814z"/><path fill-rule="evenodd" d="M1 13.5A1.5 1.5 0 0 0 2.5 15h11a1.5 1.5 0 0 0 1.5-1.5v-6a.5.5 0 0 0-1 0v6a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5H9a.5.5 0 0 0 0-1H2.5A1.5 1.5 0 0 0 1 2.5z"/></svg>';
           button.addEventListener("click", () => selectRow(key));
           td.appendChild(button);
         }
@@ -566,17 +578,22 @@
           }
           if (action.icon === "trash") {
             // Bootstrap Icons: trash.
-            button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/><path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/></svg>';
+            button.innerHTML =
+              '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/><path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/></svg>';
           }
           if (action.icon === "link") {
             // Bootstrap Icons: link-45deg.
-            button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1 1 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4 4 0 0 1-.128-1.287z"/><path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243z"/></svg>';
+            button.innerHTML =
+              '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1 1 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4 4 0 0 1-.128-1.287z"/><path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243z"/></svg>';
           }
           if (action.icon === "key") {
             // Bootstrap Icons: key.
-            button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8m4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5"/><path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0"/></svg>';
+            button.innerHTML =
+              '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8m4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5"/><path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0"/></svg>';
           }
-          const before = rowObj.actions?.includes(action) ? td.querySelector("[data-edit-row]") : null;
+          const before = rowObj.actions?.includes(action)
+            ? td.querySelector("[data-edit-row]")
+            : null;
           td.insertBefore(button, before);
         }
         tr.appendChild(td);
@@ -596,15 +613,18 @@
         const cell = tr._detailsRow.firstElementChild;
         cell.colSpan = Math.max(1, columns.length + (rowActions.length ? 1 : 0));
         const title = rowObj.title || rowObj.name || rowObj.model || rowObj.role || rowObj.id || "";
-        const disclosure = renderDisclosure({ title: `编辑 ${title}`, blocks: rowObj.details },
-          cell.firstElementChild);
+        const disclosure = renderDisclosure(
+          { title: `编辑 ${title}`, blocks: rowObj.details },
+          cell.firstElementChild,
+        );
         if (!cell.firstElementChild) cell.appendChild(disclosure);
         wanted.add(tr._detailsRow);
         ordered.push(tr._detailsRow);
       }
     });
     ordered.forEach((row, index) => {
-      if (tbody.children[index] !== row) moveActivityNode(tbody, row, tbody.children[index] || null);
+      if (tbody.children[index] !== row)
+        moveActivityNode(tbody, row, tbody.children[index] || null);
     });
     for (const row of Array.from(tbody.children)) {
       if (wanted.has(row)) continue;
@@ -992,8 +1012,8 @@
     form.addEventListener("change", applyVisibility);
     for (const control of Array.from(form.elements)) {
       if (control.name)
-        control._initialValue = control.type === FIELD_INPUT.CHECKBOX
-          ? control.checked : control.value;
+        control._initialValue =
+          control.type === FIELD_INPUT.CHECKBOX ? control.checked : control.value;
     }
     return form;
   }
@@ -1018,11 +1038,18 @@
   function renderSchemaForm(block, existing = null) {
     const form = existing || el("form", { class: "settings-form schema-form" });
     form._schemaBlock = block;
-    if (existing && (form._dirty || form._saving || form._schemaSignature === JSON.stringify(block)))
+    if (
+      existing &&
+      (form._dirty || form._saving || form._schemaSignature === JSON.stringify(block))
+    )
       return form;
     form._schemaSignature = JSON.stringify(block);
-    const disclosureStates = new Map(Array.from(form.querySelectorAll("details[data-path]"),
-      (details) => [details.dataset.path, details.open]));
+    const disclosureStates = new Map(
+      Array.from(form.querySelectorAll("details[data-path]"), (details) => [
+        details.dataset.path,
+        details.open,
+      ]),
+    );
     form.replaceChildren();
     const rootSchema = block.schema || {};
     const resolve = (schema) => {
@@ -1031,22 +1058,31 @@
         let target = rootSchema;
         for (const part of schema.$ref.slice(2).split("/"))
           target = target?.[part.replace(/~1/g, "/").replace(/~0/g, "~")];
-        return { ...resolve(target), ...Object.fromEntries(Object.entries(schema)
-          .filter(([key]) => key !== "$ref")) };
+        return {
+          ...resolve(target),
+          ...Object.fromEntries(Object.entries(schema).filter(([key]) => key !== "$ref")),
+        };
       }
       if (schema.allOf) {
-        const merged = { ...schema, properties: { ...schema.properties }, required: [...(schema.required || [])] };
+        const merged = {
+          ...schema,
+          properties: { ...schema.properties },
+          required: [...(schema.required || [])],
+        };
         for (const item of schema.allOf) {
           const part = resolve(item);
-          Object.assign(merged, part, { properties: { ...merged.properties, ...part.properties },
-            required: [...merged.required, ...(part.required || [])] });
+          Object.assign(merged, part, {
+            properties: { ...merged.properties, ...part.properties },
+            required: [...merged.required, ...(part.required || [])],
+          });
         }
         delete merged.allOf;
         return merged;
       }
       return schema;
     };
-    const typeOf = (value) => value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+    const typeOf = (value) =>
+      value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
     const seed = (schema) => {
       schema = resolve(schema);
       if (schema.default !== undefined) return structuredClone(schema.default);
@@ -1054,13 +1090,28 @@
       if (schema.enum) return schema.enum[0];
       if (schema.anyOf || schema.oneOf) return seed((schema.anyOf || schema.oneOf)[0]);
       const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
-      return type === "object" || schema.properties ? {} : type === "array" ? []
-        : type === "number" || type === "integer" ? 0 : type === "boolean" ? false
-          : type === "null" ? null : "";
+      return type === "object" || schema.properties
+        ? {}
+        : type === "array"
+          ? []
+          : type === "number" || type === "integer"
+            ? 0
+            : type === "boolean"
+              ? false
+              : type === "null"
+                ? null
+                : "";
     };
     const localButton = (label, callback) => {
-      const button = el("button", { type: "button", class: "btn-solid theme-secondary btn-sm", text: label });
-      button.addEventListener("click", () => { callback(); form._dirty = true; });
+      const button = el("button", {
+        type: "button",
+        class: "btn-solid theme-secondary btn-sm",
+        text: label,
+      });
+      button.addEventListener("click", () => {
+        callback();
+        form._dirty = true;
+      });
       return button;
     };
     const field = (rawSchema, value, title, optional = false, path = title) => {
@@ -1085,7 +1136,11 @@
         ]);
         details.open = disclosureStates.get(path) || false;
         const content = el("div", { class: "disclosure-body" });
-        const enabled = el("input", { type: "checkbox", class: "check", dataset: { path: `${path}:enabled` } });
+        const enabled = el("input", {
+          type: "checkbox",
+          class: "check",
+          dataset: { path: `${path}:enabled` },
+        });
         enabled.checked = value !== undefined;
         const holder = el("div");
         let child;
@@ -1096,48 +1151,78 @@
           }
           holder.hidden = !enabled.checked;
         };
-        content.append(el("label", { class: "schema-option" }, [enabled,
-          document.createTextNode("启用")]), holder);
+        content.append(
+          el("label", { class: "schema-option" }, [enabled, document.createTextNode("启用")]),
+          holder,
+        );
         details.appendChild(content);
         enabled.addEventListener("change", mount);
-        details.addEventListener("toggle", () => { if (details.open) mount(); });
+        details.addEventListener("toggle", () => {
+          if (details.open) mount();
+        });
         if (details.open) mount();
-        return { node: details, read: () => !enabled.checked ? undefined : child ? child.read()
-          : value === undefined ? seed(schema) : value };
+        return {
+          node: details,
+          read: () =>
+            !enabled.checked
+              ? undefined
+              : child
+                ? child.read()
+                : value === undefined
+                  ? seed(schema)
+                  : value,
+        };
       }
       let omitted = null;
       if (optional && !booleanField) {
         omitted = el("input", { type: "checkbox", class: "check" });
         omitted.checked = grouped ? value !== undefined : value === undefined;
-        const label = el("label", { class: "schema-option" }, [omitted,
-          document.createTextNode(grouped ? "启用" : "使用默认值")]);
+        const label = el("label", { class: "schema-option" }, [
+          omitted,
+          document.createTextNode(grouped ? "启用" : "使用默认值"),
+        ]);
         box.appendChild(label);
-        const disabled = () => grouped ? !omitted.checked : omitted.checked;
+        const disabled = () => (grouped ? !omitted.checked : omitted.checked);
         body.disabled = disabled();
-        omitted.addEventListener("change", () => { body.disabled = disabled(); });
+        omitted.addEventListener("change", () => {
+          body.disabled = disabled();
+        });
       }
-      if (schema.description) box.appendChild(el("p", { class: "form-text", text: schema.description }));
+      if (schema.description)
+        box.appendChild(el("p", { class: "form-text", text: schema.description }));
       box.appendChild(body);
       let read;
-      const branches = schema.oneOf || schema.anyOf || (Array.isArray(schema.type)
-        ? schema.type.map((type) => ({ ...schema, type })) : null);
-      const declaredType = schema.type || (schema.properties || schema.additionalProperties ? "object" : undefined);
+      const branches =
+        schema.oneOf ||
+        schema.anyOf ||
+        (Array.isArray(schema.type) ? schema.type.map((type) => ({ ...schema, type })) : null);
+      const declaredType =
+        schema.type || (schema.properties || schema.additionalProperties ? "object" : undefined);
       if (branches || (!declaredType && !schema.enum && schema.const === undefined)) {
-        const options = branches || ["string", "number", "boolean", "null", "object", "array"]
-          .map((type) => ({ type }));
+        const options =
+          branches ||
+          ["string", "number", "boolean", "null", "object", "array"].map((type) => ({ type }));
         const selector = el("select", { class: "form-control", "aria-label": `${title} 类型` });
         const initial = value === undefined ? seed(options[0]) : value;
         const matches = (option) => {
           const candidate = resolve(option);
-          return candidate.const !== undefined ? candidate.const === initial
-            : candidate.enum ? candidate.enum.includes(initial)
-              : (candidate.type || (candidate.properties ? "object" : undefined)) === typeOf(initial)
-                || (candidate.type === "integer" && Number.isInteger(initial));
+          return candidate.const !== undefined
+            ? candidate.const === initial
+            : candidate.enum
+              ? candidate.enum.includes(initial)
+              : (candidate.type || (candidate.properties ? "object" : undefined)) ===
+                  typeOf(initial) ||
+                (candidate.type === "integer" && Number.isInteger(initial));
         };
         let selected = Math.max(0, options.findIndex(matches));
-        options.forEach((option, index) => selector.appendChild(el("option", {
-          value: String(index), text: option.title || option.type || `选项 ${index + 1}`,
-        })));
+        options.forEach((option, index) =>
+          selector.appendChild(
+            el("option", {
+              value: String(index),
+              text: option.title || option.type || `选项 ${index + 1}`,
+            }),
+          ),
+        );
         selector.value = String(selected);
         const holder = el("div");
         let child;
@@ -1153,48 +1238,76 @@
         body.append(selector, holder);
         read = () => child.read();
       } else if (declaredType === "object") {
-        const object = value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+        const object =
+          value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
         const properties = schema.properties || {};
         const fields = [];
         for (const [key, property] of Object.entries(properties)) {
-          const child = field(property, object[key], key, !(schema.required || []).includes(key),
-            path ? `${path}.${key}` : key);
+          const child = field(
+            property,
+            object[key],
+            key,
+            !(schema.required || []).includes(key),
+            path ? `${path}.${key}` : key,
+          );
           fields.push([key, child]);
           if (child.node) body.appendChild(child.node);
         }
         const rows = [];
         const list = el("div", { class: "schema-entries" });
-        const additional = typeof schema.additionalProperties === "object" ? schema.additionalProperties : {};
+        const additional =
+          typeof schema.additionalProperties === "object" ? schema.additionalProperties : {};
         const addEntry = (key, entryValue) => {
           const row = el("div", { class: "schema-entry" });
-          const keyInput = el("input", { class: "form-control", value: key, "aria-label": `${title} 参数名` });
+          const keyInput = el("input", {
+            class: "form-control",
+            value: key,
+            "aria-label": `${title} 参数名`,
+          });
           const child = field(additional, entryValue, "参数值");
           const entry = { row, keyInput, child };
           rows.push(entry);
-          row.append(keyInput, child.node, localButton("删除", () => {
-            rows.splice(rows.indexOf(entry), 1); row.remove();
-          }));
+          row.append(
+            keyInput,
+            child.node,
+            localButton("删除", () => {
+              rows.splice(rows.indexOf(entry), 1);
+              row.remove();
+            }),
+          );
           list.appendChild(row);
         };
         for (const [key, entryValue] of Object.entries(object))
           if (!Object.hasOwn(properties, key)) addEntry(key, entryValue);
         if (schema.additionalProperties !== false || rows.length) {
-          body.append(el("h4", { class: "fs-md", text: Object.keys(properties).length ? "扩展参数" : title }), list);
+          body.append(
+            el("h4", { class: "fs-md", text: Object.keys(properties).length ? "扩展参数" : title }),
+            list,
+          );
           body.appendChild(localButton("添加参数", () => addEntry("", seed(additional))));
         }
         read = () => {
           const result = {};
           for (const [key, child] of fields) {
             const entryValue = child.read();
-            if (entryValue !== undefined) Object.defineProperty(result, key,
-              { value: entryValue, enumerable: true, writable: true, configurable: true });
+            if (entryValue !== undefined)
+              Object.defineProperty(result, key, {
+                value: entryValue,
+                enumerable: true,
+                writable: true,
+                configurable: true,
+              });
           }
           for (const { keyInput, child } of rows) {
             const key = keyInput.value;
             if (Object.hasOwn(properties, key) || Object.hasOwn(result, key))
               throw new Error(`${title} 的参数名重复：${key}`);
-            Object.defineProperty(result, key, { value: child.read(), enumerable: true,
-              writable: true, configurable: true });
+            Object.defineProperty(result, key, {
+              value: child.read(),
+              enumerable: true,
+              writable: true,
+              configurable: true,
+            });
           }
           return result;
         };
@@ -1212,32 +1325,64 @@
             if (target < 0 || target >= entries.length) return;
             [entries[index], entries[target]] = [entries[target], entries[index]];
             entries.forEach((item, position) => {
-              if (list.children[position] !== item.row) list.insertBefore(item.row, list.children[position] || null);
+              if (list.children[position] !== item.row)
+                list.insertBefore(item.row, list.children[position] || null);
             });
           };
-          row.append(child.node, el("div", { class: "form-actions" }, [
-            localButton("上移", () => move(-1)), localButton("下移", () => move(1)),
-            localButton("删除", () => { entries.splice(entries.indexOf(entry), 1); row.remove(); }),
-          ]));
+          row.append(
+            child.node,
+            el("div", { class: "form-actions" }, [
+              localButton("上移", () => move(-1)),
+              localButton("下移", () => move(1)),
+              localButton("删除", () => {
+                entries.splice(entries.indexOf(entry), 1);
+                row.remove();
+              }),
+            ]),
+          );
           list.appendChild(row);
         };
         for (const item of Array.isArray(value) ? value : []) addItem(item);
-        body.append(list, localButton("添加项目", () => addItem(seed(schema.items || {}))));
+        body.append(
+          list,
+          localButton("添加项目", () => addItem(seed(schema.items || {}))),
+        );
         read = () => entries.map((entry) => entry.child.read());
       } else {
         const options = schema.enum || (schema.const !== undefined ? [schema.const] : null);
         let input;
         if (options || declaredType === "boolean" || declaredType === "null") {
-          const values = options || (declaredType === "null" ? [null]
-            : optional ? [undefined, true, false] : [true, false]);
+          const values =
+            options ||
+            (declaredType === "null"
+              ? [null]
+              : optional
+                ? [undefined, true, false]
+                : [true, false]);
           input = el("select", { class: "form-control", "aria-label": schema.title || title });
-          values.forEach((item, index) => input.appendChild(el("option", { value: String(index),
-            text: item === undefined ? "-" : typeof item === "string" ? item : JSON.stringify(item) })));
-          input.value = String(Math.max(0, values.findIndex((item) => item === value)));
+          values.forEach((item, index) =>
+            input.appendChild(
+              el("option", {
+                value: String(index),
+                text:
+                  item === undefined ? "-" : typeof item === "string" ? item : JSON.stringify(item),
+              }),
+            ),
+          );
+          input.value = String(
+            Math.max(
+              0,
+              values.findIndex((item) => item === value),
+            ),
+          );
           read = () => values[Number(input.value)];
         } else if (declaredType === "number" || declaredType === "integer") {
-          input = el("input", { type: "number", class: "form-control", "aria-label": schema.title || title,
-            step: declaredType === "integer" ? "1" : "any" });
+          input = el("input", {
+            type: "number",
+            class: "form-control",
+            "aria-label": schema.title || title,
+            step: declaredType === "integer" ? "1" : "any",
+          });
           if (value !== undefined) input.value = String(value);
           if (schema.minimum !== undefined) input.min = String(schema.minimum);
           if (schema.maximum !== undefined) input.max = String(schema.maximum);
@@ -1247,10 +1392,19 @@
             return Number(input.value);
           };
         } else {
-          const multiline = schema["x-multiline"] || (typeof value === "string" && value.includes("\n"));
+          const multiline =
+            schema["x-multiline"] || (typeof value === "string" && value.includes("\n"));
           input = multiline
-            ? el("textarea", { class: "form-control", rows: 3, "aria-label": schema.title || title })
-            : el("input", { type: "text", class: "form-control", "aria-label": schema.title || title });
+            ? el("textarea", {
+                class: "form-control",
+                rows: 3,
+                "aria-label": schema.title || title,
+              })
+            : el("input", {
+                type: "text",
+                class: "form-control",
+                "aria-label": schema.title || title,
+              });
           input.value = value === undefined ? "" : String(value);
           read = () => input.value;
         }
@@ -1258,20 +1412,32 @@
         input.dataset.path = path;
         input.name = path;
       }
-      return { node: box, read: () => (omitted && (grouped ? !omitted.checked : omitted.checked))
-        ? undefined : read() };
+      return {
+        node: box,
+        read: () =>
+          omitted && (grouped ? !omitted.checked : omitted.checked) ? undefined : read(),
+      };
     };
-    if (block.title) form.appendChild(el("h3", { class: "settings-form-title", text: block.title }));
-    if (block.description) form.appendChild(el("p", { class: "form-description", text: block.description }));
+    if (block.title)
+      form.appendChild(el("h3", { class: "settings-form-title", text: block.title }));
+    if (block.description)
+      form.appendChild(el("p", { class: "form-description", text: block.description }));
     const editor = field(rootSchema, block.value, block.title || "配置", false, "");
     const status = el("p", { class: "form-text", role: "status", "aria-live": "polite" });
-    const save = el("button", { type: "submit", class: "btn-solid theme-primary",
-      text: block.submit?.label || "保存" });
+    const save = el("button", {
+      type: "submit",
+      class: "btn-solid theme-primary",
+      text: block.submit?.label || "保存",
+    });
     form.append(editor.node, status, el("div", { class: "form-actions" }, [save]));
     form._dirty = false;
     if (!existing) {
-      form.addEventListener("input", () => { form._dirty = true; });
-      form.addEventListener("change", () => { form._dirty = true; });
+      form.addEventListener("input", () => {
+        form._dirty = true;
+      });
+      form.addEventListener("change", () => {
+        form._dirty = true;
+      });
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         event.stopPropagation();

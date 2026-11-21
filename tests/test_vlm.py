@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from core.media import MediaKind, ProcessingMode
 from core.streams import TextSource
-from core.agent_types import AgentRole, FinishReason, GenerationErrorCode, IpcMethod
+from core.agent_types import FinishReason, GenerationErrorCode, IpcMethod
 
 import base64
 import json
@@ -614,7 +614,7 @@ class TestVlmPlugin:
 
         method, last_call = fake_llm.calls[-1]
         assert method == IpcMethod.GENERATE
-        assert last_call["role"] == AgentRole.BOARD_RECOGNITION
+        assert last_call["role"] == "board_recognition"
         assert "model" not in last_call
         assert "extra" not in last_call
 

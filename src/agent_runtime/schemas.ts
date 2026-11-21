@@ -3,12 +3,6 @@ import type { AuthStorageData } from "@oh-my-pi/pi-ai";
 
 export enum AgentRole {
   DEFAULT = "default",
-  BOARD_RECOGNITION = "board_recognition",
-  NOTE_CHUNK = "note_chunk",
-  NOTE_WRITER = "note_writer",
-  NOTE_REVIEW = "note_review",
-  ASK_INSTANT = "ask_instant",
-  ASK_RESEARCH = "ask_research",
   COMPACTION = "compaction",
 }
 
@@ -22,6 +16,7 @@ export enum IpcMethod {
   PROVIDER_SET = "provider_set",
   PROVIDER_REMOVE = "provider_remove",
   ROLE_SET = "role_set",
+  ROLES_SYNC = "roles_sync",
   GENERATE = "generate",
   CREATE_SESSION = "create_session",
   REOPEN_SESSION = "reopen_session",
@@ -84,7 +79,7 @@ export enum ProviderSource {
 
 export type Emit = (name: RuntimeEvent, data: Record<string, unknown>) => void;
 
-export const agentRoleSchema = type.enumerated(...Object.values(AgentRole));
+export const agentRoleSchema = type("string").atLeastLength(1);
 export const workspaceToolSchema = type.enumerated(...Object.values(WorkspaceTool));
 
 const nonemptyString = type("string").atLeastLength(1);
@@ -208,21 +203,19 @@ export const modelsConfigurationSchema = type({
   "[string]": "unknown",
 });
 export type ModelsConfiguration = typeof modelsConfigurationSchema.infer;
-export const rolesConfigurationSchema = type({
-  "+": "reject",
-  default: nonemptyString,
-  board_recognition: nonemptyString,
-  note_chunk: nonemptyString,
-  note_writer: nonemptyString,
-  note_review: nonemptyString,
-  ask_instant: nonemptyString,
-  ask_research: nonemptyString,
-  compaction: nonemptyString,
+export const rolesConfigurationSchema = type({ "[string]": "unknown" });
+export const roleDefinitionSchema = type({
+  id: agentRoleSchema,
+  title: nonemptyString,
+  input: type.enumerated("text", "image").array(),
 });
+export const roleDefinitionsSchema = roleDefinitionSchema.array();
+export type RoleDefinition = typeof roleDefinitionSchema.infer;
 
 export const runtimeBootstrapSchema = type({
   "models?": modelsConfigurationSchema,
   "roles?": rolesConfigurationSchema,
+  "registered_roles?": roleDefinitionsSchema,
   credentials: credentialsSchema,
 });
 export interface PersistenceSnapshot {
@@ -231,7 +224,7 @@ export interface PersistenceSnapshot {
 }
 export interface RuntimePersistence {
   models?: ModelsConfiguration;
-  roles?: Record<string, string>;
+  roles?: Record<string, unknown>;
   credentials?: AuthStorageData;
   save: (snapshot: PersistenceSnapshot) => void;
 }
@@ -267,14 +260,37 @@ const roleSetParams = type({
   role: agentRoleSchema,
   selector: nonemptyString,
 });
+const extensionFields = {
+  "prompts?": "string[]",
+  "tools?": type({
+    name: nonemptyString,
+    description: "string",
+    parameters: { "[string]": "unknown" },
+    "label?": "string",
+  }).array(),
+  "review_targets?": "string[]",
+  "review_criteria?": "string[]",
+  "completion_hooks?": type({
+    owner: nonemptyString,
+    id: nonemptyString,
+    priority: "number.integer",
+  }).array(),
+} as const;
+export const extensionsSchema = type({
+  ...extensionFields,
+  "reviewer?": type(extensionFields),
+});
+export type SessionExtensions = typeof extensionsSchema.infer;
+
 export const createSessionInputSchema = type({
   "+": "reject",
   id: sessionId,
   "role?": agentRoleSchema,
+  "extensions?": extensionsSchema,
   "prompt?": "string",
   "files?": stringMap,
   "readonly?": "string[]",
-  "tools?": workspaceToolSchema.exclude(type.enumerated(WorkspaceTool.REVIEW_NOTES)).array(),
+  "tools?": "string[]",
   "meta?": { "[string]": "unknown" },
 });
 const sessionParams = type({ "+": "reject", session_id: sessionId });
@@ -287,6 +303,12 @@ export const ipcRequestSchema = type({
   method: type.enumerated(IpcMethod.PING, IpcMethod.INFO),
   params: emptyParams,
 })
+  .or({
+    "+": "reject",
+    id: nonemptyString,
+    method: type.enumerated(IpcMethod.ROLES_SYNC),
+    params: type({ roles: roleDefinitionsSchema, "selectors?": rolesConfigurationSchema }),
+  })
   .or({
     "+": "reject",
     id: nonemptyString,

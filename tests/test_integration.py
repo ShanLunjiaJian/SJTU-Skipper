@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from config import load_config
-from core.agent_types import AgentRole, IpcMethod
+from core.agent_types import IpcMethod
 from core.plugin import Plugin, PluginContext
 from core.runtime import build_runtime
 from plugins.agent import AgentPlugin
@@ -60,7 +60,7 @@ def test_chunk_notes_writes_three_files(tmp_path: Path) -> None:
             "note_gossip.md": "# 闲话\n\n" + "- 老师聊到 AI\n" * 3,
             "note_notice.md": "# 通知\n\n" + "- 作业 3.1\n" * 3,
         },
-        AgentRole.NOTE_CHUNK,
+        "note_chunk",
     )
     runtime = build_runtime(
         cfg,
@@ -121,7 +121,7 @@ def test_whole_lecture_notes_rewrites_outline(tmp_path: Path) -> None:
             "note_gossip.md": "# 闲话与分享\n\n",
             "note_notice.md": "# 通知\n\n## 作业\n\n- 习题 3.1\n",
         },
-        AgentRole.NOTE_WRITER,
+        "note_writer",
     )
     runtime = build_runtime(
         cfg,
@@ -250,7 +250,7 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
         assert "这是第一段笔记内容。" in prompt
         assert "第二段笔记内容。" in prompt
         assert "这一段的定义是什么？" in prompt
-        assert declaration["role"] == AgentRole.ASK_INSTANT
+        assert declaration["role"] == "ask_instant"
         assert declaration["tools"] == [], "instant asking must not expose tools"
     finally:
         runtime.stop()

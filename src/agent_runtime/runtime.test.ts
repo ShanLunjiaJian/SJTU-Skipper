@@ -3,7 +3,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
-import type { AuthStorageData } from "@oh-my-pi/pi-ai";
+import { Effort, type AuthStorageData } from "@oh-my-pi/pi-ai";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@oh-my-pi/pi-ai/oauth";
 import { Runtime } from "./runtime";
 import {
@@ -15,12 +15,28 @@ import {
   validate,
   runtimeBootstrapSchema,
   type PersistenceSnapshot,
+  type RoleDefinition,
 } from "./schemas";
+import type { RuntimeCallback } from "./extensions";
+
+const registeredRoles: RoleDefinition[] = [
+  { id: "note_chunk", title: "Chunk", input: ["text"] },
+  { id: "note_writer", title: "Writer", input: ["text"] },
+  { id: "note_review", title: "Review", input: ["text"] },
+  { id: "ask_instant", title: "Instant", input: ["text"] },
+  { id: "ask_research", title: "Research", input: ["text"] },
+  { id: "board_recognition", title: "Board", input: ["text", "image"] },
+  { id: "default", title: "Default", input: ["text"] },
+  { id: "compaction", title: "Compaction", input: ["text"] },
+];
 
 const fixedRoles = (defaultSelector: string): Record<string, string> =>
-  Object.fromEntries(Object.values(AgentRole).map(role => [
-    role, role === AgentRole.DEFAULT ? defaultSelector : "@default",
-  ]));
+  Object.fromEntries(
+    registeredRoles.map(({ id: role }) => [
+      role,
+      role === AgentRole.DEFAULT ? defaultSelector : "@default",
+    ]),
+  );
 
 test("first request creates missing runtime configuration", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "runtime-init-"));
@@ -46,21 +62,13 @@ test("default configuration persists once", async () => {
     await runtime.dispatch(IpcMethod.INFO, {}, () => {});
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0].settings?.models.providers.deepseek.models[0].id).toBe("deepseek-flash");
-    expect(snapshots[0].settings?.roles.board_recognition).toBe("deepseek/deepseek-flash:off");
     expect(snapshots[0].settings?.roles.default).toBe("deepseek/deepseek-flash:high");
     const catalog = await runtime.dispatch(IpcMethod.CATALOG, {}, () => {});
-    for (const role of [
-      AgentRole.NOTE_CHUNK,
-      AgentRole.NOTE_WRITER,
-      AgentRole.NOTE_REVIEW,
-      AgentRole.ASK_INSTANT,
-      AgentRole.ASK_RESEARCH,
-      AgentRole.COMPACTION,
-    ]) {
+    for (const role of [AgentRole.COMPACTION]) {
       expect(snapshots[0].settings?.roles[role]).toBe("@default");
       expect(catalog.roles[role]).toEqual(catalog.roles.default);
     }
-    expect(catalog.roles.default.thinkingLevel).toBe("high");
+    expect(catalog.roles.default.thinkingLevel).toBe(Effort.High);
     expect((await stat(path.join(root, "roles.yml"))).mode & 0o777).toBe(0o600);
   } finally {
     await runtime.close();
@@ -90,12 +98,17 @@ async function persistenceFixture(credentials: AuthStorageData = {}) {
     },
     "runtime bootstrap",
   );
-  const runtime = new Runtime(root, {
-    models: bootstrap.models,
-    roles: bootstrap.roles,
-    credentials: bootstrap.credentials,
-    save: (snapshot) => snapshots.push(structuredClone(snapshot)),
-  });
+  const runtime = new Runtime(
+    root,
+    {
+      models: bootstrap.models,
+      roles: bootstrap.roles,
+      credentials: bootstrap.credentials,
+      save: (snapshot) => snapshots.push(structuredClone(snapshot)),
+    },
+    undefined,
+    registeredRoles,
+  );
   const emit = (name: RuntimeEvent, data: Record<string, unknown>) => events.push({ name, data });
   return {
     root,
@@ -116,7 +129,9 @@ test("last provider deletion persists an unconfigured state", async () => {
   try {
     const before = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
     const removed = await fixture.runtime.dispatch(
-      IpcMethod.PROVIDER_REMOVE, { provider: "local" }, fixture.emit,
+      IpcMethod.PROVIDER_REMOVE,
+      { provider: "local" },
+      fixture.emit,
     );
     expect(removed.providers).toEqual([]);
     expect(removed.roles).toEqual({});
@@ -124,16 +139,32 @@ test("last provider deletion persists an unconfigured state", async () => {
     const settings = fixture.snapshots.at(-1)!.settings!;
     expect(settings.models.providers).toEqual({});
     await fixture.runtime.close();
-    restored = new Runtime(fixture.root, { ...settings, save: () => {} });
+    restored = new Runtime(
+      fixture.root,
+      { ...settings, save: () => {} },
+      undefined,
+      registeredRoles,
+    );
     expect((await restored.dispatch(IpcMethod.CATALOG, {}, fixture.emit)).providers).toEqual([]);
     expect((await restored.dispatch(IpcMethod.INFO, {}, fixture.emit)).roles).toEqual({});
-    await expect(restored.dispatch(IpcMethod.GENERATE, {
-      role: AgentRole.DEFAULT,
-      messages: [{ role: "user", content: "Read" }],
-    }, fixture.emit)).rejects.toThrow("No providers configured");
-    const added = await restored.dispatch(IpcMethod.CONFIGURE, {
-      models: before.definitions.models, roles: before.definitions.roles,
-    }, fixture.emit);
+    await expect(
+      restored.dispatch(
+        IpcMethod.GENERATE,
+        {
+          role: AgentRole.DEFAULT,
+          messages: [{ role: "user", content: "Read" }],
+        },
+        fixture.emit,
+      ),
+    ).rejects.toThrow("No providers configured");
+    const added = await restored.dispatch(
+      IpcMethod.CONFIGURE,
+      {
+        models: before.definitions.models,
+        roles: before.definitions.roles,
+      },
+      fixture.emit,
+    );
     expect(added.providers.map((provider) => provider.id)).toEqual(["local"]);
     expect(added.roles.default.model).toBe("proof");
   } finally {
@@ -151,49 +182,91 @@ test("object configuration preserves raw definitions and fixed role suffixes", a
     models.providers.local.models[0].compat = {
       extraBody: { nested: { enabled: true }, optional: null },
     };
-    const roles = { ...fixedRoles("local/proof"), note_writer: "@default:high", note_chunk: "@note_writer" };
-    validate(ipcRequestSchema, {
-      id: "configure-object",
-      method: IpcMethod.CONFIGURE,
-      params: { models, roles },
-    }, "object configuration");
+    const roles = {
+      ...fixedRoles("local/proof"),
+      note_writer: "@default:high",
+      note_chunk: "@note_writer",
+    };
+    validate(
+      ipcRequestSchema,
+      {
+        id: "configure-object",
+        method: IpcMethod.CONFIGURE,
+        params: { models, roles },
+      },
+      "object configuration",
+    );
     await fixture.runtime.dispatch(IpcMethod.CONFIGURE, { models, roles }, fixture.emit);
     const catalog = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
     expect(catalog.definitions).toEqual({ models, roles });
     expect(catalog.definition_schema).toHaveProperty("properties.providers");
-    expect(catalog.roles.note_writer.thinkingLevel).toBe("high");
+    expect(catalog.roles.note_writer.thinkingLevel).toBe(Effort.High);
     expect(catalog.roles.note_chunk).toEqual(catalog.roles.note_writer);
     expect(catalog.selectors.default).toBe("local/proof");
     const rows = structuredClone(models.providers.local.models);
     rows[0].name = "Renamed";
-    await fixture.runtime.dispatch(IpcMethod.MODELS_SET, {
-      provider: "local", models: rows,
-    }, fixture.emit);
+    await fixture.runtime.dispatch(
+      IpcMethod.MODELS_SET,
+      {
+        provider: "local",
+        models: rows,
+      },
+      fixture.emit,
+    );
     const edited = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
     expect(edited.definitions.models.providers.local.models).toEqual(rows);
     expect(edited.definitions.models.providers.local.headers).toEqual({ "X-Test": "preserved" });
-    await fixture.runtime.dispatch(IpcMethod.ROLE_SET, {
-      role: AgentRole.NOTE_REVIEW, selector: "@note_writer:low",
-    }, fixture.emit);
+    await fixture.runtime.dispatch(
+      IpcMethod.ROLE_SET,
+      {
+        role: "note_review",
+        selector: "@note_writer:low",
+      },
+      fixture.emit,
+    );
     const updated = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
     expect(updated.definitions.roles.note_review).toBe("@note_writer:low");
-    await expect(fixture.runtime.dispatch(IpcMethod.CONFIGURE, {
-      models, roles: { ...roles, note_writer: "@note_chunk:high", note_chunk: "@note_writer" },
-    }, fixture.emit)).rejects.toThrow("Invalid role alias");
-    await expect(fixture.runtime.dispatch(IpcMethod.CONFIGURE, {
-      models, roles: { ...roles, custom: "@default" },
-    }, fixture.emit)).rejects.toThrow();
-    await expect(fixture.runtime.dispatch(IpcMethod.CONFIGURE, {
-      models, roles: { ...roles, note_writer: "@missing" },
-    }, fixture.emit)).rejects.toThrow("Invalid role alias");
-    await expect(fixture.runtime.dispatch(IpcMethod.CONFIGURE, {
-      models, roles: { default: "local/proof" },
-    }, fixture.emit)).rejects.toThrow();
+    await expect(
+      fixture.runtime.dispatch(
+        IpcMethod.CONFIGURE,
+        {
+          models,
+          roles: { ...roles, note_writer: "@note_chunk:high", note_chunk: "@note_writer" },
+        },
+        fixture.emit,
+      ),
+    ).rejects.toThrow("Invalid role alias");
+    await fixture.runtime.dispatch(
+      IpcMethod.CONFIGURE,
+      {
+        models,
+        roles: { ...roles, custom: "@default" },
+      },
+      fixture.emit,
+    );
+    const normalized = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
+    expect(normalized).not.toHaveProperty("selectors.custom");
+    await expect(
+      fixture.runtime.dispatch(
+        IpcMethod.CONFIGURE,
+        {
+          models,
+          roles: { ...roles, note_writer: "@missing" },
+        },
+        fixture.emit,
+      ),
+    ).rejects.toThrow("Invalid role alias");
+    await fixture.runtime.dispatch(
+      IpcMethod.CONFIGURE,
+      { models, roles: { default: "local/proof" } },
+      fixture.emit,
+    );
+    const filled = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
+    expect(filled).toHaveProperty("selectors.note_writer", "@default");
   } finally {
     await fixture.close();
   }
 });
-
 
 test("bootstrap preserves accounts without emitting secrets", async () => {
   const credentials: AuthStorageData = {
@@ -247,7 +320,7 @@ test("only valid configuration edits persist", async () => {
       fixture.runtime.dispatch(
         IpcMethod.ROLE_SET,
         {
-          role: AgentRole.NOTE_WRITER,
+          role: "note_writer",
           selector: "local/missing:high",
         },
         fixture.emit,
@@ -257,7 +330,7 @@ test("only valid configuration edits persist", async () => {
     await fixture.runtime.dispatch(
       IpcMethod.ROLE_SET,
       {
-        role: AgentRole.NOTE_WRITER,
+        role: "note_writer",
         selector: "local/proof:high",
       },
       fixture.emit,
@@ -280,7 +353,7 @@ test("only valid configuration edits persist", async () => {
       fixture.runtime.dispatch(
         IpcMethod.CONFIGURE,
         {
-          models: "providers: {}",
+          models: "providers: {local: {models: []}}",
           roles: "default: local/proof:off",
         },
         fixture.emit,
@@ -582,7 +655,10 @@ function modelTool(name: string, args: Record<string, unknown>, id: string) {
 function sse(text: string) {
   return new Response(text, { headers: { "Content-Type": "text/event-stream" } });
 }
-async function localRuntime(respond: (body: ModelRequest) => Response | Promise<Response>) {
+async function localRuntime(
+  respond: (body: ModelRequest) => Response | Promise<Response>,
+  callback?: RuntimeCallback,
+) {
   const server = Bun.serve({
     port: 0,
     async fetch(request) {
@@ -590,7 +666,7 @@ async function localRuntime(respond: (body: ModelRequest) => Response | Promise<
     },
   });
   const root = await mkdtemp(path.join(tmpdir(), "runtime-live-"));
-  const runtime = new Runtime(root);
+  const runtime = new Runtime(root, undefined, callback, registeredRoles);
   await runtime.dispatch(
     IpcMethod.CONFIGURE,
     {
@@ -675,6 +751,12 @@ test("configured instructions remain ordered user messages", async () => {
   }
 });
 
+const reviewScope = {
+  role: "note_review",
+  targets: ["note_knowledge.md", "note_gossip.md", "note_notice.md"],
+  sources: ["lecture_source.md"],
+};
+
 test("writer cannot complete before a passing review", async () => {
   let writerCalls = 0;
   let reviewerCalls = 0;
@@ -716,7 +798,9 @@ test("writer cannot complete before a passing review", async () => {
       {
         id: "required",
         files,
-        meta: { review: { system: "REQUIRED_REVIEW", prompt: "Review", maxRounds: 1 } },
+        meta: {
+          review: { system: "REQUIRED_REVIEW", prompt: "Review", maxRounds: 1, ...reviewScope },
+        },
       },
       () => {},
     );
@@ -769,7 +853,9 @@ test.each([false, undefined])("writer cannot finish without approval (%s)", asyn
       {
         id: "rejected",
         files,
-        meta: { review: { system: "REJECT_REVIEW", prompt: "Review", maxRounds: 1 } },
+        meta: {
+          review: { system: "REJECT_REVIEW", prompt: "Review", maxRounds: 1, ...reviewScope },
+        },
       },
       () => {},
     );
@@ -844,7 +930,9 @@ test("an accepted review survives a harmless user message", async () => {
       {
         id: "accepted",
         files,
-        meta: { review: { system: "ACCEPTED_REVIEW", prompt: "Review", maxRounds: 1 } },
+        meta: {
+          review: { system: "ACCEPTED_REVIEW", prompt: "Review", maxRounds: 1, ...reviewScope },
+        },
       },
       () => {},
     );
@@ -919,7 +1007,7 @@ test("message admitted during the final review check is delivered", async () => 
       {
         id: "late",
         files,
-        meta: { review: { system: "LATE_REVIEW", prompt: "Review", maxRounds: 1 } },
+        meta: { review: { system: "LATE_REVIEW", prompt: "Review", maxRounds: 1, ...reviewScope } },
       },
       () => {},
     );
@@ -969,7 +1057,15 @@ for (const maxAttempts of [1, 2, 3]) {
         const result = await env.runtime.dispatch(
           IpcMethod.GENERATE,
           {
-            messages: [{ role: "user", content: "Read board" }],
+            messages: [
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: "Read board" },
+                  { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } },
+                ],
+              },
+            ],
             loop_max_attempts: maxAttempts,
           },
           (name, data) => events.push({ name, data }),
@@ -1001,7 +1097,15 @@ test("cancel during loop backoff prevents another attempt", async () => {
       IpcMethod.GENERATE,
       {
         session_id: "cancel-loop",
-        messages: [{ role: "user", content: "Read board" }],
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Read board" },
+              { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } },
+            ],
+          },
+        ],
       },
       (name) => {
         if (name === RuntimeEvent.LLM_ATTEMPT)
@@ -1035,7 +1139,15 @@ test("ordinary provider errors do not become loop retries", async () => {
       env.runtime.dispatch(
         IpcMethod.GENERATE,
         {
-          messages: [{ role: "user", content: "Read board" }],
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "Read board" },
+                { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } },
+              ],
+            },
+          ],
         },
         (name, data) => events.push({ name, data }),
       ),
@@ -1080,7 +1192,7 @@ test("non-board generation preserves streamed deltas", async () => {
     const result = env.runtime.dispatch(
       IpcMethod.GENERATE,
       {
-        role: AgentRole.NOTE_WRITER,
+        role: "note_writer",
         messages: [{ role: "user", content: "Write notes" }],
       },
       (name, data) => {
@@ -1140,7 +1252,15 @@ test("cancel interrupts an active board stream", async () => {
       IpcMethod.GENERATE,
       {
         session_id: "active-board",
-        messages: [{ role: "user", content: "Read board" }],
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Read board" },
+              { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } },
+            ],
+          },
+        ],
       },
       (name, data) => {
         if (name === RuntimeEvent.LLM_DELTA) deltas.push(data.text);
@@ -1424,6 +1544,7 @@ test("writer messages preserve acceptance for unchanged files", async () => {
             system: "REVIEW_PROOF",
             prompt: "Review independently",
             maxRounds: 3,
+            ...reviewScope,
           },
         },
       },
@@ -1671,6 +1792,7 @@ test("reviewer retains history and refreshes notes across rounds", async () => {
             system: "REVIEW_CONTINUITY",
             prompt: "Review the saved notes",
             maxRounds: 2,
+            ...reviewScope,
           },
         },
       },
@@ -1781,6 +1903,7 @@ test("reviewer messages change only the reviewer turn", async () => {
             system: "REVIEW_TARGET",
             prompt: "Review",
             maxRounds: 1,
+            ...reviewScope,
           },
         },
       },
@@ -1862,6 +1985,7 @@ test("explicit stop cancels parent and reviewer without delivery", async () => {
             system: "REVIEW_STOP",
             prompt: "Review",
             maxRounds: 1,
+            ...reviewScope,
           },
         },
       },
@@ -1960,6 +2084,7 @@ test("reviewer corrects malformed reports in the same round", async () => {
             system: "REVIEW_INVALID",
             prompt: "Review",
             maxRounds: 1,
+            ...reviewScope,
           },
         },
       },
@@ -2015,12 +2140,12 @@ test("IPC controls require exact message and reopen parameters", () => {
   ).toThrow("Invalid request");
 });
 
-test("IPC rejects unknown roles and tools", () => {
+test("IPC accepts registered role identifiers and open tool names", () => {
   expect(
     ipcRequestSchema.allows({
       id: "valid",
       method: IpcMethod.CREATE_SESSION,
-      params: { id: "writer", role: AgentRole.NOTE_WRITER, tools: [WorkspaceTool.READ] },
+      params: { id: "writer", role: "note_writer", tools: [WorkspaceTool.READ] },
     }),
   ).toBe(true);
   expect(
@@ -2029,14 +2154,14 @@ test("IPC rejects unknown roles and tools", () => {
       method: IpcMethod.GENERATE,
       params: { role: "unknown_role", messages: [{ role: "user", content: "Read" }] },
     }),
-  ).toBe(false);
+  ).toBe(true);
   expect(
     ipcRequestSchema.allows({
       id: "tool",
       method: IpcMethod.CREATE_SESSION,
       params: { id: "writer", tools: ["unknown_tool"] },
     }),
-  ).toBe(false);
+  ).toBe(true);
 });
 
 async function catalogFixture() {
@@ -2060,7 +2185,12 @@ async function catalogFixture() {
     },
   });
   const directory = await mkdtemp(path.join(tmpdir(), "runtime-catalog-"));
-  const runtime = new Runtime(path.join(directory, "runtime"));
+  const runtime = new Runtime(
+    path.join(directory, "runtime"),
+    undefined,
+    undefined,
+    registeredRoles,
+  );
   const base = `http://127.0.0.1:${server.port}`;
   await runtime.dispatch(
     IpcMethod.CONFIGURE,
@@ -2091,7 +2221,10 @@ async function catalogFixture() {
           },
         },
       }),
-      roles: Bun.YAML.stringify({ ...fixedRoles("local/proof:off"), note_writer: "second/plain:high" }),
+      roles: Bun.YAML.stringify({
+        ...fixedRoles("local/proof:off"),
+        note_writer: "second/plain:high",
+      }),
     },
     () => {},
   );
@@ -2160,7 +2293,9 @@ test("models_set replaces complete model definitions", async () => {
         reasoning: true,
       },
     ]);
-    expect(catalog.definitions.models.providers.local.models[0]).toEqual(catalog.providers[0].models[0]);
+    expect(catalog.definitions.models.providers.local.models[0]).toEqual(
+      catalog.providers[0].models[0],
+    );
     expect(catalog.definitions.models.providers.local.models[0].compat).toBeUndefined();
   } finally {
     await fixture.close();
@@ -2239,7 +2374,7 @@ test("role_set rewrites one selector and keeps the rest", async () => {
   try {
     const catalog = (await fixture.runtime.dispatch(
       IpcMethod.ROLE_SET,
-      { role: AgentRole.NOTE_WRITER, selector: "local/proof:high" },
+      { role: "note_writer", selector: "local/proof:high" },
       () => {},
     )) as any;
     expect(catalog.selectors.note_writer).toBe("local/proof:high");
@@ -2247,7 +2382,7 @@ test("role_set rewrites one selector and keeps the rest", async () => {
     await expect(
       fixture.runtime.dispatch(
         IpcMethod.ROLE_SET,
-        { role: AgentRole.NOTE_WRITER, selector: "local/missing:high" },
+        { role: "note_writer", selector: "local/missing:high" },
         () => {},
       ),
     ).rejects.toThrow();
@@ -2255,6 +2390,250 @@ test("role_set rewrites one selector and keeps the rest", async () => {
       ((await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, () => {})) as any).selectors
         .note_writer,
     ).toBe("local/proof:high");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("review extensions enforce tools, ordered hooks, and added targets", async () => {
+  let writers = 0;
+  let reviewers = 0;
+  const hooks: string[] = [];
+  const report = JSON.stringify({
+    correct: true,
+    explanation: "Checked",
+    confidence: 1,
+    findings: [
+      {
+        title: "Optional",
+        body: "Wording only",
+        priority: 3,
+        confidence: 1,
+        file_path: "appendix.md",
+        line_start: 1,
+        line_end: 1,
+      },
+    ],
+  });
+  const fixture = await localRuntime(
+    (body) => {
+      const review = JSON.stringify(body.messages).includes("EXTENSION_REVIEW");
+      if (!review) {
+        expect(JSON.stringify(body)).not.toContain("audit_document");
+        return sse(
+          ++writers === 1 ? modelTool("review_notes", {}, "extension-review") : modelText("Done"),
+        );
+      }
+      expect(userTexts(body).join("\n")).toContain("Review extension criterion");
+      ++reviewers;
+      if (reviewers === 1) return sse(modelText(report));
+      if (reviewers === 2) {
+        expect(userTexts(body).at(-1)).toContain("Run audit_document before completion");
+        return sse(modelTool("audit_document", { path: "appendix.md" }, "audit"));
+      }
+      expect(JSON.stringify(body)).toContain("AUDIT_OK");
+      return sse(modelText(report));
+    },
+    async (request) => {
+      if (request.kind === "tool") {
+        expect(request.role).toBe("note_review");
+        expect(request.name).toBe("audit_document");
+        const workspace = request.arguments.workspace as Record<string, string>;
+        expect(await Bun.file(workspace["appendix.md"]).text()).toBe("Appendix");
+        return { content: [{ type: "text", text: "AUDIT_OK" }], details: {} };
+      }
+      hooks.push(request.name);
+      if (request.name === "alpha/require-audit") {
+        const calls = request.arguments.tool_calls as { name: string }[];
+        return calls.some((call) => call.name === "audit_document")
+          ? null
+          : { continue: "Run audit_document before completion" };
+      }
+      return null;
+    },
+  );
+  try {
+    const files: Record<string, string> = {};
+    for (const name of [...reviewScope.sources, ...reviewScope.targets, "appendix.md"]) {
+      files[name] = path.join(fixture.root, name);
+      await Bun.write(files[name], "Appendix");
+    }
+    await fixture.runtime.dispatch(
+      IpcMethod.CREATE_SESSION,
+      {
+        id: "extension-parent",
+        files,
+        meta: {
+          review: { system: "EXTENSION_REVIEW", prompt: "Review", maxRounds: 1, ...reviewScope },
+        },
+        extensions: {
+          reviewer: {
+            prompts: ["Review extension criterion"],
+            review_targets: ["appendix.md"],
+            tools: [
+              {
+                name: "audit_document",
+                description: "Audit a document.",
+                parameters: {
+                  type: "object",
+                  properties: { path: { type: "string" } },
+                  required: ["path"],
+                  additionalProperties: false,
+                },
+              },
+            ],
+            completion_hooks: [
+              { owner: "zeta", id: "last", priority: 10 },
+              { owner: "alpha", id: "require-audit", priority: 0 },
+              { owner: "alpha", id: "after", priority: 1 },
+            ],
+          },
+        },
+      },
+      () => {},
+    );
+    const result = await fixture.runtime.dispatch(
+      IpcMethod.RUN,
+      { session_id: "extension-parent", instruction: "Write" },
+      () => {},
+    );
+    expect(result).toHaveProperty("final_message", "Done");
+    expect(reviewers).toBe(3);
+    expect(hooks).toEqual([
+      "alpha/require-audit",
+      "alpha/after",
+      "zeta/last",
+      "alpha/require-audit",
+      "alpha/after",
+      "zeta/last",
+    ]);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("session rejects tools without a declaration", async () => {
+  const fixture = await localRuntime(() => sse(modelText("Unused")));
+  try {
+    await expect(
+      fixture.runtime.dispatch(
+        IpcMethod.CREATE_SESSION,
+        {
+          id: "undeclared",
+          tools: ["unknown_tool"],
+        },
+        () => {},
+      ),
+    ).rejects.toThrow("Unknown tool: unknown_tool");
+  } finally {
+    await fixture.close();
+  }
+});
+
+for (const role of ["note_chunk", "ask_research", "note_writer"]) {
+  test(`${role} completion hooks require a tool without review`, async () => {
+    let turns = 0;
+    const hooks: string[] = [];
+    const fixture = await localRuntime(
+      (body) => {
+        ++turns;
+        if (turns === 1) return sse(modelText("Premature answer"));
+        if (turns === 2) {
+          expect(userTexts(body).at(-1)).toContain("Run output_check before completion");
+          return sse(modelTool("output_check", {}, "output-check"));
+        }
+        expect(JSON.stringify(body)).toContain("OUTPUT_OK");
+        return sse(modelText("Checked answer"));
+      },
+      async (request) => {
+        expect(request.role).toBe(role);
+        if (request.kind === "tool")
+          return { content: [{ type: "text", text: "OUTPUT_OK" }], details: {} };
+        expect(request.kind).toBe("completion_hook");
+        hooks.push(request.name);
+        const calls = request.arguments.tool_calls as { name: string }[];
+        return request.name === "a/require-check" &&
+          !calls.some((call) => call.name === "output_check")
+          ? { continue: "Run output_check before completion" }
+          : null;
+      },
+    );
+    try {
+      await fixture.runtime.dispatch(
+        IpcMethod.CREATE_SESSION,
+        {
+          id: "role-parent",
+          role,
+          tools: [],
+          extensions: {
+            tools: [
+              {
+                name: "output_check",
+                description: "Check the output.",
+                parameters: { type: "object", properties: {}, additionalProperties: false },
+              },
+            ],
+            completion_hooks: [
+              { owner: "z", id: "after", priority: 0 },
+              { owner: "a", id: "require-check", priority: 0 },
+            ],
+          },
+        },
+        () => {},
+      );
+      const result = await fixture.runtime.dispatch(
+        IpcMethod.RUN,
+        { session_id: "role-parent", instruction: "Answer" },
+        () => {},
+      );
+      expect(result).toHaveProperty("final_message", "Checked answer");
+      expect(turns).toBe(3);
+      expect(hooks).toEqual(["a/require-check", "z/after", "a/require-check", "z/after"]);
+    } finally {
+      await fixture.close();
+    }
+  });
+}
+
+test("registered roles prune stale settings and preserve custom assignments", async () => {
+  const fixture = await persistenceFixture();
+  try {
+    await fixture.runtime.dispatch(IpcMethod.PING, {}, fixture.emit);
+    const roles: RoleDefinition[] = [{ id: "plugin.custom", title: "Custom", input: ["text"] }];
+    const catalog = await fixture.runtime.dispatch(
+      IpcMethod.ROLES_SYNC,
+      { roles, selectors: { default: "local/proof:off", retired: { invalid: true } } },
+      fixture.emit,
+    );
+    expect(catalog).toHaveProperty("selectors", {
+      default: "local/proof:off",
+      compaction: "@default",
+      "plugin.custom": "@default",
+    });
+    await fixture.runtime.dispatch(
+      IpcMethod.ROLE_SET,
+      { role: "plugin.custom", selector: "local/proof:high" },
+      fixture.emit,
+    );
+    const preserved = await fixture.runtime.dispatch(IpcMethod.ROLES_SYNC, { roles }, fixture.emit);
+    const selected = fixture.snapshots.at(-1)!.settings!.roles;
+    expect(selected["plugin.custom"]).toBe("local/proof:high");
+    const result = await fixture.runtime.dispatch(
+      IpcMethod.ROLES_SYNC,
+      { roles: [] },
+      fixture.emit,
+    );
+    expect(result).toHaveProperty("selectors", {
+      default: "local/proof:off",
+      compaction: "@default",
+    });
+    await expect(
+      fixture.runtime.dispatch(
+        IpcMethod.ROLE_SET,
+        { role: "plugin.custom", selector: "@default" },
+        fixture.emit,
+      ),
+    ).rejects.toThrow("Unknown role");
   } finally {
     await fixture.close();
   }

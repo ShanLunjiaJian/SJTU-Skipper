@@ -50,16 +50,6 @@ THINKING_LEVELS: tuple[str, ...] = (
     "auto",
     "max",
 )
-ROLE_TITLES: dict[str, str] = {
-    "default": "默认",
-    "ask_instant": "快速问答",
-    "ask_research": "研究问答",
-    "note_chunk": "分段笔记",
-    "note_writer": "笔记写作",
-    "note_review": "笔记审阅",
-    "board_recognition": "板书识别",
-    "compaction": "上下文压缩",
-}
 
 
 def field(
@@ -109,12 +99,11 @@ def size(value: Any) -> str:
     return str(count)
 
 
-def role_titles(roles: list[str]) -> str:
-    """Render role ids for messages: 默认（default） reads better than default."""
-
+def role_titles(roles: list[str], catalog: Mapping[str, Any]) -> str:
+    """Render registered role titles and IDs."""
+    titles = {role["id"]: role["title"] for role in catalog["role_definitions"]}
     return "、".join(
-        f"{ROLE_TITLES[role]}（{role}）" if role in ROLE_TITLES else role
-        for role in roles
+        f"{titles[role]}（{role}）" if role in titles else role for role in roles
     )
 
 
@@ -146,15 +135,19 @@ def roles_using(catalog: Mapping[str, Any], provider: str, model: str) -> list[s
     return sorted(roles, key=lambda role: (role != "default", role))
 
 
-def image_ok(catalog: Mapping[str, Any], role: str) -> bool:
-    info = resolved(catalog, role)
+def missing_inputs(catalog: Mapping[str, Any], role: Mapping[str, Any]) -> list[str]:
+    info = resolved(catalog, role["id"])
     for provider in providers(catalog):
         if provider["id"] != info.get("provider"):
             continue
         for model in provider.get("models", []):
             if model["id"] == info.get("model"):
-                return "image" in model.get("input", [])
-    return False
+                return [
+                    value
+                    for value in role["input"]
+                    if value not in model.get("input", [])
+                ]
+    return list(role["input"])
 
 
 def issues(catalog: Mapping[str, Any]) -> list[str]:
@@ -173,10 +166,12 @@ def issues(catalog: Mapping[str, Any]) -> list[str]:
             else "填写 API Key"
         )
         found.append(f"提供方 `{provider['id']}` 未配置凭据：{action}．")
-    if "board_recognition" in catalog.get("selectors", {}) and not image_ok(
-        catalog, "board_recognition"
-    ):
-        found.append("板书识别角色使用的模型不支持 `image` 输入．")
+    for role in catalog["role_definitions"]:
+        missing = missing_inputs(catalog, role)
+        if missing:
+            found.append(
+                f"{role['title']}角色使用的模型不支持 `{'、'.join(missing)}` 输入．"
+            )
     return found
 
 
@@ -240,9 +235,10 @@ class SettingsView:
 
         blocks.append({"type": BlockType.MARKDOWN, "text": "### 角色分配"})
         assignments = []
-        for role in ROLE_TITLES:
+        for definition in self.catalog["role_definitions"]:
+            role = definition["id"]
             selector = self.catalog["selectors"][role]
-            label = ROLE_TITLES.get(role, role)
+            label = definition["title"]
             target = self._selector_text(role)
             value = target if selector == target else f"{selector} -> {target}"
             assignments.append([f"{label} ({role})", value])
@@ -280,10 +276,15 @@ class SettingsView:
                             "id": item["id"],
                             "provider": item["id"],
                             "models": len(item.get("models", [])),
-                            "auth": AUTH_LABELS.get(item.get("auth"), item.get("auth", "")),
+                            "auth": AUTH_LABELS.get(
+                                item.get("auth"), item.get("auth", "")
+                            ),
                             "credentials": (
-                                "无需鉴权" if item.get("auth") == "none"
-                                else "已配置" if item.get("configured") else "未配置"
+                                "无需鉴权"
+                                if item.get("auth") == "none"
+                                else "已配置"
+                                if item.get("configured")
+                                else "未配置"
                             ),
                             "details": [self._provider_form(item)],
                             "actions": self._provider_actions(item),
@@ -303,7 +304,10 @@ class SettingsView:
             )
         else:
             blocks.append(
-                {"type": BlockType.MARKDOWN, "text": "尚无提供方．添加提供方后可配置连接与模型．"}
+                {
+                    "type": BlockType.MARKDOWN,
+                    "text": "尚无提供方．添加提供方后可配置连接与模型．",
+                }
             )
         blocks.append(
             {
@@ -315,9 +319,16 @@ class SettingsView:
                     {"type": BlockType.FORM, **self._add_form()},
                     self._new_provider_form(),
                     self._definition_form(
-                        "llm:models-extensions", "配置扩展参数",
+                        "llm:models-extensions",
+                        "配置扩展参数",
                         {"type": "object", "properties": {}},
-                        {key: value for key, value in self.catalog["definitions"]["models"].items() if key != "providers"},
+                        {
+                            key: value
+                            for key, value in self.catalog["definitions"][
+                                "models"
+                            ].items()
+                            if key != "providers"
+                        },
                         {"scope": "models_extensions"},
                     ),
                 ],
@@ -388,11 +399,16 @@ class SettingsView:
         ]
 
     def _provider_actions(
-        self, provider: Mapping[str, Any],
+        self,
+        provider: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
         pid = provider["id"]
         actions: list[dict[str, Any]] = []
-        if provider.get("auth") == "oauth" and not provider.get("configured") and self.login is None:
+        if (
+            provider.get("auth") == "oauth"
+            and not provider.get("configured")
+            and self.login is None
+        ):
             actions.append(
                 {
                     "label": "关联套餐",
@@ -421,32 +437,59 @@ class SettingsView:
         schema["properties"]["modelOverrides"]["x-hidden"] = True
         definition = self.catalog["definitions"]["models"]["providers"][pid]
         return self._definition_form(
-            f"llm:provider:{pid}", f"连接与凭据 {pid}", schema, definition,
+            f"llm:provider:{pid}",
+            f"连接与凭据 {pid}",
+            schema,
+            definition,
             {"scope": "provider", "provider": pid},
         )
 
     def _provider_schema(self) -> dict[str, Any]:
-        schema = deepcopy(self.catalog["definition_schema"]["properties"]["providers"]["additionalProperties"])
+        schema = deepcopy(
+            self.catalog["definition_schema"]["properties"]["providers"][
+                "additionalProperties"
+            ]
+        )
         self._label_schema(schema)
         return schema
 
     @classmethod
     def _label_schema(cls, schema: dict[str, Any]) -> None:
         labels = {
-            "baseUrl": "端点地址", "apiKey": "API Key", "api": "协议",
-            "auth": "鉴权方式", "headers": "请求头", "compat": "协议兼容",
-            "remoteCompaction": "服务端上下文压缩", "discovery": "端点模型发现",
-            "models": "模型", "modelOverrides": "模型覆盖", "id": "模型 ID",
-            "name": "显示名称", "kind": "模型用途", "reasoning": "支持思考",
-            "thinking": "思考控制", "input": "输入类型", "contextWindow": "上下文窗口",
-            "maxContextWindow": "最大上下文窗口", "maxTokens": "输出 token 上限",
-            "cost": "模型价格", "promptCache": "提示词缓存", "tokenizer": "分词器",
-            "supportsTools": "支持工具调用", "extraBody": "额外请求参数",
-            "whenThinking": "思考模式兼容设置", "mode": "控制模式",
-            "efforts": "支持的思考级别", "defaultLevel": "默认思考级别",
-            "effortMap": "思考级别映射", "authHeader": "发送鉴权头",
-            "requestMetadata": "请求元数据", "transport": "传输方式",
-            "contextPromotionTarget": "扩展上下文目标", "compactionModel": "压缩模型",
+            "baseUrl": "端点地址",
+            "apiKey": "API Key",
+            "api": "协议",
+            "auth": "鉴权方式",
+            "headers": "请求头",
+            "compat": "协议兼容",
+            "remoteCompaction": "服务端上下文压缩",
+            "discovery": "端点模型发现",
+            "models": "模型",
+            "modelOverrides": "模型覆盖",
+            "id": "模型 ID",
+            "name": "显示名称",
+            "kind": "模型用途",
+            "reasoning": "支持思考",
+            "thinking": "思考控制",
+            "input": "输入类型",
+            "contextWindow": "上下文窗口",
+            "maxContextWindow": "最大上下文窗口",
+            "maxTokens": "输出 token 上限",
+            "cost": "模型价格",
+            "promptCache": "提示词缓存",
+            "tokenizer": "分词器",
+            "supportsTools": "支持工具调用",
+            "extraBody": "额外请求参数",
+            "whenThinking": "思考模式兼容设置",
+            "mode": "控制模式",
+            "efforts": "支持的思考级别",
+            "defaultLevel": "默认思考级别",
+            "effortMap": "思考级别映射",
+            "authHeader": "发送鉴权头",
+            "requestMetadata": "请求元数据",
+            "transport": "传输方式",
+            "contextPromotionTarget": "扩展上下文目标",
+            "compactionModel": "压缩模型",
         }
         for key, child in schema.get("properties", {}).items():
             child["title"] = labels.get(key, key)
@@ -457,11 +500,19 @@ class SettingsView:
 
     @staticmethod
     def _definition_form(
-        key: str, title: str, schema: dict[str, Any], value: Any, context: dict[str, Any]
+        key: str,
+        title: str,
+        schema: dict[str, Any],
+        value: Any,
+        context: dict[str, Any],
     ) -> dict[str, Any]:
         return {
-            "type": BlockType.SCHEMA_FORM, "id": key, "title": title,
-            "schema": schema, "value": value, "context": context,
+            "type": BlockType.SCHEMA_FORM,
+            "id": key,
+            "title": title,
+            "schema": schema,
+            "value": value,
+            "context": context,
             "submit": {"action": "llm.definition.save", "label": "保存"},
         }
 
@@ -473,7 +524,9 @@ class SettingsView:
         }
         schema["required"] = ["_provider_id", "models"]
         return self._definition_form(
-            "llm:new-provider", "手动配置提供方", schema,
+            "llm:new-provider",
+            "手动配置提供方",
+            schema,
             {"_provider_id": "", "models": [{"id": ""}]},
             {"scope": "provider", "provider": ""},
         )
@@ -573,25 +626,48 @@ class SettingsView:
         blocks: list[dict[str, Any]] = []
         blocks.extend(self._model_table(provider))
         model_schema = self._provider_schema()["properties"]["models"]["items"]
-        blocks.append({
-            "type": BlockType.DISCLOSURE, "id": f"llm:add-model:{pid}",
-            "title": "添加模型",
-            "blocks": [self._definition_form(
-                f"llm:new-model:{pid}", "手动配置模型", model_schema, {"id": ""},
-                {"scope": "model", "provider": pid, "index": -1},
-            )],
-        })
-        overrides = self.catalog["definitions"]["models"]["providers"][pid].get("modelOverrides", {})
-        override_schema = self._provider_schema()["properties"]["modelOverrides"]["additionalProperties"]
-        blocks.append({
-            "type": BlockType.DISCLOSURE, "id": f"llm:overrides:{pid}",
-            "title": "模型覆盖",
-            "blocks": [self._definition_form(
-                f"llm:override:{pid}", "覆盖模型设置",
-                {"type": "object", "properties": {}, "additionalProperties": override_schema},
-                overrides, {"scope": "overrides", "provider": pid},
-            )],
-        })
+        blocks.append(
+            {
+                "type": BlockType.DISCLOSURE,
+                "id": f"llm:add-model:{pid}",
+                "title": "添加模型",
+                "blocks": [
+                    self._definition_form(
+                        f"llm:new-model:{pid}",
+                        "手动配置模型",
+                        model_schema,
+                        {"id": ""},
+                        {"scope": "model", "provider": pid, "index": -1},
+                    )
+                ],
+            }
+        )
+        overrides = self.catalog["definitions"]["models"]["providers"][pid].get(
+            "modelOverrides", {}
+        )
+        override_schema = self._provider_schema()["properties"]["modelOverrides"][
+            "additionalProperties"
+        ]
+        blocks.append(
+            {
+                "type": BlockType.DISCLOSURE,
+                "id": f"llm:overrides:{pid}",
+                "title": "模型覆盖",
+                "blocks": [
+                    self._definition_form(
+                        f"llm:override:{pid}",
+                        "覆盖模型设置",
+                        {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": override_schema,
+                        },
+                        overrides,
+                        {"scope": "overrides", "provider": pid},
+                    )
+                ],
+            }
+        )
         blocks.extend(
             [
                 {"type": BlockType.MARKDOWN, "text": "### 发现端点模型"},
@@ -750,10 +826,15 @@ class SettingsView:
     ) -> list[dict[str, Any]]:
         pid = provider["id"]
         schema = self._provider_schema()["properties"]["models"]["items"]
-        return [self._definition_form(
-            f"llm:model:{pid}:{model['id']}", f"模型 {model['id']}", schema, dict(model),
-            {"scope": "model", "provider": pid, "index": index},
-        )]
+        return [
+            self._definition_form(
+                f"llm:model:{pid}:{model['id']}",
+                f"模型 {model['id']}",
+                schema,
+                dict(model),
+                {"scope": "model", "provider": pid, "index": index},
+            )
+        ]
 
     def _role_page(self) -> list[dict[str, Any]]:
         selectors = dict(self.catalog.get("selectors", {}))
@@ -761,17 +842,15 @@ class SettingsView:
             return [{"type": BlockType.MARKDOWN, "text": "尚未配置角色．"}]
         blocks: list[dict[str, Any]] = []
         rows = []
-        for name in ROLE_TITLES:
-            status = ""
-            if name == "board_recognition":
-                status = (
-                    "图像可用" if image_ok(self.catalog, name) else "缺少 image 输入"
-                )
+        for definition in self.catalog["role_definitions"]:
+            name = definition["id"]
+            missing = missing_inputs(self.catalog, definition)
+            status = f"缺少 {'、'.join(missing)} 输入" if missing else "输入可用"
             rows.append(
                 {
                     "id": name,
                     "role": name,
-                    "title": ROLE_TITLES.get(name, name),
+                    "title": definition["title"],
                     "selector": selectors[name],
                     "active": self._selector_text(name),
                     "status": status,
@@ -800,13 +879,17 @@ class SettingsView:
         selector = selectors[role]
         target, level = selector_parts(selector)
         note = "保存后对新会话生效．"
-        if role == "board_recognition" and not image_ok(self.catalog, role):
-            note += "板书识别需要支持 image 输入的模型．"
+        definition = next(
+            item for item in self.catalog["role_definitions"] if item["id"] == role
+        )
+        missing = missing_inputs(self.catalog, definition)
+        if missing:
+            note += f"{definition['title']}需要支持 {'、'.join(missing)} 输入的模型．"
         return [
             {
                 "type": BlockType.FORM,
                 "id": f"llm:role:{role}",
-                "title": f"编辑角色 {ROLE_TITLES.get(role, role)}",
+                "title": f"编辑角色 {definition['title']}",
                 "description": note,
                 "fields": [
                     field("role", "角色", role, readonly=True, hidden=True),
@@ -845,7 +928,11 @@ class SettingsView:
                     field(
                         "models_json",
                         "模型与提供方 JSON",
-                        json.dumps(self.catalog["definitions"]["models"], ensure_ascii=False, indent=2),
+                        json.dumps(
+                            self.catalog["definitions"]["models"],
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
                         type=FormInputType.TEXT,
                         input=FormInputType.TEXTAREA,
                         rows=18,
@@ -853,7 +940,11 @@ class SettingsView:
                     field(
                         "roles_json",
                         "角色 JSON",
-                        json.dumps(self.catalog["definitions"]["roles"], ensure_ascii=False, indent=2),
+                        json.dumps(
+                            self.catalog["definitions"]["roles"],
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
                         type=FormInputType.TEXT,
                         input=FormInputType.TEXTAREA,
                         rows=12,
@@ -871,11 +962,10 @@ __all__ = [
     "PAGE_ID",
     "PRESETS",
     "PROVIDER_PRESETS",
-    "ROLE_TITLES",
     "THINKING_LEVELS",
     "SettingsView",
     "field",
-    "image_ok",
+    "missing_inputs",
     "issues",
     "number",
     "providers",

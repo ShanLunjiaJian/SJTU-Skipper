@@ -7,6 +7,11 @@ import threading
 import pytest
 
 from config import load_config
+from core.agent_extensions import (
+    AgentExtension,
+    AgentExtensionTool,
+    AgentCompletionHook,
+)
 from core.agent_types import (
     AgentEventType,
     AgentProfile,
@@ -18,11 +23,12 @@ from core.plugin import Plugin
 from core.runtime import build_runtime
 from core.workspace import FileWorkspace
 from plugins.agent import AgentPlugin
-from tests.support import FakeSettings
+from tests.support import FakeLLM, FakeSettings
 
 
-class ScriptedRuntime:
+class ScriptedRuntime(FakeLLM):
     def __init__(self, script=None):
+        super().__init__()
         self.script = script
         self.calls = []
         self.runs = []
@@ -82,8 +88,10 @@ class StubLLMPlugin(Plugin):
         pass
 
 
-def _make_agent_runtime(tmp_path, script=None, settings=None):
-    llm = ScriptedRuntime(script)
+def _make_agent_runtime(
+    tmp_path, script=None, settings=None, runtime_type=ScriptedRuntime
+):
+    llm = runtime_type(script)
     settings = settings or FakeSettings()
     runtime = build_runtime(
         load_config(data_dir=tmp_path),
@@ -133,8 +141,16 @@ def test_sessions_use_roles_and_authorized_files(tmp_path):
         source.write_text("complete source")
         profile = AgentProfile(
             name="review",
-            role=AgentRole.NOTE_REVIEW,
+            role="note_review",
             tools=[AgentTool("read"), AgentTool("grep"), AgentTool("glob")],
+        )
+        agent.register_extension(
+            "review_context",
+            AgentExtension(
+                id="context",
+                roles=("note_review",),
+                prompt="Review the source.",
+            ),
         )
         agent.register_agent(profile)
         workspace = FileWorkspace({"source.md": source}, readonly=("source.md",))
@@ -144,7 +160,8 @@ def test_sessions_use_roles_and_authorized_files(tmp_path):
             workspace=workspace,
         )
         declaration = sdk.sessions[session.id]
-        assert declaration["role"] == AgentRole.NOTE_REVIEW
+        assert declaration["role"] == "note_review"
+        assert declaration["extensions"]["prompts"] == ["Review the source."]
         assert declaration["files"] == {"source.md": str(source)}
         assert declaration["readonly"] == ["source.md"]
         assert declaration["tools"] == ["read", "grep", "glob"]
@@ -428,6 +445,7 @@ def test_runtime_json_survives_restart(tmp_path):
     auth = {"users": {"alice": {"password": "test"}}, "session_secret": "unchanged"}
     (tmp_path / "auth.json").write_text(json.dumps(auth))
     client = RuntimeClient(tmp_path)
+    client.register_role("ask", "ask_instant", "快速问答")
     try:
         initial = client.call(IpcMethod.INFO)
         directory = client.runtime_dir
@@ -455,6 +473,7 @@ def test_runtime_json_survives_restart(tmp_path):
     assert not directory.exists()
     assert not (tmp_path / "llm_runtime").exists()
     replacement = RuntimeClient(tmp_path)
+    replacement.register_role("ask", "ask_instant", "快速问答")
     try:
         restored = replacement.call(IpcMethod.INFO)
         assert (
@@ -582,12 +601,12 @@ def test_message_rejects_missing_admission_and_closed_runtime(tmp_path, monkeypa
 
 def test_reopen_uses_strict_native_operation(tmp_path):
     runtime, agent, sdk, _ = _make_agent_runtime(tmp_path)
-    session = agent.create_session("writer", role=AgentRole.NOTE_WRITER, tools=[])
+    session = agent.create_session("writer", role="note_writer", tools=[])
     values = dict(
         name="writer",
         workspace=agent.session_workspace(session.id),
         system_prompt="system",
-        role=AgentRole.NOTE_WRITER,
+        role="note_writer",
         tools=[],
         meta={},
     )
@@ -667,4 +686,500 @@ def test_can_resume_reads_saved_transcript_through_runtime(tmp_path):
         assert transcript.read_text(encoding="utf-8") == history
     finally:
         client.close()
+        runtime.stop()
+
+
+class CallbackRuntime(ScriptedRuntime):
+    def set_callback_handler(self, handler):
+        self.callback_handler = handler
+
+
+def _custom_tool(name="lookup", handler=None):
+    return AgentExtensionTool(
+        name=name,
+        description="Read a plugin value.",
+        parameters={"type": "object", "properties": {}},
+        handler=handler
+        or (
+            lambda context: {
+                "content": [{"type": "text", "text": "value"}],
+                "details": {},
+            }
+        ),
+    )
+
+
+def test_extensions_are_role_scoped(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path, runtime_type=CallbackRuntime)
+    seen = []
+    tool = _custom_tool(
+        handler=lambda context: (
+            seen.append(context)
+            or {"content": [{"type": "text", "text": "found"}], "details": {"count": 1}}
+        )
+    )
+    try:
+        agent.register_extension(
+            "search",
+            AgentExtension(
+                id="context",
+                roles=("ask_research",),
+                prompt="Read plugin context.",
+                tools=(tool,),
+            ),
+        )
+        plain = agent.create_session("plain")
+        research = agent.create_session(
+            "research", role="ask_research", tools=["lookup"]
+        )
+        assert plain.role == AgentRole.DEFAULT
+        assert research.role == "ask_research"
+        assert sdk.sessions[plain.id]["extensions"]["tools"] == []
+        declaration = sdk.sessions[research.id]
+        assert declaration["tools"] == ["lookup"]
+        assert declaration["extensions"]["tools"] == [tool.descriptor()]
+        assert declaration["extensions"]["prompts"] == ["Read plugin context."]
+        request = {
+            "session_id": research.id,
+            "role": "ask_research",
+            "kind": "tool",
+            "name": "lookup",
+            "arguments": {"parameters": {"query": "formula"}, "workspace": {}},
+        }
+        assert sdk.callback_handler(request)["details"] == {"count": 1}
+        assert seen == [
+            {
+                "session_id": research.id,
+                "role": "ask_research",
+                "workspace": {},
+                "parameters": {"query": "formula"},
+            }
+        ]
+        with pytest.raises(PermissionError, match="role"):
+            sdk.callback_handler({**request, "role": "default"})
+        with pytest.raises(KeyError, match="not declared"):
+            sdk.callback_handler({**request, "session_id": plain.id, "role": "default"})
+    finally:
+        runtime.stop()
+
+
+def test_prompt_extensions_do_not_require_callbacks(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path)
+    try:
+        agent.register_extension(
+            "prompt",
+            AgentExtension(id="context", roles=("default",), prompt="Use the source."),
+        )
+        session = agent.create_session("plain")
+        assert sdk.sessions[session.id]["extensions"]["prompts"] == ["Use the source."]
+        assert not hasattr(sdk, "set_callback_handler")
+    finally:
+        runtime.stop()
+
+
+def test_extensions_reject_tool_collisions(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path)
+    try:
+        first = AgentExtension(id="first", roles=("default",), tools=(_custom_tool(),))
+        agent.register_extension("one", first)
+        with pytest.raises(ValueError, match="already registered"):
+            agent.register_extension("one", first)
+        with pytest.raises(ValueError, match="Duplicate tool"):
+            agent.register_extension(
+                "two",
+                AgentExtension(
+                    id="second", roles=("default",), tools=(_custom_tool(),)
+                ),
+            )
+        for reserved in ("read", "grep", "glob", "edit", "write", "review_notes"):
+            with pytest.raises(ValueError, match="reserved tool"):
+                agent.register_extension(
+                    "reserved",
+                    AgentExtension(
+                        id=reserved,
+                        roles=("default",),
+                        tools=(_custom_tool(reserved),),
+                    ),
+                )
+        agent.register_extension(
+            "two",
+            AgentExtension(
+                id="other_role",
+                roles=("ask_research",),
+                tools=(_custom_tool(),),
+            ),
+        )
+        with pytest.raises(RuntimeError, match="callback support"):
+            agent.create_session("requires_callbacks")
+        assert not sdk.sessions
+        with pytest.raises(ValueError, match="Undeclared tools"):
+            agent.create_session("undeclared", role="note_chunk", tools=["lookup"])
+    finally:
+        runtime.stop()
+
+
+def test_hook_order_and_reviewer_snapshot(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path, runtime_type=CallbackRuntime)
+    seen = []
+
+    def hook(name, priority=0):
+        return AgentCompletionHook(
+            name,
+            lambda context: seen.append(context) or {"continue": name},
+            priority=priority,
+        )
+
+    try:
+        agent.register_extension(
+            "z",
+            AgentExtension(
+                id="last",
+                roles=("note_review",),
+                prompt="Last prompt.",
+                completion_hooks=(hook("a"),),
+                priority=1,
+            ),
+        )
+        agent.register_extension(
+            "a",
+            AgentExtension(
+                id="z",
+                roles=("note_review",),
+                prompt="Second prompt.",
+                completion_hooks=(hook("z"), hook("A")),
+            ),
+        )
+        agent.register_extension(
+            "a",
+            AgentExtension(
+                id="A",
+                roles=("note_review",),
+                prompt="First prompt.",
+                completion_hooks=(hook("early", -1),),
+                review_targets=("extra.md",),
+                review_criteria=("Check the extra file.",),
+                tools=(_custom_tool(),),
+            ),
+        )
+        extra = tmp_path / "extra.md"
+        extra.write_text("content")
+        writer = agent.create_session(
+            "writer",
+            role="note_writer",
+            files={"extra.md": extra},
+            meta={
+                "review": {
+                    "role": "note_review",
+                    "targets": ["extra.md"],
+                    "sources": [],
+                }
+            },
+        )
+        payload = sdk.sessions[writer.id]["extensions"]
+        assert payload["prompts"] == []
+        reviewer = payload["reviewer"]
+        assert "reviewer" not in reviewer
+        assert reviewer["prompts"] == [
+            "First prompt.",
+            "Second prompt.",
+            "Last prompt.",
+        ]
+        assert reviewer["review_targets"] == ["extra.md"]
+        assert reviewer["review_criteria"] == ["Check the extra file."]
+        names = [
+            f"{item['owner']}/{item['id']}" for item in reviewer["completion_hooks"]
+        ]
+        assert names == ["a/early", "a/A", "a/z", "z/a"]
+        calls = [{"name": "read", "arguments": {}, "result": "content"}]
+        for name in names:
+            assert sdk.callback_handler(
+                {
+                    "session_id": writer.id + "-review",
+                    "role": "note_review",
+                    "kind": "completion_hook",
+                    "name": name,
+                    "arguments": {
+                        "text": "report",
+                        "workspace": {"extra.md": str(extra)},
+                        "tool_calls": calls,
+                    },
+                }
+            ) == {"continue": name.split("/")[1]}
+        assert len(seen) == 4
+        assert all(
+            context
+            == {
+                "session_id": writer.id + "-review",
+                "role": "note_review",
+                "workspace": {"extra.md": str(extra)},
+                "text": "report",
+                "tool_calls": calls,
+            }
+            for context in seen
+        )
+        assert (
+            sdk.callback_handler(
+                {
+                    "session_id": writer.id + "-review",
+                    "role": "note_review",
+                    "kind": "tool",
+                    "name": "lookup",
+                    "arguments": {
+                        "parameters": {},
+                        "workspace": {"extra.md": str(extra)},
+                    },
+                }
+            )["content"][0]["text"]
+            == "value"
+        )
+    finally:
+        runtime.stop()
+
+
+def test_unregister_preserves_live_callbacks(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path, runtime_type=CallbackRuntime)
+    try:
+        agent.register_extension(
+            "owner",
+            AgentExtension(id="tool", roles=("default",), tools=(_custom_tool(),)),
+        )
+        session = agent.create_session("live")
+        agent.unregister_extensions("owner")
+        fresh = agent.create_session("fresh")
+        assert sdk.sessions[fresh.id]["extensions"]["tools"] == []
+        request = {
+            "session_id": session.id,
+            "role": "default",
+            "kind": "tool",
+            "name": "lookup",
+            "arguments": {"parameters": {}, "workspace": {}},
+        }
+        assert sdk.callback_handler(request)["content"][0]["text"] == "value"
+        agent.close(session.id)
+        with pytest.raises(KeyError, match="not live"):
+            sdk.callback_handler(request)
+    finally:
+        runtime.stop()
+
+
+def test_plugin_unload_removes_extensions(tmp_path):
+    class ExtensionPlugin(Plugin):
+        id = "extension_owner"
+        requires = ("agent",)
+
+        def setup(self, ctx):
+            ctx.require("agent").register_extension(
+                self.id,
+                AgentExtension(id="prompt", roles=("default",), prompt="Owner prompt."),
+            )
+
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path)
+    try:
+        runtime.plugins.load_plugin(ExtensionPlugin())
+        existing = agent.create_session("existing")
+        runtime.plugins.unload("extension_owner")
+        fresh = agent.create_session("fresh")
+        assert sdk.sessions[existing.id]["extensions"]["prompts"] == ["Owner prompt."]
+        assert sdk.sessions[fresh.id]["extensions"]["prompts"] == []
+        assert agent.get_session(existing.id) is not None
+    finally:
+        runtime.stop()
+
+
+def test_reopen_resolves_extensions_again(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path)
+    try:
+        agent.register_extension(
+            "owner",
+            AgentExtension(
+                id="prompt", roles=("ask_research",), prompt="Original prompt."
+            ),
+        )
+        session = agent.create_session("original", role="ask_research", tools=[])
+        agent.close(session.id)
+        agent.unregister_extensions("owner")
+        agent.register_extension(
+            "owner",
+            AgentExtension(
+                id="prompt",
+                roles=("ask_research",),
+                prompt="Replacement prompt.",
+            ),
+        )
+        original = sdk.call
+
+        def reopen(method, **params):
+            if method == IpcMethod.REOPEN_SESSION:
+                return original(IpcMethod.CREATE_SESSION, **params)
+            return original(method, **params)
+
+        sdk.call = reopen
+        restored = agent.reopen(
+            session.id,
+            name="restored",
+            workspace=FileWorkspace(),
+            system_prompt="",
+            role="ask_research",
+            tools=[],
+            meta={},
+        )
+        assert restored.role == "ask_research"
+        assert sdk.sessions[restored.id]["extensions"]["prompts"] == [
+            "Replacement prompt."
+        ]
+    finally:
+        runtime.stop()
+
+
+@pytest.mark.parametrize("result", [{"continue": ""}, {"continue": "  "}, True])
+def test_hook_rejects_invalid_results(tmp_path, result):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path, runtime_type=CallbackRuntime)
+    try:
+        agent.register_extension(
+            "owner",
+            AgentExtension(
+                id="hook",
+                roles=("default",),
+                completion_hooks=(
+                    AgentCompletionHook("check", lambda context: result),
+                ),
+            ),
+        )
+        session = agent.create_session("hook")
+        with pytest.raises(TypeError, match="non-empty str"):
+            sdk.callback_handler(
+                {
+                    "session_id": session.id,
+                    "role": "default",
+                    "kind": "completion_hook",
+                    "name": "owner/check",
+                    "arguments": {
+                        "text": "malformed report",
+                        "workspace": {},
+                        "tool_calls": [],
+                    },
+                }
+            )
+    finally:
+        runtime.stop()
+
+
+def test_hook_exceptions_propagate(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path, runtime_type=CallbackRuntime)
+
+    def fail(context):
+        raise RuntimeError("hook failure")
+
+    try:
+        agent.register_extension(
+            "owner",
+            AgentExtension(
+                id="hook",
+                roles=("default",),
+                completion_hooks=(AgentCompletionHook("check", fail),),
+            ),
+        )
+        session = agent.create_session("hook")
+        with pytest.raises(RuntimeError, match="hook failure"):
+            sdk.callback_handler(
+                {
+                    "session_id": session.id,
+                    "role": "default",
+                    "kind": "completion_hook",
+                    "name": "owner/check",
+                    "arguments": {
+                        "text": "malformed report",
+                        "workspace": {},
+                        "tool_calls": [],
+                    },
+                }
+            )
+    finally:
+        runtime.stop()
+
+
+def test_extensions_reject_unknown_roles(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path)
+    try:
+        with pytest.raises(ValueError):
+            agent.register_extension(
+                "invalid",
+                AgentExtension(
+                    id="context", roles=("unknown_role",), prompt="Invalid role."
+                ),
+            )
+        session = agent.create_session("plain")
+        assert sdk.sessions[session.id]["extensions"]["prompts"] == []
+    finally:
+        runtime.stop()
+
+
+def test_custom_roles_and_reviewer_callbacks(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path, runtime_type=CallbackRuntime)
+    try:
+        sdk.register_role("custom", "custom_writer", "Writer")
+        sdk.register_role("custom", "custom_review", "Reviewer")
+        for role in ("custom_writer", "custom_review"):
+            agent.register_extension(
+                "custom",
+                AgentExtension(
+                    id=role,
+                    roles=(role,),
+                    prompt=role,
+                    tools=(_custom_tool(handler=lambda context: context["role"]),),
+                ),
+            )
+        agent.register_agent(AgentProfile(name="custom", role="custom_writer"))
+        session = agent.create_session(
+            "custom",
+            agent="custom",
+            tools=["lookup"],
+            meta={"review": {"role": "custom_review", "targets": [], "sources": []}},
+        )
+        assert session.role == "custom_writer"
+        extensions = sdk.sessions[session.id]["extensions"]
+        assert extensions["prompts"] == ["custom_writer"]
+        assert extensions["reviewer"]["prompts"] == ["custom_review"]
+        for suffix, role in (("", "custom_writer"), ("-review", "custom_review")):
+            assert (
+                sdk.callback_handler(
+                    {
+                        "session_id": session.id + suffix,
+                        "role": role,
+                        "kind": "tool",
+                        "name": "lookup",
+                        "arguments": {"parameters": {}, "workspace": {}},
+                    }
+                )
+                == role
+            )
+        agent.close(session.id)
+        sdk.unregister_roles("custom")
+        with pytest.raises(ValueError, match="Unregistered agent role"):
+            agent.reopen(
+                session.id,
+                name="custom",
+                workspace=FileWorkspace(),
+                system_prompt="",
+                role="custom_writer",
+                tools=[],
+                meta={},
+            )
+    finally:
+        runtime.stop()
+
+
+def test_unregistered_roles_are_rejected(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="Unregistered agent role"):
+            agent.register_extension(
+                "custom", AgentExtension(id="missing", roles=("missing",))
+            )
+        with pytest.raises(ValueError, match="Unregistered agent role"):
+            agent.create_session("missing", role="missing")
+        with pytest.raises(ValueError, match="Unregistered agent role"):
+            agent.create_session("review", meta={"review": {"role": "missing"}})
+        assert not sdk.sessions
+    finally:
         runtime.stop()
