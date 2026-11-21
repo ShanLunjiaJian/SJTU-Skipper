@@ -526,9 +526,9 @@ class TestSourceManager:
         hub.start_session("math", meta={"course_name": "高等数学"})
         sid = hub.current.session_id
 
-        hub.current.audio_gate.configure(1930.0, fail_closed=True)
-        hub.current.audio_gate.release(90.0)
-        hub.current.video_gate.release(75.0)
+        hub.current.audio_buffer_limiter.configure(1930.0, fail_closed=True)
+        hub.current.audio_buffer_limiter.release(90.0)
+        hub.current.video_buffer_limiter.release(75.0)
         enabled = lambda: False
         mgr = SourceManager(hub=hub, emit=lambda *a, **kw: None, audio_enabled=enabled)
         mgr.start(
@@ -537,23 +537,23 @@ class TestSourceManager:
                 url="x",
                 course={"class_id": sid},
                 continue_session=True,
-                audio_gate_limit=362.0,
-                video_gate_limit=120.0,
+                audio_buffer_limit=362.0,
+                video_buffer_limit=120.0,
             )
         )
-        assert hub.current.audio_gate.released == 90.0
-        assert hub.current.audio_gate.limit == 1930.0
+        assert hub.current.audio_buffer_limiter.released == 90.0
+        assert hub.current.audio_buffer_limiter.limit == 1930.0
         # A continuous STT window must fit after the next part starts.
-        assert hub.current.audio_gate.wait(90.0 + 960.0)
-        assert hub.current.video_gate.released == 75.0
+        assert hub.current.audio_buffer_limiter.wait(90.0 + 960.0)
+        assert hub.current.video_buffer_limiter.released == 75.0
         assert mgr._current.audio_enabled is enabled
         assert hub.current.session_id == sid, "next period must reuse the session"
 
         mgr.start(SourceSpec(kind=SourceKind.RECORDING, url="y"))
         assert hub.current.session_id != sid, "a new class starts a new session"
-        assert hub.current.audio_gate.released == 0.0
-        assert hub.current.audio_gate.limit == 0.0
-        assert hub.current.video_gate.released == 0.0
+        assert hub.current.audio_buffer_limiter.released == 0.0
+        assert hub.current.audio_buffer_limiter.limit == 0.0
+        assert hub.current.video_buffer_limiter.released == 0.0
         mgr.stop()
 
 
@@ -1081,7 +1081,7 @@ class TestRecordingIngest:
         src._mark_reader_done(MediaKind.VIDEO)
         assert len([e for e in events if e["type"] == "input.ended"]) == 1
 
-    def test_gate_limits_come_from_the_spec(self) -> None:
+    def test_buffer_limits_come_from_the_spec(self) -> None:
         hub = StreamHub(emit=lambda *a, **kw: None)
         mgr = SourceManager(hub=hub, emit=lambda *a, **kw: None)
         spec = SourceSpec(
@@ -1089,16 +1089,16 @@ class TestRecordingIngest:
             url="x",
             title="t",
             realtime=False,
-            audio_gate_limit=120.0,
-            video_gate_limit=60.0,
+            audio_buffer_limit=120.0,
+            video_buffer_limit=60.0,
         )
         with mock.patch("plugins.input.sources.subprocess.Popen") as popen:
             popen.return_value.stdout = None
             popen.return_value.poll.return_value = 1
             mgr.start(spec)
             mgr.stop()
-        assert hub.current.audio_gate.limit == 120.0
-        assert hub.current.video_gate.limit == 60.0
+        assert hub.current.audio_buffer_limiter.limit == 120.0
+        assert hub.current.video_buffer_limiter.limit == 60.0
 
     def test_session_meta_records_mode(self) -> None:
         hub = StreamHub(emit=lambda *a, **kw: None)
@@ -1602,7 +1602,7 @@ class TestClassPlayer:
         monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
         self._open_class(ctx, plugin, kind=kind)
         ctx.streams.register_consumer(
-            "vlm", MediaKind.VIDEO, gate_limit_fn=lambda: 75.0
+            "vlm", MediaKind.VIDEO, buffer_limit_fn=lambda: 75.0
         )
         _course(plugin).streams = {StreamView.MAIN: "https://example.com/main.m3u8"}
         _course(plugin).streams_loading = False
@@ -2187,14 +2187,14 @@ class TestProcessingQueue:
 
 
 @pytest.mark.parametrize("kind", [SourceKind.RECORDING, SourceKind.LIVE])
-def test_manual_source_combines_audio_transport_and_video_consumer_gates(
+def test_manual_source_combines_audio_transport_and_video_buffer_limits(
     monkeypatch, kind
 ) -> None:
     ctx = _make_context()
     plugin = InputPlugin()
     plugin.setup(ctx)
-    ctx.streams.register_consumer("stt", MediaKind.AUDIO, gate_limit_fn=lambda: 37.0)
-    ctx.streams.register_consumer("vlm", MediaKind.VIDEO, gate_limit_fn=lambda: 75.0)
+    ctx.streams.register_consumer("stt", MediaKind.AUDIO, buffer_limit_fn=lambda: 37.0)
+    ctx.streams.register_consumer("vlm", MediaKind.VIDEO, buffer_limit_fn=lambda: 75.0)
     started = []
     ready = threading.Event()
 
@@ -2210,20 +2210,22 @@ def test_manual_source_combines_audio_transport_and_video_consumer_gates(
         )
         assert result.ok
         assert ready.wait(5.0)
-        assert started[0].audio_gate_limit == 37.0
-        assert started[0].video_gate_limit == (0.0 if kind == SourceKind.LIVE else 75.0)
+        assert started[0].audio_buffer_limit == 37.0
+        assert started[0].video_buffer_limit == (
+            0.0 if kind == SourceKind.LIVE else 75.0
+        )
     finally:
         plugin.teardown()
 
 
-def test_gap_fill_combines_audio_transport_and_video_consumer_gates(
+def test_gap_fill_combines_audio_transport_and_video_buffer_limits(
     monkeypatch, tmp_path
 ) -> None:
     ctx = _make_context(tmp_path)
     plugin = InputPlugin()
     plugin.setup(ctx)
-    ctx.streams.register_consumer("stt", MediaKind.AUDIO, gate_limit_fn=lambda: 43.0)
-    ctx.streams.register_consumer("vlm", MediaKind.VIDEO, gate_limit_fn=lambda: 75.0)
+    ctx.streams.register_consumer("stt", MediaKind.AUDIO, buffer_limit_fn=lambda: 43.0)
+    ctx.streams.register_consumer("vlm", MediaKind.VIDEO, buffer_limit_fn=lambda: 75.0)
     plugin._fill_course = {"course_id": "1"}
     plugin._fill_target = "live-session"
     monkeypatch.setattr(
@@ -2235,8 +2237,8 @@ def test_gap_fill_combines_audio_transport_and_video_consumer_gates(
     monkeypatch.setattr(plugin, "_start_source", lambda spec: started.append(spec))
     try:
         assert plugin._start_fill_part({"video_id": "v1"}, continue_session=False)
-        assert started[0].audio_gate_limit == 43.0
-        assert started[0].video_gate_limit == 75.0
+        assert started[0].audio_buffer_limit == 43.0
+        assert started[0].video_buffer_limit == 75.0
         assert started[0].meta["fill_for"] == "live-session"
     finally:
         plugin.teardown()
@@ -2336,7 +2338,7 @@ def _run_audio_reader(hub, chunks, *, enabled=None, emit=None):
     return source
 
 
-def test_audio_reader_gates_each_small_chunk_before_append() -> None:
+def test_audio_reader_limits_each_small_chunk_before_append() -> None:
     hub = StreamHub()
     session = hub.current
     endpoints = []
@@ -2347,7 +2349,7 @@ def test_audio_reader_gates_each_small_chunk_before_append() -> None:
         endpoints.append(end)
         return True
 
-    session.audio_gate.wait = allow
+    session.audio_buffer_limiter.wait = allow
     _run_audio_reader(hub, [b"\x01\x02" * 8000])
     assert endpoints == pytest.approx([0.2, 0.4, 0.5])
     assert session.audio.duration == pytest.approx(0.5)
@@ -2369,12 +2371,12 @@ def test_disabled_audio_discards_payload_and_resumes_real_pcm() -> None:
     assert session.audio.earliest_time == pytest.approx(0.4)
     assert session.audio.read(0, 0.4) == b""
     assert session.audio.read(0.4, 0.6) == b"\x01\x02" * 3200
-    assert session.audio_gate.released == pytest.approx(0.4)
+    assert session.audio_buffer_limiter.released == pytest.approx(0.4)
 
 
-def test_audio_gate_failure_reports_error_without_appending() -> None:
+def test_audio_buffer_failure_reports_error_without_appending() -> None:
     hub = StreamHub()
-    hub.current.audio_gate.wait = lambda end: False
+    hub.current.audio_buffer_limiter.wait = lambda end: False
     events = []
     source = _run_audio_reader(
         hub,
@@ -2646,17 +2648,17 @@ def test_prefetch_and_continuous_audio(tmp_path, monkeypatch) -> None:
         assert download_started.wait(2.0)
         assert source1.running and not source1.finished
         session.audio.append(b"\x01\x02" * 3200)
-        session.audio_gate.release(0.1)
+        session.audio_buffer_limiter.release(0.1)
         source1._mark_reader_done(MediaKind.AUDIO)
         source1._mark_reader_done(MediaKind.VIDEO)
         assert not session.input_done
         assert not STTPlugin._finished(session)
-        assert session.audio_gate.wait(0.2)
+        assert session.audio_buffer_limiter.wait(0.2)
 
         allow_download.set()
         mgr.start(second)
         assert hub.current is session
-        assert session.audio_gate.released == 0.1
+        assert session.audio_buffer_limiter.released == 0.1
         source2 = mgr._current
         assert source2._audio_offset == pytest.approx(0.2)
         session.audio.append(b"\x03\x04" * 3200)

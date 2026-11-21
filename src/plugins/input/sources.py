@@ -59,9 +59,9 @@ class SourceSpec:
     # Save the recording to the session's ``media/`` directory before decoding
     # it.  Ignored for live sources and local files.
     download: bool = False
-    # Backlog limits (media seconds) applied to the session's stream gates.
-    audio_gate_limit: float = 0.0
-    video_gate_limit: float = 0.0
+    # Buffer limits in media seconds.
+    audio_buffer_limit: float = 0.0
+    video_buffer_limit: float = 0.0
     # Prefetch only the next file. Consumer queues continue across part EOF.
     next_source: SourceSpec | None = None
     final_part: bool = True
@@ -516,8 +516,8 @@ class FFmpegSource:
         self._pause_event.set()  # unpause so threads can exit
         session = self._hub.get_session(self._session_id)
         if session is not None and not self.finished:
-            session.audio_gate.close()
-            session.video_gate.close()
+            session.audio_buffer_limiter.close()
+            session.video_buffer_limiter.close()
 
         for proc, label in [
             (self._audio_proc, "audio"),
@@ -663,16 +663,16 @@ class FFmpegSource:
                         return
                     payload = chunk[offset : offset + 6400]
                     duration = current.audio.bytes_to_duration(len(payload))
-                    gate = current.audio_gate
+                    limiter = current.audio_buffer_limiter
                     if self._audio_enabled is not None and not self._audio_enabled():
                         current.audio.discard(duration)
-                        gate.release(current.audio.duration)
+                        limiter.release(current.audio.duration)
                         continue
-                    if not gate.wait(current.audio.duration + duration):
+                    if not limiter.wait(current.audio.duration + duration):
                         if not self._audio_stop.is_set():
                             self._emit(
                                 "input.error",
-                                message="Audio backlog limit timed out. Input stopped.",
+                                message="Audio buffer limit timed out. Input stopped.",
                                 source=self.spec.title,
                             )
                             self.stop()
@@ -790,8 +790,8 @@ class FFmpegSource:
                             )
                             if current is None:
                                 return
-                            gate = getattr(current, "video_gate", None)
-                            if gate is not None and not gate.wait(
+                            limiter = getattr(current, "video_buffer_limiter", None)
+                            if limiter is not None and not limiter.wait(
                                 current.video.duration
                             ):
                                 return
@@ -960,16 +960,16 @@ class SourceManager:
             current.input_done_at = None
             current.audio_input_done = False
             current.video_input_done = False
-            current.audio_gate.configure(
-                max(spec.audio_gate_limit, current.audio_gate.limit)
+            current.audio_buffer_limiter.configure(
+                max(spec.audio_buffer_limit, current.audio_buffer_limiter.limit)
                 if reuse
-                else spec.audio_gate_limit,
-                released=current.audio_gate.released if reuse else 0.0,
+                else spec.audio_buffer_limit,
+                released=current.audio_buffer_limiter.released if reuse else 0.0,
                 fail_closed=True,
             )
-            current.video_gate.configure(
-                spec.video_gate_limit,
-                released=current.video_gate.released if reuse else 0.0,
+            current.video_buffer_limiter.configure(
+                spec.video_buffer_limit,
+                released=current.video_buffer_limiter.released if reuse else 0.0,
             )
 
             media_dir = None

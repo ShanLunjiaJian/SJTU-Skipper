@@ -273,7 +273,7 @@ def test_loop_gap_continues_recording(vlm_plugin, vlm_ctx):
     assert [item.start for item in session.visual] == [5.0]
     assert not vlm_plugin._coverage(session).covers(MediaKind.VIDEO, 0, 5)
     assert session.visual_progress.final
-    assert session.video_gate.released == 10
+    assert session.video_buffer_limiter.released == 10
     rows = [
         json.loads(line) for line in vlm_plugin.visual_path().read_text().splitlines()
     ]
@@ -380,7 +380,7 @@ def test_gap_persistence_failure_propagates(vlm_plugin, vlm_ctx, monkeypatch):
     with pytest.raises(IsADirectoryError):
         vlm_plugin.process_window(0.0, 3.0, _make_frames(3))
     assert not session.visual.items_since(0)
-    assert session.video_gate.released == 0.0
+    assert session.video_buffer_limiter.released == 0.0
     assert vlm_plugin.status()["cursor"] == 0.0
     assert not vlm_plugin._coverage(session).covers(MediaKind.VIDEO, 0.0, 3.0)
 
@@ -391,7 +391,7 @@ def test_live_gap_continues_to_success(vlm_plugin, vlm_ctx):
     settings.set("vlm.cadence_live_seconds", 5.0)
     settings.set("vlm.fusion", False)
     session = vlm_ctx.streams.current
-    session.video_gate.configure(60.0)
+    session.video_buffer_limiter.configure(60.0)
     for _ in range(10):
         session.video.append_frame(_to_jpeg(_synthetic_frame()), duration=1.0)
     vlm_ctx.service("llm").script = [
@@ -412,7 +412,7 @@ def test_live_gap_continues_to_success(vlm_plugin, vlm_ctx):
     vlm_ctx.events.on("vlm.segment", lambda event: segments.append(dict(event.payload)))
     vlm_plugin._process_next_window()
     assert vlm_plugin.status()["cursor"] == 5.0
-    assert session.video_gate.released == 5.0
+    assert session.video_buffer_limiter.released == 5.0
     assert not session.visual.items_since(0)
     assert not vlm_plugin._history
     assert not vlm_plugin._coverage(session).covers(MediaKind.VIDEO, 0.0, 5.0)
@@ -422,7 +422,7 @@ def test_live_gap_continues_to_success(vlm_plugin, vlm_ctx):
     vlm_ctx.events.flush(timeout=2.0)
     assert [item.start for item in session.visual] == [5.0]
     assert session.visual_progress.final
-    assert session.video_gate.released == 10.0
+    assert session.video_buffer_limiter.released == 10.0
     assert list(vlm_plugin._history) == ["Complete next board"]
     assert failures == []
     assert [segment["start"] for segment in segments] == [5.0]
@@ -453,7 +453,7 @@ class TestVlmPlugin:
 
         session = vlm_ctx.streams.current
         session.meta["mode"] = ProcessingMode.FAST
-        session.video_gate.configure(60.0)
+        session.video_buffer_limiter.configure(60.0)
         for index in range(10):
             session.video.append_frame(_to_jpeg(_synthetic_frame()), duration=1.0)
         session.input_done = True
@@ -469,7 +469,7 @@ class TestVlmPlugin:
             items = list(session.visual)
             assert [item.start for item in items] == [0.0, 5.0]
             assert vlm_plugin.status()["cursor"] == 10.0
-            assert session.video_gate.released == 10.0
+            assert session.video_buffer_limiter.released == 10.0
             assert vlm_plugin.busy() is False
         finally:
             vlm_plugin.teardown()
@@ -809,7 +809,7 @@ class TestVlmPlugin:
             "worker-failure", meta={"mode": ProcessingMode.FAST}
         )
         session.input_done = True
-        session.video_gate.configure(1.0)
+        session.video_buffer_limiter.configure(1.0)
         failures = []
         vlm_ctx.events.on(
             "input.error", lambda event: failures.append(dict(event.payload))
@@ -823,7 +823,7 @@ class TestVlmPlugin:
         vlm_plugin._run_recording_session = fail
         vlm_plugin._worker_loop()
         vlm_ctx.events.flush(timeout=1.0)
-        assert not session.video_gate.wait(10.0)
+        assert not session.video_buffer_limiter.wait(10.0)
         assert not vlm_plugin.busy()
         assert failures[0]["session_id"] == session.session_id
         assert "model unavailable" in failures[0]["message"]
@@ -865,7 +865,7 @@ def test_prepare_overlaps_recognition(vlm_plugin, vlm_ctx, monkeypatch):
     settings.set("vlm.cadence_recording_seconds", 5.0)
     session = vlm_ctx.streams.current
     session.meta["mode"] = ProcessingMode.FAST
-    session.video_gate.configure(0)
+    session.video_buffer_limiter.configure(0)
     for _ in range(10):
         session.video.append_frame(_to_jpeg(_synthetic_frame()), duration=1)
     session.input_done = True
@@ -935,6 +935,7 @@ def test_idle_session_does_not_block_recording():
 
 def test_cancel_releases_preparation_pool(vlm_plugin, vlm_ctx):
     session = vlm_ctx.streams.start_session("preparation-cancel")
+    assert vlm_ctx.events.flush(timeout=1)
     vlm_plugin._processing_session = session
     waiting = threading.Event()
     wait_for = session.video.wait_for
@@ -994,3 +995,51 @@ def test_same_id_fill_preserves_board(vlm_plugin, vlm_ctx):
     vlm_ctx.events.flush(timeout=1)
     assert vlm_plugin._coverage(session).covers(MediaKind.VIDEO, 0, 2)
     assert "Valid board theorem" in vlm_plugin.visual_path().read_text()
+
+
+@pytest.mark.parametrize("prepare_ahead", [0, 1])
+def test_sparse_recording_advances_bounded_input(vlm_plugin, vlm_ctx, prepare_ahead):
+    settings = vlm_ctx.service("settings")
+    settings.set("vlm.window_seconds", 20.0)
+    settings.set("vlm.cadence_recording_seconds", 300.0)
+    settings.set("vlm.prepare_ahead", prepare_ahead)
+    session = vlm_ctx.streams.start_session(
+        "sparse", meta={"mode": ProcessingMode.FAST}
+    )
+    assert vlm_ctx.events.flush(timeout=1)
+    session.video_buffer_limiter.configure(vlm_plugin._buffer_limit())
+    windows = []
+
+    def recognize(start, end, frames):
+        windows.append((start, end))
+        return {"text": f"Board at {start}", "image_path": ""}
+
+    vlm_plugin._run_window = recognize
+
+    def produce():
+        for _ in range(940):
+            if not session.video_buffer_limiter.wait(session.video.duration):
+                return
+            session.video.append_frame(b"frame", duration=1.0)
+        session.video_input_done = True
+
+    producer = threading.Thread(target=produce)
+    producer.start()
+    peak_buffered = 0.0
+    deadline = time.monotonic() + 3
+    try:
+        while not session.visual_progress.final and time.monotonic() < deadline:
+            available = session.video.duration
+            peak_buffered = max(peak_buffered, session.video.chunk_count)
+            if vlm_plugin._select_session() is session:
+                vlm_plugin._processing_session = session
+                vlm_plugin._run_recording_session()
+            else:
+                session.video.wait_for(available + 1, timeout=0.01)
+        assert session.visual_progress.final
+        assert windows == [(0, 20), (300, 320), (600, 620), (900, 920), (920, 940)]
+        assert session.video_buffer_limiter.limit == (1 + prepare_ahead) * 20
+        assert peak_buffered <= session.video_buffer_limiter.limit + 21
+    finally:
+        session.video_buffer_limiter.close()
+        producer.join(1)

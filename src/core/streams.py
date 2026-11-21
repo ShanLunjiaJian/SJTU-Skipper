@@ -487,15 +487,12 @@ class TextStream(Sequence[TextItem]):
             return separator.join(item.text for item in self._items)
 
 
-class BacklogGate:
-    """Throttle a producer so unprocessed media stays bounded.
+class MediaBufferLimiter:
+    """Limit unprocessed media in seconds.
 
-    Recording mode ingests media as fast as ffmpeg can decode it.  Without a
-    gate a whole lecture (hours of PCM/MJPEG) would pile up in memory before
-    the (slower) STT/VLM consumers catch up.  Readers call :meth:`wait` before
-    appending; consumers call :meth:`release` after committing a window.
-
-    ``limit <= 0`` disables the gate. A stalled consumer disables the gate
+    Readers call :meth:`wait` before appending media. Consumers call
+    :meth:`release` after processing or discarding media.
+    ``limit <= 0`` disables the limit. A stalled consumer disables the limit
     unless ``fail_closed`` requires the producer to stop instead.
     """
 
@@ -550,7 +547,7 @@ class BacklogGate:
     def wait(self, media_end: float) -> bool:
         """Block until ``media_end - released <= limit``.
 
-        Returns False when the gate closes or a fail-closed gate times out.
+        Returns False when closed or when a fail-closed limiter times out.
         """
 
         with self._lock:
@@ -565,12 +562,13 @@ class BacklogGate:
                 ):
                     if self._fail_closed:
                         _log.error(
-                            "backlog gate %s stalled; stopping producer", self.name
+                            "media buffer limit %s stalled; stopping producer",
+                            self.name,
                         )
                         self._closed = True
                         return False
                     _log.warning(
-                        "backlog gate %s stalled for %.0fs; disabling",
+                        "media buffer limit %s stalled for %.0fs; disabling",
                         self.name,
                         self._stall_timeout,
                     )
@@ -599,11 +597,11 @@ class StreamSet:
     visual: TextStream
     ended_at: float | None = None
     end_reason: str = ""
-    audio_gate: BacklogGate = field(
-        default_factory=lambda: BacklogGate(MediaKind.AUDIO)
+    audio_buffer_limiter: MediaBufferLimiter = field(
+        default_factory=lambda: MediaBufferLimiter(MediaKind.AUDIO)
     )
-    video_gate: BacklogGate = field(
-        default_factory=lambda: BacklogGate(MediaKind.VIDEO)
+    video_buffer_limiter: MediaBufferLimiter = field(
+        default_factory=lambda: MediaBufferLimiter(MediaKind.VIDEO)
     )
     # Set by the input plugin once all ffmpeg readers reached EOF; consumers
     # use it to drain their queues before the session is ended.
@@ -686,8 +684,7 @@ class StreamHub:
         self._sessions: list[StreamSet] = []
         self._last_emit: dict[tuple[str, StreamKind], float] = {}
         # (plugin_id, kind) -> callbacks describing one media consumer.
-        # Producers ask the hub about cursors/backpressure instead of reaching
-        # into the consumer plugins directly (no ``input -> stt/vlm`` imports).
+        # Producers obtain consumer positions and buffer limits through the hub.
         self._consumers: dict[tuple[str, MediaKind], dict[str, Any]] = {}
         self._current = self._create("boot", {})
         self._sessions.append(self._current)
@@ -812,8 +809,8 @@ class StreamHub:
     def _end_locked(self, session: StreamSet, reason: str) -> None:
         session.ended_at = time.time()
         session.end_reason = reason
-        session.audio_gate.close()
-        session.video_gate.close()
+        session.audio_buffer_limiter.close()
+        session.video_buffer_limiter.close()
         for stream_name in (StreamKind.AUDIO, StreamKind.VIDEO):
             stream = session.stream(stream_name)
             key = (session.session_id, stream_name)
@@ -999,11 +996,11 @@ class StreamHub:
         *,
         cursor_fn: Callable[[], float] | None = None,
         busy_fn: Callable[[], bool] | None = None,
-        gate_limit_fn: Callable[[], float] | None = None,
+        buffer_limit_fn: Callable[[], float] | None = None,
     ) -> None:
         """Register a media consumer for the specified media kind.
 
-        Producers use the consumer callbacks to control media backlog.
+        Producers use the consumer callbacks to limit buffered media.
         The input plugin does not need access to the consumer plugin.
         """
 
@@ -1014,7 +1011,7 @@ class StreamHub:
             self._consumers[key] = {
                 "cursor_fn": cursor_fn,
                 "busy_fn": busy_fn,
-                "gate_limit_fn": gate_limit_fn,
+                "buffer_limit_fn": buffer_limit_fn,
             }
 
     def unregister_consumer(
@@ -1056,8 +1053,7 @@ class StreamHub:
     def consumer_cursor(self, kind: MediaKind) -> float:
         """Furthest-back position consumed by the ``kind`` consumers.
 
-        Returns ``0.0`` when nothing has been consumed yet (or when there are no
-        consumers at all), which is what a producer treats as "no backpressure".
+        Returns ``0.0`` when no consumer has consumed media or none is registered.
         """
 
         values: list[float] = []
@@ -1068,15 +1064,15 @@ class StreamHub:
                 _log.exception("consumer cursor failed for kind=%s", kind)
         return min(values) if values else 0.0
 
-    def consumer_gate_limit(self, kind: MediaKind) -> float:
-        """Return the strictest positive consumer backlog limit, or zero."""
+    def consumer_buffer_limit(self, kind: MediaKind) -> float:
+        """Return the strictest positive consumer buffer limit, or zero."""
 
         limits: list[float] = []
-        for fn in self._consumer_fns(kind, "gate_limit_fn"):
+        for fn in self._consumer_fns(kind, "buffer_limit_fn"):
             try:
                 limit = float(fn() or 0.0)
             except Exception:  # noqa: BLE001 - a broken consumer means "no limit"
-                _log.exception("consumer gate limit failed for kind=%s", kind)
+                _log.exception("consumer buffer limit failed for kind=%s", kind)
                 continue
             if limit > 0.0:
                 limits.append(limit)

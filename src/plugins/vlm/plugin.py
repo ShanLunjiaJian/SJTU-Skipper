@@ -243,11 +243,11 @@ class VlmPlugin(Plugin):
             MediaKind.VIDEO,
             cursor_fn=lambda: float(self.status().get("cursor", 0.0) or 0.0),
             busy_fn=lambda: self.busy() or self.flushing(),
-            gate_limit_fn=self._gate_limit,
+            buffer_limit_fn=self._buffer_limit,
         )
         self._consumer_registered = True
 
-    def _gate_limit(self) -> float:
+    def _buffer_limit(self) -> float:
         """How many video seconds may buffer ahead of board recognition."""
 
         if not self.enabled():
@@ -391,7 +391,7 @@ class VlmPlugin(Plugin):
             ]
             session = self._ctx.streams.get_session(session_id)
         if session is not None:
-            session.video_gate.close()
+            session.video_buffer_limiter.close()
         for key in requests:
             try:
                 self._llm.cancel(key)
@@ -1048,7 +1048,7 @@ class VlmPlugin(Plugin):
 
         with self._lock:
             self._cursor = max(self._cursor, float(end))
-        session.video_gate.release(end)
+        session.video_buffer_limiter.release(end)
         # Drop processed frames: a 2h lecture is several GB of MJPEG.
         session.video.trim(max(0.0, float(end) - 30.0))
         return {
@@ -1112,7 +1112,7 @@ class VlmPlugin(Plugin):
                 "note": "板书识别失败，已记录缺口并继续",
             }
             self._cursor = max(self._cursor, float(end))
-            session.video_gate.release(end)
+            session.video_buffer_limiter.release(end)
             session.video.trim(max(0.0, float(end) - 30.0))
         self._ctx.events.emit(
             "vlm.error", session_id=session.session_id, recoverable=True, **failure
@@ -1371,6 +1371,13 @@ class VlmPlugin(Plugin):
             ).final:
                 continue
             cursor = self._recording_cursor.get(session.session_id, 0.0)
+            # Release skipped frames before testing readiness, or a full buffer
+            # prevents the producer from reaching the next sampling window.
+            if str(session.meta.get("mode", "")) == ProcessingMode.FAST:
+                self._trim_before(
+                    session,
+                    min(cursor, session.video.duration - self._window_seconds()),
+                )
             finished = (
                 session.video_input_done
                 or session.input_done
@@ -1433,18 +1440,16 @@ class VlmPlugin(Plugin):
     def _trim_before(self, session: Any, before: float) -> None:
         """Drop frames that no future window will read.
 
-        With a 3/5-minute cadence most frames between windows are never used;
-        trimming them keeps the MJPEG buffer bounded and lets the producer
-        run ahead through the gate.
+        Release unused frame capacity so the producer can reach the next window.
         """
 
         before = max(0.0, float(before))
         if before <= 0.0:
             return
         session.video.trim(before)
-        gate = getattr(session, "video_gate", None)
-        if gate is not None:
-            gate.release(before)
+        limiter = getattr(session, "video_buffer_limiter", None)
+        if limiter is not None:
+            limiter.release(before)
 
     def _setting(self, key: str, default: Any = None) -> Any:
         ctx = self._ctx

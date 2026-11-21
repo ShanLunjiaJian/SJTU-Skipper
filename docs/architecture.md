@@ -44,7 +44,7 @@ agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 
 媒体流的 `duration` 是累计时间，`len()` 返回整秒．文字流的 `len()` 返回条目数．媒体追加不覆盖已有时间区间，但允许时间空洞．`trim(before)` 释放已消费媒体，累计时间保持不变．流不保证保留完整媒体供历史回放．
 
-`StreamHub` 管理会话生命周期和媒体消费者登记．输入通过消费者接口取得读取限额与完成状态，不导入 STT/VLM 实现．`BacklogGate` 限制待处理媒体量．
+`StreamHub` 管理会话生命周期和媒体消费者登记．输入通过消费者接口取得读取限额与完成状态，不导入 STT/VLM 实现．`MediaBufferLimiter` 限制待处理媒体量．
 
 - `session.started`、`session.stopped` 报告会话生命周期．
 - `stream.appended` 报告追加．音频默认每 0.5 秒合并通知，视频默认每 1 秒合并通知，文字逐条通知．
@@ -69,7 +69,7 @@ agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 
 ### 语音识别
 
-`stt` 流水线包含 worker、覆盖记录、音频门控、转写持久化、UI 和 `stt` 服务．提供方差异由适配器翻译成统一接口：批量适配器实现 `transcribe`，流式适配器额外实现 `stream`．`stt.provider` 选择提供方，缺省 `compatible`．缺少凭据或地址时 worker 停泊，不消费音频，状态页说明原因．
+`stt` 流水线包含 worker、覆盖记录、音频缓冲限制、转写持久化、UI 和 `stt` 服务．提供方差异由适配器翻译成统一接口：批量适配器实现 `transcribe`，流式适配器额外实现 `stream`．`stt.provider` 选择提供方，缺省 `compatible`．缺少凭据或地址时 worker 停泊，不消费音频，状态页说明原因．
 
 `compatible` 使用配置的兼容服务．自动转写通过 WebSocket `/v1/stream`，录播使用 `offline`，直播使用 `live`．手动范围转写使用 HTTP．声学切分、上下文和文本合并由服务端负责．
 
@@ -88,7 +88,7 @@ agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 
 ### 板书识别
 
-`vlm` 按采样窗口读取视频帧，通过 `picture_parser` 融合图像，再由 `board_recognition` 角色识别．请求按窗口顺序执行，`vlm.prepare_ahead` 控制图像预处理是否提前执行．已不需要的帧会释放．
+`vlm` 按采样窗口读取视频帧，通过 `picture_parser` 融合图像，再由 `board_recognition` 角色识别．请求按窗口顺序执行，`vlm.prepare_ahead` 控制图像预处理是否提前执行．等待下一窗口期间也释放不再需要的帧，使读取能在媒体缓冲限制内继续，保留末尾一个窗口供结束时处理．
 
 模型每个采样窗口读取采样时间和融合图，逐板面转录为 Markdown．提示词见 `src/plugins/vlm/prompts.py`．模型对照图像复核符号，不读取旧转录．程序用 `vlm.history_windows` 指定的历史窗口精确去重，再把新行写入 `visual`．融合图、板书文本和采样覆盖区间分别保存．
 

@@ -198,17 +198,17 @@ def test_stream_hub_media_consumers() -> None:
         MediaKind.AUDIO,
         cursor_fn=lambda: 4.0,
         busy_fn=lambda: True,
-        gate_limit_fn=lambda: 30.0,
+        buffer_limit_fn=lambda: 30.0,
     )
     hub.register_consumer(
         "vlm",
         MediaKind.AUDIO,
         cursor_fn=lambda: 2.0,
         busy_fn=lambda: False,
-        gate_limit_fn=lambda: 60.0,
+        buffer_limit_fn=lambda: 60.0,
     )
     assert hub.consumer_cursor(MediaKind.AUDIO) == 2.0
-    assert hub.consumer_gate_limit(MediaKind.AUDIO) == 30.0
+    assert hub.consumer_buffer_limit(MediaKind.AUDIO) == 30.0
     assert hub.consumers_busy() == ["stt"]
     assert hub.consumer_cursor(MediaKind.VIDEO) == 0.0
     hub.register_consumer("waiting", MediaKind.AUDIO, cursor_fn=lambda: 0.0)

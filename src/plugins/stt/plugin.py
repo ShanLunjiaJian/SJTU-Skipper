@@ -195,17 +195,16 @@ class STTPlugin(Plugin):
             MediaKind.AUDIO,
             cursor_fn=lambda: self._watermark(ctx.streams.current),
             busy_fn=lambda: self.busy() or self.flushing(),
-            gate_limit_fn=self._gate_limit,
+            buffer_limit_fn=self._buffer_limit,
         )
         self._consumer_registered = True
 
-    def _gate_limit(self) -> float:
+    def _buffer_limit(self) -> float:
         """Return the local unprocessed audio limit in seconds."""
         if not self.enabled():
             return 0.0
         limit = max(0.2, float(self._setting("stt.buffer_seconds", 240.0)))
-        # A streaming service states how much audio one window needs; the gate
-        # must stay open long enough to reach that window (see docs/architecture).
+        # The buffer limit must fit the recognition window declared by the service.
         window = self._state(self._ctx.streams.current).window if self._ctx else 0.0
         return max(limit, 2 * window + 10) if window > 0 else limit
 
@@ -705,7 +704,7 @@ class STTPlugin(Plugin):
     def _skip(self, session: Any, end: float) -> None:
         state = self._state(session)
         state.scheduled = max(state.scheduled, end)
-        session.audio_gate.release(end)
+        session.audio_buffer_limiter.release(end)
         self._trim(session, end)
 
     def _trim(self, session: Any, end: float) -> None:
@@ -747,7 +746,7 @@ class STTPlugin(Plugin):
                 end = max(state.scheduled, state.sent, session.audio.duration)
                 self._fail(session, state.scheduled, end, exc)
                 state.scheduled = end
-                session.audio_gate.release(end)
+                session.audio_buffer_limiter.release(end)
                 attempts = 0
                 if end <= start + EPS:
                     return
@@ -827,9 +826,9 @@ class STTPlugin(Plugin):
         try:
             stream.reset(round(start * 1000))
             state.window = float(stream.metadata.get("max_audio_ms", 0) or 0) / 1000.0
-            session.audio_gate.configure(
-                max(session.audio_gate.limit, self._gate_limit()),
-                released=session.audio_gate.released,
+            session.audio_buffer_limiter.configure(
+                max(session.audio_buffer_limiter.limit, self._buffer_limit()),
+                released=session.audio_buffer_limiter.released,
                 fail_closed=True,
             )
         except BaseException:
@@ -962,7 +961,7 @@ class STTPlugin(Plugin):
             return
         self._coverage(session).mark(MediaKind.AUDIO, start, end)
         self._state(session).error = ""
-        session.audio_gate.release(end)
+        session.audio_buffer_limiter.release(end)
         self._trim(session, end)
         self._ctx.streams.seal_text(session.session_id, StreamKind.TRANSCRIPT, end)
 

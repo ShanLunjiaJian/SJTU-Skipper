@@ -281,7 +281,7 @@ def test_continuous_stream_and_subsecond_tail(
     assert all(len(frame) <= 6400 for frame in client.streams[0].frames)
     assert b"".join(client.streams[0].frames) == b"\x01\x00" * 7200
     assert client.streams[0].finished
-    assert plugin._gate_limit() >= 1930
+    assert plugin._buffer_limit() >= 1930
     assert plugin.status()["cursor"] == pytest.approx(0.45)
     assert plugin.status()["partial"] is None
     assert plugin.status()["anomalies"][0]["code"] == "repetition_collapsed"
@@ -292,19 +292,19 @@ def test_continuous_stream_and_subsecond_tail(
     assert "confidence" not in session.transcript[0].meta
 
 
-def test_stream_window_releases_producer_gate(app, monkeypatch):
+def test_stream_window_releases_producer_buffer(app, monkeypatch):
     plugin, ctx = app
     stream = Stream()
     stream.metadata["max_audio_ms"] = 1000
     monkeypatch.setattr(plugin, "_new_client", lambda: Client([stream]))
     session = ctx.streams.current
     session.meta["mode"] = ProcessingMode.FAST
-    session.audio_gate.configure(0.2, fail_closed=True)
+    session.audio_buffer_limiter.configure(0.2, fail_closed=True)
     ctx.service("settings").set_many({"stt.buffer_seconds": 0.2, "stt.enabled": True})
 
     def produce():
         for _ in range(10):
-            if not session.audio_gate.wait(session.audio.duration + 0.2):
+            if not session.audio_buffer_limiter.wait(session.audio.duration + 0.2):
                 return
             session.audio.append(b"\x01\x00" * 3200)
         session.audio_input_done = True
@@ -312,12 +312,17 @@ def test_stream_window_releases_producer_gate(app, monkeypatch):
     producer = threading.Thread(target=produce, daemon=True)
     producer.start()
     try:
-        wait_until(lambda: session.audio_input_done and len(session.transcript) == 1)
-        assert session.audio_gate.limit >= 12
+        wait_until(
+            lambda: (
+                session.audio_input_done and abs(plugin.status()["cursor"] - 2.0) < 1e-6
+            )
+        )
+        assert len(session.transcript) == 1
+        assert session.audio_buffer_limiter.limit >= 12
         assert plugin.status()["cursor"] == pytest.approx(2.0)
         assert b"".join(stream.frames) == b"\x01\x00" * 32000
     finally:
-        session.audio_gate.close()
+        session.audio_buffer_limiter.close()
         producer.join(timeout=1)
 
 
@@ -349,7 +354,7 @@ def test_accepted_and_partial_do_not_commit_or_trim(
     )
     assert plugin._coverage(session).covered_seconds(MediaKind.AUDIO) == 0
     assert session.audio.earliest_time == 0
-    assert session.audio_gate.released == 0
+    assert session.audio_buffer_limiter.released == 0
     assert len(session.transcript) == 0
     assert plugin.status()["cursor"] == 0
     assert any("临时" in b.get("text", "") for b in plugin._render_page())
@@ -380,7 +385,7 @@ def test_exact_coverage_gaps_and_discarded_audio(
     ]
     assert plugin.status()["cursor"] == 1.0
     assert plugin.status()["uncovered_seconds"] == 1.0
-    assert session.audio_gate.released == 3
+    assert session.audio_buffer_limiter.released == 3
 
 
 def test_connection_failure_replays_only_uncommitted_audio(
