@@ -4,10 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>SJTU-Skipper</title>
-    <link
-      rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%231a73e8'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-size='19' fill='%23ffffff'%3E%E2%88%91%3C/text%3E%3C/svg%3E"
-    >
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <script src="/static/theme-boot.js"></script>
     <link rel="stylesheet" href="/static/theme.css">
     <link rel="stylesheet" href="/static/styles.css">
@@ -16,23 +13,97 @@
   <body class="overflow-hidden">
     <div id="app" class="d-flex flex-column vh-100 min-w-0">
       <nav
-        class="navbar navbar-expand flex-shrink-0 border-bottom bg-body fg-body"
+        class="app-navbar navbar navbar-expand flex-shrink-0 fg-body"
         aria-label="主导航"
       >
         <div class="container-fluid flex-wrap gap-2">
-          <span class="navbar-brand mb-0 fw-bold">SJTU-Skipper</span>
+          <span class="navbar-brand mb-0">
+            <svg width="22" height="22" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+              <defs>
+                <linearGradient id="nav-logo-grad" x1="16" y1="3.5" x2="16" y2="28.5" gradientUnits="userSpaceOnUse">
+                  <stop offset="0%" class="brand-logo-stop-1"/>
+                  <stop offset="50%" class="brand-logo-stop-2"/>
+                  <stop offset="100%" class="brand-logo-stop-3"/>
+                </linearGradient>
+              </defs>
+              <g class="brand-logo-cloud">
+                <circle cx="8.8" cy="18.8" r="5.6"/>
+                <circle cx="16" cy="13.8" r="6.8"/>
+                <circle cx="23.2" cy="18.8" r="5.4"/>
+                <rect x="8.4" y="15.2" width="15.2" height="9.2" rx="4.6"/>
+              </g>
+              <path
+                d="M22.2 5.4C20.2 3.4 17.6 4.4 17 8.6L15 23.4C14.4 27.6 11.8 28.6 9.8 26.6"
+                stroke="url(#nav-logo-grad)"
+                stroke-width="3.2"
+                stroke-linecap="round"
+              />
+            </svg>
+            <span class="navbar-brand-text">SJTU-Skipper</span>
+          </span>
           <div class="nav navbar-nav flex-row lg:d-none">
             <button class="nav-link" type="button" data-drawer-target="#sidebar-left">课程</button>
             <button class="nav-link" type="button" data-drawer-target="#sidebar-right">详情</button>
           </div>
           <ul id="menubar" class="nav navbar-nav flex-row flex-wrap me-auto" aria-label="菜单"></ul>
-          <ul class="nav navbar-nav flex-row flex-wrap align-items-center" aria-label="操作">
+          <ul class="nav navbar-nav navbar-actions flex-row flex-wrap align-items-center" aria-label="操作">
             <li class="nav-item">
-              <button id="palette-btn" class="nav-link" type="button">命令</button>
+              <button
+                id="theme-btn"
+                class="nav-link"
+                type="button"
+                title="切换外观（跟随系统）"
+                aria-label="切换外观"
+              >
+                <svg
+                  width="15"
+                  height="15"
+                  fill="currentColor"
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path d="M8 15A7 7 0 1 0 8 1zm0 1A8 8 0 1 1 8 0a8 8 0 0 1 0 16"/>
+                </svg>
+                <span class="theme-btn-label">跟随系统</span>
+              </button>
+            </li>
+            <li class="nav-item">
+              <button id="palette-btn" class="nav-link" type="button" title="打开命令面板 (Ctrl+P)">
+                <svg
+                  width="15"
+                  height="15"
+                  fill="currentColor"
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001q.044.06.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1 1 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0"
+                  />
+                </svg>
+                <span>命令</span>
+              </button>
             </li>
             <li class="nav-item">
               <form method="post" action="/logout" class="m-0">
-                <button class="nav-link" type="submit">退出</button>
+                <button class="nav-link" type="submit">
+                  <svg
+                    width="15"
+                    height="15"
+                    fill="currentColor"
+                    viewBox="0 0 16 16"
+                    aria-hidden="true"
+                  >
+                    <path
+                      fill-rule="evenodd"
+                      d="M10 12.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h8a.5.5 0 0 1 .5.5v2a.5.5 0 0 0 1 0v-2A1.5 1.5 0 0 0 9.5 2h-8A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h8a1.5 1.5 0 0 0 1.5-1.5v-2a.5.5 0 0 0-1 0z"
+                    />
+                    <path
+                      fill-rule="evenodd"
+                      d="M15.854 8.354a.5.5 0 0 0 0-.708l-3-3a.5.5 0 0 0-.708.708L14.293 7.5H5.5a.5.5 0 0 0 0 1h8.793l-2.147 2.146a.5.5 0 0 0 .708.708z"
+                    />
+                  </svg>
+                  <span>退出</span>
+                </button>
               </form>
             </li>
           </ul>
@@ -44,43 +115,49 @@
           class="lg:drawer drawer-start sidebar-left min-w-0 min-h-0 lg:flex-column lg:align-self-stretch overflow-hidden"
           aria-label="课程"
         >
-          <div class="drawer-header d-flex gap-2">
-            <h2 class="drawer-title h5 mb-0 me-auto">课程</h2>
-            <button
-              id="refresh-courses"
-              class="btn btn-text theme-secondary d-inline-flex align-items-center justify-content-center"
-              type="button"
-              data-action="input.refresh_courses"
-              title="刷新课程列表"
-              aria-label="刷新课程列表"
-              hidden
-            >
-              <svg
-                width="1em"
-                height="1em"
-                fill="currentColor"
-                class="bi bi-arrow-clockwise"
-                viewBox="0 0 16 16"
-                aria-hidden="true"
+          <div class="drawer-header">
+            <h2 class="drawer-title mb-0">课程</h2>
+            <div class="drawer-header-actions">
+              <button
+                id="refresh-courses"
+                class="btn-text btn-icon btn-sm theme-secondary"
+                type="button"
+                data-action="input.refresh_courses"
+                title="刷新课程列表"
+                aria-label="刷新课程列表"
+                hidden
               >
-                <path
-                  fill-rule="evenodd"
-                  d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2z"
-                />
-                <path
-                  d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466"
-                />
-              </svg>
-            </button>
-            <button
-              class="sidebar-close btn btn-text theme-secondary"
-              type="button"
-              data-side="left"
-              title="收起课程面板"
-              aria-label="收起课程面板"
-            >
-              ×
-            </button>
+                <svg
+                  width="15"
+                  height="15"
+                  fill="currentColor"
+                  class="bi bi-arrow-clockwise"
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path
+                    fill-rule="evenodd"
+                    d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2z"
+                  />
+                  <path
+                    d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466"
+                  />
+                </svg>
+              </button>
+              <button
+                class="sidebar-close btn-text btn-icon btn-sm theme-secondary"
+                type="button"
+                data-side="left"
+                title="收起课程面板"
+                aria-label="收起课程面板"
+              >
+                <svg width="15" height="15" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708"
+                  />
+                </svg>
+              </button>
+            </div>
           </div>
           <div id="left-tabs" class="nav nav-tabs flex-shrink-0 flex-nowrap overflow-x-auto"></div>
           <div
@@ -94,10 +171,34 @@
           title="拖动调整宽度"
         ></div>
         <main class="center d-flex flex-column min-w-0 min-h-0">
-          <div id="page-tabs" class="nav nav-tabs flex-shrink-0 flex-nowrap overflow-x-auto"></div>
-          <div id="page-content" class="page-content flex-grow-1 min-w-0 min-h-0 overflow-auto p-3">
-            <div class="text-center p-5">
+          <div id="page-tabs" class="nav nav-tabs flex-shrink-0 flex-nowrap overflow-x-auto" hidden></div>
+          <div id="page-content" class="page-content flex-grow-1 min-w-0 min-h-0 overflow-auto">
+            <div class="welcome-empty">
+              <div class="welcome-emblem" aria-hidden="true">
+                <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                  <defs>
+                    <linearGradient id="hero-logo-grad" x1="16" y1="3.5" x2="16" y2="28.5" gradientUnits="userSpaceOnUse">
+                      <stop offset="0%" class="brand-logo-stop-1"/>
+                      <stop offset="50%" class="brand-logo-stop-2"/>
+                      <stop offset="100%" class="brand-logo-stop-3"/>
+                    </linearGradient>
+                  </defs>
+                  <g class="brand-logo-cloud">
+                    <circle cx="8.8" cy="18.8" r="5.6"/>
+                    <circle cx="16" cy="13.8" r="6.8"/>
+                    <circle cx="23.2" cy="18.8" r="5.4"/>
+                    <rect x="8.4" y="15.2" width="15.2" height="9.2" rx="4.6"/>
+                  </g>
+                  <path
+                    d="M22.2 5.4C20.2 3.4 17.6 4.4 17 8.6L15 23.4C14.4 27.6 11.8 28.6 9.8 26.6"
+                    stroke="url(#hero-logo-grad)"
+                    stroke-width="3.2"
+                    stroke-linecap="round"
+                  />
+                </svg>
+              </div>
               <h2>未选择课次</h2>
+              <p>从左侧课程列表选择一节课次，或按 Ctrl+P 打开命令面板</p>
             </div>
           </div>
         </main>
@@ -111,19 +212,25 @@
           class="lg:drawer drawer-end sidebar-right min-w-0 min-h-0 lg:flex-column lg:align-self-stretch overflow-hidden"
           aria-label="详情"
         >
-          <div class="drawer-header d-flex justify-content-between">
-            <h2 class="drawer-title h5 mb-0">详情</h2>
-            <button
-              class="sidebar-close btn btn-text theme-secondary"
-              type="button"
-              data-side="right"
-              title="收起详情面板"
-              aria-label="收起详情面板"
-            >
-              ×
-            </button>
+          <div class="drawer-header justify-content-between">
+            <h2 class="drawer-title mb-0">详情</h2>
+            <div class="drawer-header-actions">
+              <button
+                class="sidebar-close btn-text btn-icon btn-sm theme-secondary"
+                type="button"
+                data-side="right"
+                title="收起详情面板"
+                aria-label="收起详情面板"
+              >
+                <svg width="15" height="15" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708"
+                  />
+                </svg>
+              </button>
+            </div>
           </div>
-          <div id="right-context" class="p-3 border-bottom" hidden></div>
+          <div id="right-context" hidden></div>
           <div id="right-tabs" class="nav nav-tabs flex-shrink-0 flex-nowrap overflow-x-auto"></div>
           <div
             id="right-toolbox"
@@ -135,6 +242,7 @@
           type="button"
           data-side="left"
           title="展开课程面板"
+          aria-label="展开课程面板"
         >
           ›
         </button>
@@ -143,14 +251,16 @@
           type="button"
           data-side="right"
           title="展开详情面板"
+          aria-label="展开详情面板"
         >
           ‹
         </button>
       </div>
-      <footer id="statusbar" class="flex-shrink-0 border-top bg-1 fg-body overflow-x-auto">
+      <footer id="statusbar" class="flex-shrink-0 fg-body overflow-x-auto">
         <ul class="nav flex-nowrap align-items-center text-nowrap">
           <li class="nav-item flex-shrink-0">
             <span class="nav-link d-inline-flex align-items-center gap-2 fg-body">
+              <span class="status-dot is-connecting" aria-hidden="true"></span>
               <span>状态</span><b id="connection" role="status">连接中</b>
             </span>
           </li>
@@ -163,11 +273,15 @@
           <div class="toast-body flex-grow-1 min-w-0"></div>
           <button
             type="button"
-            class="btn btn-text theme-secondary flex-shrink-0 me-3"
+            class="btn-text btn-icon btn-sm theme-secondary flex-shrink-0 me-2"
             data-toast-close
             aria-label="关闭"
           >
-            ×
+            <svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true">
+              <path
+                d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708"
+              />
+            </svg>
           </button>
         </div>
       </div>
@@ -178,7 +292,7 @@
         class="form-control"
         type="text"
         aria-label="搜索命令"
-        placeholder="搜索命令"
+        placeholder="搜索命令…"
         autocomplete="off"
       >
       <div id="palette-list" class="palette-list" role="listbox"></div>

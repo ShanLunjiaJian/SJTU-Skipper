@@ -671,17 +671,6 @@ class SettingsView:
         blocks.extend(
             [
                 {"type": BlockType.MARKDOWN, "text": "### 发现端点模型"},
-                {
-                    "type": BlockType.BUTTONS,
-                    "buttons": [
-                        {
-                            "label": "检查端点模型",
-                            "action": "llm.check",
-                            "value": {"provider": pid},
-                            "class": "btn-outline theme-secondary",
-                        }
-                    ],
-                },
                 *self._discovery(provider),
             ]
         )
@@ -690,19 +679,27 @@ class SettingsView:
     def _discovery(self, provider: Mapping[str, Any]) -> list[dict[str, Any]]:
         pid = str(provider["id"])
         check = self.checks.get(pid)
+        check_button = {
+            "label": "检查端点模型",
+            "action": "llm.check",
+            "value": {"provider": pid},
+            "class": "btn-outline theme-secondary",
+        }
         if check is None:
             return [
                 {
                     "type": BlockType.MARKDOWN,
                     "text": "尚未检查端点模型．检查结果只列出本地未添加的模型．",
-                }
+                },
+                {"type": BlockType.BUTTONS, "buttons": [check_button]},
             ]
         if check.get("error"):
             return [
                 {
                     "type": BlockType.MARKDOWN,
                     "text": f"检查失败：{check['error']}．检查端点地址与凭据后重试．",
-                }
+                },
+                {"type": BlockType.BUTTONS, "buttons": [check_button]},
             ]
         known = {model["id"] for model in provider.get("models", [])}
         missing = [item for item in check.get("models", []) if item["id"] not in known]
@@ -714,7 +711,8 @@ class SettingsView:
                         f"端点返回 {len(check.get('models', []))} 个模型，"
                         "本地已全部添加．"
                     ),
-                }
+                },
+                {"type": BlockType.BUTTONS, "buttons": [check_button]},
             ]
         return [
             {
@@ -758,8 +756,9 @@ class SettingsView:
                         "label": f"添加全部（{len(missing)}）",
                         "action": "llm.model.add_all",
                         "value": {"provider": pid},
-                        "class": "btn-outline theme-secondary",
-                    }
+                        "class": "btn-solid theme-primary",
+                    },
+                    check_button,
                 ],
             },
         ]

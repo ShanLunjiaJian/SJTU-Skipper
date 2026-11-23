@@ -182,17 +182,17 @@ class NotesView:
         return [
             {
                 "type": BlockType.HTML,
-                "html": f'''<section class="p-3 border-bottom" aria-label="完整笔记">
+                "html": f'''<section class="sidebar-section" aria-label="完整笔记">
               <div class="d-flex align-items-center justify-content-between gap-2 mb-3">
                 <h3 class="fs-md fw-semibold mb-0">完整笔记</h3>
                 <span class="badge theme-{state_theme}" role="status">{state_label}</span>
               </div>
-              <div class="d-flex flex-wrap align-items-center gap-2">
+              {notice}
+              <div class="d-flex flex-wrap align-items-center gap-2{" mt-2" if notice else ""}">
                 <button type="button" class="btn-outline theme-primary" data-action="notes.read">打开完整笔记</button>
                 <button type="button" class="btn-outline theme-secondary" data-action="notes.logs">查看日志</button>
                 <button type="button" class="{style}" data-action="notes.{action}">{label}</button>
               </div>
-              {notice}
               <div class="mt-3 pt-3 border-top">
                 <label class="d-block fw-semibold mb-2" for="notes-on-stop">课次结束策略</label>
                 <select id="notes-on-stop" name="mode" class="form-control min-w-0"
@@ -404,7 +404,7 @@ class NotesView:
         return [
             {
                 "type": BlockType.HTML,
-                "html": f'''<section class="px-3 pb-3" aria-label="分段笔记">
+                "html": f'''<section class="sidebar-section" aria-label="分段笔记">
               <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
                 <h3 class="fs-md fw-semibold mb-0">分段笔记</h3>
                 <div class="d-flex align-items-center gap-2">
@@ -414,7 +414,7 @@ class NotesView:
                   </div>
                 </div>
               </div>
-              <p class="fg-2 mb-2" role="status">已发布至 {status["published_end"]:.0f} 秒{gaps}</p>
+              <p class="fg-2 mb-3" role="status">已发布至 {status["published_end"]:.0f} 秒{gaps}</p>
               <button type="button" class="btn-outline theme-primary" data-action="notes.chunk_read">打开分段笔记</button>
             </section>''',
             }
