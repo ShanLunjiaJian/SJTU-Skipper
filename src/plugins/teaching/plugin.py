@@ -44,7 +44,7 @@ def _text(payload, *names):
 class TeachingPlugin(Plugin):
     id = "teaching"
     requires = ("settings", "agent", "reader")
-    optional_requires = ("notes", "learning", "conversation", "preference")
+    optional_requires = ("notes", "conversation", "preference")
     provides = ("teaching",)
 
     def setup(self, ctx: PluginContext) -> None:
@@ -225,25 +225,7 @@ class TeachingPlugin(Plugin):
         return str(meta.get("course_name") or meta.get("course") or "")
 
     def _shared_system_prompt(self, sid: str, base: str) -> str:
-        notes = self.ctx.service("notes") if self.ctx is not None else None
-        common = ""
-        getter = getattr(notes, "common_prompt", None)
-        if callable(getter):
-            try:
-                common = str(getter(sid) or "")
-            except Exception:  # noqa: BLE001
-                common = ""
-        if not common:
-            return base + "\n\n" + STYLE_RULES
-        course = self._course_name(sid)
-        common = common.replace("{{course}}", course) if course else common.replace("{{course}}", "本课程")
-        return (
-            base
-            + "\n\n" + STYLE_RULES
-            + "\n\n## 课程通用要求（来自笔记公共提示词，优先遵守格式、风格与准确性）\n"
-            + "（其中“写笔记/输出笔记”只适用于写笔记场景；你在教学对话中只需沿用其中的格式、术语、语气和准确性要求。）\n"
-            + common
-        )
+        return base + "\n\n" + STYLE_RULES
 
     def _ensure_session(self, sid: str) -> str:
         """Return a live teacher session id, reopening the saved conversation."""

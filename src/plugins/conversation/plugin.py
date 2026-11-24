@@ -83,6 +83,9 @@ class ConversationService:
     def append(self, conversation_id, role, text) -> None:
         self._plugin.append(conversation_id, role, text)
 
+    def append_choice(self, conversation_id, question_id, prompt, choices) -> None:
+        self._plugin.append_choice(conversation_id, question_id, prompt, choices)
+
     def get(self, conversation_id):
         return self._plugin.get(conversation_id)
 
@@ -294,6 +297,27 @@ class ConversationPlugin(Plugin):
                 handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
         self.ctx.ui.refresh("conversation")
 
+    def append_choice(self, conversation_id, question_id, prompt, choices) -> None:
+        conversation = self.get(conversation_id)
+        if conversation is None:
+            return
+        entry = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "role": "assistant",
+            "kind": "choice",
+            "question_id": str(question_id),
+            "prompt": str(prompt),
+            "choices": [
+                {"value": str(item.get("value")), "label": str(item.get("label"))}
+                for item in choices
+            ],
+        }
+        with self._lock:
+            conversation.directory.mkdir(parents=True, exist_ok=True)
+            with conversation.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        self.ctx.ui.refresh("conversation.choice")
+
     def open(self, conversation_id) -> bool:
         conversation = self.get(conversation_id)
         if conversation is None:
@@ -437,6 +461,22 @@ class ConversationPlugin(Plugin):
         for entry in entries:
             role = str(entry.get("role") or "")
             label = {"user": "你", "assistant": "助教", "system": "系统"}.get(role, role)
+            if entry.get("kind") == "choice":
+                buttons = "".join(
+                    f'<button type="button" class="conv-choice-option" '
+                    f'data-action="learning.answer_choice" '
+                    f'data-value="{html.escape(json.dumps({"question_id": entry.get("question_id"), "value": choice.get("value")}, ensure_ascii=False), quote=True)}">'
+                    f'{html.escape(str(choice.get("label") or ""))}</button>'
+                    for choice in (entry.get("choices") or [])
+                )
+                bubbles.append(
+                    f'<div class="conv-row conv-{html.escape(role)}">'
+                    f'<div class="conv-role">{html.escape(label)}</div>'
+                    f'<div class="conv-bubble conv-choice">{render_markdown(str(entry.get("prompt") or ""))}'
+                    f'<div class="conv-choice-options">{buttons}</div></div>'
+                    f'</div>'
+                )
+                continue
             bubbles.append(
                 f'<div class="conv-row conv-{html.escape(role)}">'
                 f'<div class="conv-role">{html.escape(label)}</div>'

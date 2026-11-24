@@ -417,6 +417,12 @@
     const connection = $("#connection");
     if (connection) {
       connection.textContent = ok ? "已连接" : "连接断开";
+      const dot = connection.parentElement?.querySelector(".status-dot");
+      if (dot) {
+        dot.classList.toggle("is-connected", Boolean(ok));
+        dot.classList.toggle("is-disconnected", ok === false);
+        dot.classList.toggle("is-connecting", ok === null);
+      }
     }
   }
 
@@ -556,10 +562,11 @@
       }
       if (rowActions.length || sharedEditor) {
         const td = el("td", { class: "text-nowrap" });
+        const actionsBox = el("div", { class: "table-actions" });
         if (sharedEditor) {
           const button = el("button", {
             type: "button",
-            class: "btn-text theme-secondary btn-sm",
+            class: "btn-text btn-icon theme-secondary btn-sm",
             "aria-label": `编辑 ${rowObj.title || rowObj.model || rowObj.role || key}`,
             title: `编辑 ${rowObj.title || rowObj.model || rowObj.role || key}`,
             "aria-pressed": String(key === selectedKey),
@@ -569,7 +576,7 @@
           button.innerHTML =
             '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M15.502 1.94a.5.5 0 0 1 0 .706L14.459 3.69l-2-2L13.502.646a.5.5 0 0 1 .707 0l1.293 1.293zm-1.75 2.456-2-2L4.939 9.21a.5.5 0 0 0-.121.196l-.805 2.414a.25.25 0 0 0 .316.316l2.414-.805a.5.5 0 0 0 .196-.12l6.813-6.814z"/><path fill-rule="evenodd" d="M1 13.5A1.5 1.5 0 0 0 2.5 15h11a1.5 1.5 0 0 0 1.5-1.5v-6a.5.5 0 0 0-1 0v6a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5H9a.5.5 0 0 0 0-1H2.5A1.5 1.5 0 0 0 1 2.5z"/></svg>';
           button.addEventListener("click", () => selectRow(key));
-          td.appendChild(button);
+          actionsBox.appendChild(button);
         }
         for (const action of [...(rowObj.actions || []), ...rowActions]) {
           let value = action.value ? { ...action.value } : {};
@@ -578,12 +585,10 @@
           } else if (!action.value) {
             value = { ...rowObj };
           }
-          const button = actionButton(
-            action.label || "执行",
-            action.action,
-            value,
-            action.class || "btn-solid theme-secondary btn-sm",
-          );
+          const baseClass = action.class || "btn-solid theme-secondary btn-sm";
+          const btnClass =
+            action.icon && !baseClass.includes("btn-icon") ? `${baseClass} btn-icon` : baseClass;
+          const button = actionButton(action.label || "执行", action.action, value, btnClass);
           if (action.icon) {
             const label = `${action.label || "执行"} ${rowObj.model || rowObj.title || key}`;
             button.setAttribute("aria-label", label);
@@ -605,10 +610,11 @@
               '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8m4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5"/><path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0"/></svg>';
           }
           const before = rowObj.actions?.includes(action)
-            ? td.querySelector("[data-edit-row]")
+            ? actionsBox.querySelector("[data-edit-row]")
             : null;
-          td.insertBefore(button, before);
+          actionsBox.insertBefore(button, before);
         }
+        td.appendChild(actionsBox);
         tr.appendChild(td);
       }
       wanted.add(tr);
@@ -704,23 +710,23 @@
       title: node.label || node.id || "",
       "aria-current": node.active ? "page" : undefined,
     });
-    row.style.paddingInlineStart = `${16 + depth * 8}px`;
+    row.style.paddingInlineStart = `${12 + depth * 14}px`;
     if (node.icon) row.appendChild(el("span", { text: node.icon, "aria-hidden": "true" }));
-    row.appendChild(
+    const copy = el("span", { class: "tree-copy" }, [
       el("span", {
         class: "min-w-0 text-truncate",
         text: node.label || node.id || "",
         title: node.label || node.id || "",
       }),
-    );
-    if (node.subtitle)
-      row.appendChild(
-        el("span", {
-          class: "small fg-2 fw-normal flex-grow-1 min-w-0 text-truncate",
-          text: node.subtitle,
-          title: node.subtitle,
-        }),
-      );
+      node.subtitle
+        ? el("span", {
+            class: "small fg-2 fw-normal min-w-0 text-truncate",
+            text: node.subtitle,
+            title: node.subtitle,
+          })
+        : null,
+    ]);
+    row.appendChild(copy);
     if (node.badge) {
       row.appendChild(
         el("span", {
@@ -734,9 +740,9 @@
       const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       caret.setAttribute("role", "button");
       caret.setAttribute("aria-label", expanded ? "收起" : "展开");
-      caret.setAttribute("class", "ms-auto flex-shrink-0");
-      caret.setAttribute("width", "16");
-      caret.setAttribute("height", "16");
+      caret.setAttribute("class", "tree-caret ms-auto flex-shrink-0");
+      caret.setAttribute("width", "14");
+      caret.setAttribute("height", "14");
       caret.setAttribute("viewBox", "0 0 32 32");
       caret.setAttribute("fill", "currentColor");
       caret.setAttribute("aria-hidden", "true");
@@ -1123,10 +1129,10 @@
                 ? null
                 : "";
     };
-    const localButton = (label, callback) => {
+    const localButton = (label, callback, cls = "btn-solid theme-secondary btn-sm") => {
       const button = el("button", {
         type: "button",
-        class: "btn-solid theme-secondary btn-sm",
+        class: cls,
         text: label,
       });
       button.addEventListener("click", () => {
@@ -1291,10 +1297,16 @@
           row.append(
             keyInput,
             child.node,
-            localButton("删除", () => {
-              rows.splice(rows.indexOf(entry), 1);
-              row.remove();
-            }),
+            el("div", { class: "form-actions" }, [
+              localButton(
+                "删除",
+                () => {
+                  rows.splice(rows.indexOf(entry), 1);
+                  row.remove();
+                },
+                "btn-outline theme-danger btn-sm",
+              ),
+            ]),
           );
           list.appendChild(row);
         };
@@ -1355,10 +1367,14 @@
             el("div", { class: "form-actions" }, [
               localButton("上移", () => move(-1)),
               localButton("下移", () => move(1)),
-              localButton("删除", () => {
-                entries.splice(entries.indexOf(entry), 1);
-                row.remove();
-              }),
+              localButton(
+                "删除",
+                () => {
+                  entries.splice(entries.indexOf(entry), 1);
+                  row.remove();
+                },
+                "btn-outline theme-danger btn-sm",
+              ),
             ]),
           );
           list.appendChild(row);
@@ -1746,62 +1762,7 @@
   function renderPlayer(block) {
     const key = playerKey(block);
     const cache = state.playerCache[key] || {};
-    const wrap = el("div", { class: "vstack gap-3" });
-    const grid = el("div", { class: "row g-3" });
-    const videos = [];
-    const sources = Array.isArray(block.sources) ? block.sources : [];
-
-    for (const source of sources) {
-      const saved = block.live ? {} : cache[source.key] || {};
-      const pane = el("div", { class: "card overflow-hidden min-w-0" });
-      pane.appendChild(
-        el("div", {
-          class: "card-header",
-          text: source.label || source.key || "",
-        }),
-      );
-      const video = el("video", {
-        class: "w-100 ratio-16x9 object-fit-contain",
-        controls: "controls",
-        playsinline: "",
-        preload: "metadata",
-      });
-      video.muted = Boolean(source.muted);
-      video.dataset.srcKey = source.key || "";
-      attachStream(video, source, Number(saved.t || 0));
-      const remember = () => {
-        state.playerCache[key] = state.playerCache[key] || {};
-        state.playerCache[key][source.key] = {
-          t: Number.isFinite(video.currentTime) ? video.currentTime : 0,
-        };
-      };
-      video.addEventListener("timeupdate", remember);
-      video.addEventListener("pause", remember);
-      video.addEventListener("seeked", remember);
-      const hint = el("div", { class: "fg-danger p-2", role: "status", hidden: true });
-      video.addEventListener("error", () => {
-        hint.hidden = false;
-        hint.textContent =
-          video._mpegts || video._hls
-            ? "视频加载失败：转发代理无法连上视频源"
-            : "视频无法播放（服务器转发失败）";
-      });
-      videos.push(video);
-      pane.appendChild(video);
-      pane.appendChild(hint);
-      grid.appendChild(el("div", { class: "col-12 xl:col-6" }, [pane]));
-    }
-
-    if (block.screen_missing) {
-      grid.appendChild(
-        el("div", { class: "col-12 xl:col-6" }, [
-          el("div", { class: "card p-3 fg-2", text: "该课次没有屏幕流" }),
-        ]),
-      );
-    }
-    wrap.appendChild(grid);
-
-    const bar = el("div", { class: "d-flex flex-wrap align-items-center gap-3" });
+    const wrap = el("div", { class: "block player-block vstack gap-3" });
     const finished = Boolean(block.finished);
     const live = Boolean(block.live);
     const processing = Boolean(block.processing);
@@ -1820,11 +1781,68 @@
         : processing
           ? "primary"
           : "warning";
-    const stateEl = el("span", {
-      class: `badge theme-${stateTheme}`,
-      role: "status",
-      text: stateText(),
-    });
+    const statusBar = el("div", { class: "player-status-bar" }, [
+      el("span", {
+        class: `badge theme-${stateTheme}`,
+        role: "status",
+        text: stateText(),
+      }),
+    ]);
+    wrap.appendChild(statusBar);
+
+    const grid = el("div", { class: "player-grid" });
+    const videos = [];
+    const sources = Array.isArray(block.sources) ? block.sources : [];
+
+    for (const source of sources) {
+      const saved = block.live ? {} : cache[source.key] || {};
+      const pane = el("div", { class: "card player-pane min-w-0" });
+      pane.appendChild(
+        el("div", {
+          class: "card-header",
+          text: source.label || source.key || "",
+        }),
+      );
+      const video = el("video", {
+        class: "player-video",
+        controls: "controls",
+        playsinline: "",
+        preload: "metadata",
+      });
+      video.muted = Boolean(source.muted);
+      video.dataset.srcKey = source.key || "";
+      attachStream(video, source, Number(saved.t || 0));
+      const remember = () => {
+        state.playerCache[key] = state.playerCache[key] || {};
+        state.playerCache[key][source.key] = {
+          t: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+        };
+      };
+      video.addEventListener("timeupdate", remember);
+      video.addEventListener("pause", remember);
+      video.addEventListener("seeked", remember);
+      const hint = el("div", { class: "player-hint fg-danger", role: "status", hidden: true });
+      video.addEventListener("error", () => {
+        hint.hidden = false;
+        hint.textContent =
+          video._mpegts || video._hls
+            ? "视频加载失败：转发代理无法连上视频源"
+            : "视频无法播放（服务器转发失败）";
+      });
+      videos.push(video);
+      pane.appendChild(el("div", { class: "player-stage" }, [video]));
+      pane.appendChild(hint);
+      grid.appendChild(pane);
+    }
+
+    if (block.screen_missing) {
+      const emptyPane = el("div", { class: "card player-pane min-w-0" }, [
+        el("div", { class: "card-header", text: "屏幕画面" }),
+        el("div", { class: "player-stage-empty", text: "该课次没有屏幕流" }),
+      ]);
+      grid.appendChild(emptyPane);
+    }
+    wrap.appendChild(grid);
 
     const playAll = () => {
       for (const video of videos) {
@@ -1844,8 +1862,6 @@
       playAll();
     }
 
-    bar.appendChild(stateEl);
-    wrap.appendChild(bar);
     return wrap;
   }
 
@@ -1936,7 +1952,7 @@
     }
     const collapsed = Boolean(block.collapsed) && !pending && !retained;
     const wrap = el("section", {
-      class: "qa card min-w-0",
+      class: "block qa card min-w-0",
       dataset: {
         qaId: block.id || "",
         qaPath: block.path || "",
@@ -1946,25 +1962,6 @@
     const head = el("div", {
       class: "card-header d-flex flex-row flex-wrap align-items-center gap-2",
     });
-    const toggle = el("button", {
-      class: "qa-toggle btn-text btn-icon theme-secondary btn-sm",
-      type: FIELD_INPUT.BUTTON,
-      text: collapsed ? "▸" : "▾",
-      title: "折叠 / 展开",
-    });
-    toggle.addEventListener("click", async () => {
-      toggle.disabled = true;
-      try {
-        await postAction(block.collapse_action || "reader.qa_collapse", {
-          path: block.path,
-          id: block.id,
-          collapsed: !wrap.querySelector(".qa-body").hidden,
-        });
-      } finally {
-        toggle.disabled = false;
-      }
-    });
-    head.appendChild(toggle);
     head.appendChild(el("span", { class: "badge theme-primary", text: "问" }));
     head.appendChild(
       el("span", { class: "text-break flex-grow-1 min-w-0", text: qaPreview(block.question) }),
@@ -1980,6 +1977,27 @@
           text: STATUS_LABEL.RUNNING,
         }),
       );
+    const toggle = el("button", {
+      class: "qa-toggle btn-text btn-icon theme-secondary btn-sm",
+      type: FIELD_INPUT.BUTTON,
+      title: "折叠 / 展开",
+      "aria-label": "折叠 / 展开",
+      "aria-expanded": String(!collapsed),
+    });
+    toggle.innerHTML =
+      '<svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708"/></svg>';
+    toggle.addEventListener("click", async () => {
+      toggle.disabled = true;
+      try {
+        await postAction(block.collapse_action || "reader.qa_collapse", {
+          path: block.path,
+          id: block.id,
+          collapsed: !wrap.querySelector(".qa-body").hidden,
+        });
+      } finally {
+        toggle.disabled = false;
+      }
+    });
     const remove = actionButton(
       "删除",
       block.delete_action || "reader.qa_delete",
@@ -1989,8 +2007,8 @@
     remove.title = "删除";
     remove.setAttribute("aria-label", "删除");
     remove.innerHTML =
-      '<svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708"/></svg>';
-    head.appendChild(remove);
+      '<svg width="15" height="15" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708"/></svg>';
+    head.appendChild(el("div", { class: "qa-actions" }, [toggle, remove]));
 
     const body = el("div", { class: "qa-body card-body", hidden: collapsed });
     const answerBox = el("div", {
@@ -2064,7 +2082,7 @@
     const collapsed = !retained && payload.collapsed !== false;
     node.querySelector(".qa-body").hidden = collapsed;
     const toggle = node.querySelector(".qa-toggle");
-    if (toggle) toggle.textContent = collapsed ? "▸" : "▾";
+    if (toggle) toggle.setAttribute("aria-expanded", String(!collapsed));
   }
 
   function applyQaLive(payload) {
@@ -2625,8 +2643,9 @@
       });
       const input = el("textarea", {
         class: "form-control flex-grow-1 min-w-0",
-        rows: "3",
+        rows: "2",
         "aria-label": "发送给 Agent",
+        placeholder: "输入消息给 Agent（Shift+Enter 发送）",
       });
       const send = el("button", {
         type: FIELD_INPUT.BUTTON,
@@ -2639,7 +2658,10 @@
         [input, send],
       );
       root.append(
-        el("div", { class: "d-flex flex-wrap align-items-center gap-2" }, [select, metrics]),
+        el("div", { class: "agent-toolbar d-flex flex-wrap align-items-center gap-2" }, [
+          select,
+          metrics,
+        ]),
         log,
         composer,
       );
@@ -2846,7 +2868,7 @@
         executionNumber(latest.tokens_per_second)
           ? `${latest.tokens_per_second.toFixed(1)} tok/s`
           : "tok/s unavailable",
-      ].map((text) => el("span", { text })),
+      ].map((text) => el("span", { class: "execution-metric", text })),
     );
     const rows = [];
     for (const agent of agents) {
@@ -2972,9 +2994,12 @@
     const pending = tasks.filter((task) => task.state === TASK_STATE.PENDING).length;
     const root =
       existing ||
-      el("section", { class: "block task-queue", "aria-label": "任务队列" }, [
-        el("p", { class: "queue-summary fg-2 mb-3" }),
-        renderQueue([]),
+      el("section", { class: "block card task-queue", "aria-label": "任务队列" }, [
+        el("div", { class: "card-header d-flex flex-row align-items-center justify-content-between gap-2" }, [
+          el("h3", { class: "fs-md fw-semibold mb-0", text: "任务队列" }),
+          el("span", { class: "queue-summary small fg-2" }),
+        ]),
+        el("div", { class: "card-body p-2" }, [renderQueue([])]),
       ]);
     $(".queue-summary", root).textContent =
       `${STATUS_LABEL.RUNNING} ${tasks.length - pending} 个，${STATUS_LABEL.QUEUED} ${pending} 个`;
@@ -3010,13 +3035,13 @@
     if (type === BLOCK_TYPE.AGENT_ACTIVITY) return renderAgentActivity(block);
     if (type === BLOCK_TYPE.TASK_QUEUE) return renderTaskQueue();
     if (type === BLOCK_TYPE.QUEUE)
-      return el("section", { class: "block p-3", "aria-label": block.title }, [
+      return el("section", { class: "block sidebar-section queue-panel", "aria-label": block.title }, [
         el(
           "div",
           { class: "d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3" },
           [
             el("h3", { class: "fs-md fw-semibold mb-0", text: block.title }),
-            el("span", { class: "fg-2", text: block.summary }),
+            el("span", { class: "small fg-2", text: block.summary }),
           ],
         ),
         renderQueue(block.items),
@@ -3098,8 +3123,10 @@
       ]);
     }
     if (type === BLOCK_TYPE.VIDEO) {
-      const video = el("video", { class: "w-100", controls: "controls", src: block.src });
-      return el("div", { class: "block" }, [video]);
+      const video = el("video", { class: "player-video", controls: "controls", src: block.src });
+      return el("div", { class: "block card player-pane min-w-0" }, [
+        el("div", { class: "player-stage" }, [video]),
+      ]);
     }
     if (type === BLOCK_TYPE.TABS) return el("div", { class: "block" }, [renderTabs(block)]);
     if (type === BLOCK_TYPE.PLAYER) return renderPlayer(block);
@@ -3108,10 +3135,10 @@
     if (type === BLOCK_TYPE.PROGRESS) {
       const value = Number(block.value ?? 0);
       const pct = value <= 1 ? value * 100 : value;
-      return el("div", { class: "block" }, [
-        el("div", { class: "d-flex justify-content-between small fg-2 mb-1" }, [
+      return el("div", { class: "block progress-block" }, [
+        el("div", { class: "d-flex justify-content-between small fg-2 mb-2" }, [
           el("span", { text: block.label || "进度" }),
-          el("span", { text: `${Math.round(pct)}%` }),
+          el("span", { class: "fw-semibold fg-body", text: `${Math.round(pct)}%` }),
         ]),
         el(
           "div",
@@ -3167,6 +3194,15 @@
     return THEME_MODE.SYSTEM;
   }
 
+  const THEME_ICON_PATH = Object.freeze({
+    [THEME_MODE.SYSTEM]:
+      '<path d="M8 15A7 7 0 1 0 8 1zm0 1A8 8 0 1 1 8 0a8 8 0 0 1 0 16"/>',
+    [THEME_MODE.LIGHT]:
+      '<path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6m0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8M8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0m0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13m8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2a.5.5 0 0 1 .5.5M3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8m10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0m-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0m9.193 2.121a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707M4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .708"/>',
+    [THEME_MODE.DARK]:
+      '<path d="M6 .278a.77.77 0 0 1 .08.858 7.2 7.2 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277q.792-.001 1.533-.16a.79.79 0 0 1 .81.316.73.73 0 0 1-.031.893A8.35 8.35 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.75.75 0 0 1 6 .278"/>',
+  });
+
   function applyTheme(mode) {
     const root = document.documentElement;
     if (mode === THEME_MODE.SYSTEM) {
@@ -3180,6 +3216,15 @@
       if (mode === THEME_MODE.SYSTEM) localStorage.removeItem(THEME_STORAGE_KEY);
       else localStorage.setItem(THEME_STORAGE_KEY, mode);
     } catch (_) {}
+    const btn = $("#theme-btn");
+    if (btn) {
+      const label = THEME_LABEL[mode] || THEME_LABEL[THEME_MODE.SYSTEM];
+      btn.title = `切换外观（${label}）`;
+      const textNode = btn.querySelector(".theme-btn-label");
+      if (textNode) textNode.textContent = label;
+      const svg = btn.querySelector("svg");
+      if (svg && THEME_ICON_PATH[mode]) svg.innerHTML = THEME_ICON_PATH[mode];
+    }
   }
 
   function cycleTheme() {
@@ -3430,6 +3475,7 @@
   });
 
   function bindPaletteTrigger() {
+    $("#theme-btn")?.addEventListener("click", cycleTheme);
     $("#palette-btn")?.addEventListener("click", openPalette);
     for (const button of $$("[data-drawer-target]"))
       button.addEventListener("click", () => {
@@ -3800,8 +3846,21 @@
     }
     box.hidden = false;
     box.replaceChildren(
-      el("div", { class: "fw-semibold text-break", text: context.title || "" }),
-      el("div", { class: "fg-2", text: context.subtitle || "" }),
+      el("div", { class: "context-header" }, [
+        context.state
+          ? el("span", {
+              class: "context-dot",
+              dataset: { state: context.state },
+              "aria-hidden": "true",
+            })
+          : null,
+        el("div", { class: "min-w-0 flex-grow-1" }, [
+          el("div", { class: "fw-semibold text-break", text: context.title || "" }),
+          context.subtitle
+            ? el("div", { class: "small fg-2 mt-1", text: context.subtitle })
+            : null,
+        ]),
+      ]),
     );
   }
 
@@ -3830,7 +3889,10 @@
       tabsEl.replaceChildren();
       tabsEl.hidden = true;
       toolboxEl.replaceChildren(
-        el("div", { class: "vstack gap-2 fg-2" }, [el("b", { text: "未选择课次" })]),
+        el("div", { class: "sidebar-empty" }, [
+          el("strong", { text: "未选择课次" }),
+          el("span", { class: "small fg-2", text: "请在左侧课程列表中选择一节课次" }),
+        ]),
       );
       return;
     }
@@ -3866,12 +3928,12 @@
     toolboxEl.replaceChildren();
     const current = (tabs || []).find((t) => t.id === active);
     if (!current || !(current.toolbox || []).length) {
-      toolboxEl.appendChild(el("p", { class: "fg-2", text: "这个标签页还没有工具" }));
+      toolboxEl.appendChild(el("p", { class: "fg-2 p-2", text: "这个标签页还没有工具" }));
       return;
     }
     for (const item of current.toolbox) {
       if (!(item.blocks || []).length && !item.title && !item.description && !item.page) continue;
-      const panel = el("section", { class: "mb-3" });
+      const panel = el("section", { class: "sidebar-panel" });
       const pageId = item.page || null;
       const title = item.title && item.title !== current.title ? item.title : "";
       if (title || item.description || pageId) {
@@ -3909,6 +3971,7 @@
     const pages = (state.ui.pages || []).filter(
       (p) => openIds.includes(p.id) || p.id === state.ui.active_page,
     );
+    bar.hidden = !pages.length;
     for (const page of pages) {
       const active = page.id === state.ui.active_page;
       const open = el("button", {
@@ -3919,7 +3982,7 @@
       const closeButton = page.closable
         ? el("button", {
             type: FIELD_INPUT.BUTTON,
-            class: "position-absolute end-0 top-50 translate-middle-y me-2",
+            class: "page-tab-close",
             text: "×",
             "aria-label": `关闭 ${page.title || page.id}`,
             dataset: { closePage: page.id },
@@ -3928,8 +3991,7 @@
       const tab = el(
         "div",
         {
-          class:
-            "page-tab nav-link position-relative d-flex align-items-center justify-content-center px-9",
+          class: "page-tab nav-link",
         },
         [open, closeButton],
       );
@@ -3947,6 +4009,21 @@
       }
       bar.appendChild(tab);
     }
+  }
+
+  function renderWelcomeEmpty() {
+    const logo = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    logo.setAttribute("width", "32");
+    logo.setAttribute("height", "32");
+    logo.setAttribute("viewBox", "0 0 32 32");
+    logo.setAttribute("fill", "none");
+    logo.innerHTML =
+      '<defs><linearGradient id="empty-logo-grad" x1="16" y1="3.5" x2="16" y2="28.5" gradientUnits="userSpaceOnUse"><stop offset="0%" class="brand-logo-stop-1"/><stop offset="50%" class="brand-logo-stop-2"/><stop offset="100%" class="brand-logo-stop-3"/></linearGradient></defs><g class="brand-logo-cloud"><circle cx="8.8" cy="18.8" r="5.6"/><circle cx="16" cy="13.8" r="6.8"/><circle cx="23.2" cy="18.8" r="5.4"/><rect x="8.4" y="15.2" width="15.2" height="9.2" rx="4.6"/></g><path d="M22.2 5.4C20.2 3.4 17.6 4.4 17 8.6L15 23.4C14.4 27.6 11.8 28.6 9.8 26.6" stroke="url(#empty-logo-grad)" stroke-width="3.2" stroke-linecap="round"/>';
+    return el("div", { class: "welcome-empty" }, [
+      el("div", { class: "welcome-emblem", "aria-hidden": "true" }, [logo]),
+      el("h2", { text: "未选择课次" }),
+      el("p", { text: "从左侧课程列表选择一节课次，或按 Ctrl+P 打开命令面板" }),
+    ]);
   }
 
   function renderPageContent() {
@@ -4015,10 +4092,7 @@
     }
     let complete = true;
     if (!active || !blocks) {
-      if (!samePage || !container.children.length)
-        container.replaceChildren(
-          el("div", { class: "text-center p-5" }, [el("h2", { text: "未选择课次" })]),
-        );
+      if (!samePage || !container.children.length) container.replaceChildren(renderWelcomeEmpty());
     } else complete = updateBlocks(container, blocks);
     state.pageKey = complete ? key : null;
     container.scrollTop = samePage ? scrollTop : pageSurfaces.get(active)?.scrollTop || 0;
@@ -4083,12 +4157,23 @@
         ),
       ]);
 
-    const connection = item(
-      "状态",
-      state.connected === null ? "连接中" : state.connected ? "已连接" : "连接断开",
-    );
-    $("b", connection).id = "connection";
-    $("b", connection).setAttribute("role", "status");
+    const dotClass =
+      state.connected === null
+        ? "is-connecting"
+        : state.connected
+          ? "is-connected"
+          : "is-disconnected";
+    const connection = el("li", { class: "nav-item flex-shrink-0" }, [
+      el("span", { class: "nav-link d-inline-flex align-items-center gap-2 fg-body" }, [
+        el("span", { class: `status-dot ${dotClass}`, "aria-hidden": "true" }),
+        el("span", { text: "状态" }),
+        el("b", {
+          id: "connection",
+          role: "status",
+          text: state.connected === null ? "连接中" : state.connected ? "已连接" : "连接断开",
+        }),
+      ]),
+    ]);
     items.appendChild(connection);
     items.appendChild(item("会话", shortId(session.session_id)));
     items.appendChild(item("音频", fmtSeconds(session.audio_seconds)));

@@ -1604,7 +1604,7 @@ class InputPlugin(Plugin):
         return [
             {
                 "type": BlockType.HTML,
-                "html": f"""<section class="p-3 border-bottom" aria-label="课次处理">
+                "html": f"""<section class="sidebar-section" aria-label="课次处理">
           <div class="d-flex align-items-center justify-content-between gap-2">
             <h3 class="fs-md fw-semibold mb-0">课次处理</h3>
             <span class="badge theme-{state_theme}" role="status">{escape(state_label)}</span>

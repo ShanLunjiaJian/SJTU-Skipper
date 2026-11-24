@@ -217,17 +217,46 @@ _LOGIN_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 - SJTU-Skipper</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<script src="/static/theme-boot.js"></script>
 <link rel="stylesheet" href="/static/theme.css">
 <link rel="stylesheet" href="/static/styles.css">
 </head>
-<body>
-  <main class="container min-vh-100 d-flex align-items-center justify-content-center py-4">
+<body class="login-body">
+  <main class="login-shell container min-vh-100 d-flex align-items-center justify-content-center py-4">
   <div class="row justify-content-center w-100">
   <div class="col-12 md:col-8 lg:col-5">
-  <form class="card" method="post" action="/login">
+  <form class="card login-card" method="post" action="/login">
     <div class="card-body">
-    <h1 class="h3">SJTU-Skipper</h1>
-    <p class="fg-2">请使用本地 auth.json 中配置的账号登录</p>
+    <div class="login-brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+          <defs>
+            <linearGradient id="login-logo-grad" x1="16" y1="3.5" x2="16" y2="28.5" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" class="brand-logo-stop-1"/>
+              <stop offset="50%" class="brand-logo-stop-2"/>
+              <stop offset="100%" class="brand-logo-stop-3"/>
+            </linearGradient>
+          </defs>
+          <g class="brand-logo-cloud">
+            <circle cx="8.8" cy="18.8" r="5.6"/>
+            <circle cx="16" cy="13.8" r="6.8"/>
+            <circle cx="23.2" cy="18.8" r="5.4"/>
+            <rect x="8.4" y="15.2" width="15.2" height="9.2" rx="4.6"/>
+          </g>
+          <path
+            d="M22.2 5.4C20.2 3.4 17.6 4.4 17 8.6L15 23.4C14.4 27.6 11.8 28.6 9.8 26.6"
+            stroke="url(#login-logo-grad)"
+            stroke-width="3.2"
+            stroke-linecap="round"
+          />
+        </svg>
+      </span>
+      <div>
+        <h1 class="h3 login-title mb-0">SJTU-Skipper</h1>
+        <p class="fg-2 mb-0 mt-1">请使用本地 auth.json 中配置的账号登录</p>
+      </div>
+    </div>
     {error}
     <input type="hidden" name="next" value="{next}">
     <div class="form-field">
@@ -238,7 +267,9 @@ _LOGIN_HTML = """<!doctype html>
       <label for="password">密码</label>
       <input class="form-control" id="password" name="password" type="password" autocomplete="current-password" required>
     </div>
-    <button class="btn-solid theme-primary w-100" type="submit">登录</button>
+    <div class="login-actions">
+      <button class="btn-solid theme-primary w-100" type="submit">登录</button>
+    </div>
     </div>
   </form>
   </div>
@@ -331,8 +362,10 @@ def install(app: Any, data_dir: Path) -> AuthStore:
     public = {
         "/login",
         "/favicon.ico",
+        "/static/favicon.svg",
         "/static/styles.css",
         "/static/theme.css",
+        "/static/theme-boot.js",
     }
 
     @app.middleware("http")
